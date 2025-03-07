@@ -48,6 +48,36 @@ class l1_data:
         self.lower_state = lower
 
         self.date = ''
+        
+class be_data: # beam exchange data
+    def __init__(self):
+    
+        self.wavelength = ''  # name
+        self.file = ''
+        self.wvl = ''         # wavelength array
+        self.i = ''          # i image
+        self.v = ''          # v image  
+        self.date = ''
+
+
+def calc_v_beamexchange(data):
+    v = 0.25*(1.- data.li[0,:]/data.li[1,:]*data.ui[1,:]/data.ui[0,:])
+    
+    return(v)
+
+def calc_i_beamexchange(data):
+    i = 0.25*(data.li[0,:]+data.li[1,:]+data.ui[1,:]+data.ui[0,:])  
+    return(i)
+
+def beam_exchange(data):
+    out_data = be_data()
+    out_data.wavelength = data.wavelength
+    out_data.file = data.file
+    out_data.wvl = data.wvl
+    out_data.date = data.date
+    out_data.i = calc_i_beamexchange(data)
+    out_data.v = calc_v_beamexchange(data)
+    return(out_data)
 
 def read_images_file(file_name,original=False, verbose=False):  # not needed really
     
@@ -63,6 +93,8 @@ def read_images_file(file_name,original=False, verbose=False):  # not needed rea
     # xmin=float(header['WAVEMIN']) #nm
     # xmax=float(header['WAVEMAX']) #nm
     # xlam=10.*np.arange(xmin,xmax,(xmax-xmin)/data[0,:].shape[1]) # A
+    sif_sp.close()
+    
     data = l1_data()
     data.ui =  np.zeros((pol_states,steps,int(dummy.shape[0]/pol_states/steps), int(dummy.shape[1]/2), dummy.shape[2]))
     data.li =  1.*data.ui
@@ -95,57 +127,6 @@ def find_all_files(dir_name, stokes='I'):
             
     return(filename, num)
 
-
-def read_single_stokes(dataset, scan_position=0, scan=0 ):
-    
-    if dataset.array_axis_physical_types[0][0] != 'phys.polarization.stokes':
-           print('read_single_stokes: dataset has the wrong order!')
-           
-    if dataset.array_axis_physical_types[1][2] != 'time':
-           print('read_single_stokes: dataset has the wrong order!')
-           
-    if dataset.array_axis_physical_types[2][2] != 'time':
-               print('read_single_stokes: dataset has the wrong order!')
-    
-    if dataset.array_axis_physical_types[3][0] != 'em.wl':
-           print('read_single_stokes: dataset has the wrong order!')
-    
-    xmin=dataset[:,scan,scan_position,:].headers[0]['WAVEMIN'] #nm
-    xmax=dataset[:,scan,scan_position,:].headers[0]['WAVEMAX'] #nm 
-    
-    stokes=np.array(dataset[:,scan,scan_position,:].data)
-    # stokes[1,:]=100.*stokes[1,:]
-    # stokes[2,:]=100.*stokes[2,:]
-    # stokes[3,:]=100.*stokes[3,:]
-    xlam=10.*np.arange(xmin,xmax,(xmax-xmin)/stokes[0,:].shape[0])
-    
-    if xlam.shape[0] > stokes[0,:,0].shape[0]:
-        xlam = xlam[:-1]
-    return(stokes, xlam, dataset[:,scan,scan_position,:].headers[0]) # ordering: stokes, wvl, spatial
-
-def read_single_stokes_single_scan(dataset, scan_position=0 ): # if there is only one scan
-    
-    if dataset.array_axis_physical_types[0][0] != 'phys.polarization.stokes':
-           print('read_single_stokes: dataset has the wrong order!')
-           
-    if dataset.array_axis_physical_types[1][2] != 'time':
-           print('read_single_stokes: dataset has the wrong order!')
-    
-    if dataset.array_axis_physical_types[2][0] != 'em.wl':
-           print('read_single_stokes: dataset has the wrong order!')
-    
-    xmin=dataset[:,scan_position,:].headers[0]['WAVEMIN'] #nm
-    xmax=dataset[:,scan_position,:].headers[0]['WAVEMAX'] #nm 
-    
-    stokes=np.array(dataset[:,scan_position,:].data)
-    # stokes[1,:]=100.*stokes[1,:]
-    # stokes[2,:]=100.*stokes[2,:]
-    # stokes[3,:]=100.*stokes[3,:]
-    xlam=10.*np.arange(xmin,xmax,(xmax-xmin)/stokes[0,:].shape[0])
-    
-    if xlam.shape[0] > stokes[0,:,0].shape[0]:
-        xlam = xlam[:-1]
-    return(stokes, xlam, dataset[:,scan_position,:].headers[0]) # ordering: stokes, wvl, spatial
 
 
 def add_axis(fig,ax,data, wl,label, pixel, xvis='no', yvis='no',title=None):
