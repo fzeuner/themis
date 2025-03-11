@@ -10,17 +10,21 @@ Configuration file
 
 directory = "/home/franziskaz/data/themis/"
 directory_figures = "/home/franziskaz/figures/themis/"
-line='fe' # 'sr' or 'fe'
+line='fe' # 'fe'
 
-pixel={'fe': 1} # pixel scale arcsec/pixel
-slitwidth=1 #/ [arcsec] SlitWidth  from ?        
+pixel={'fe': 0.235} # pixel scale arcsec/pixel CCD camera, THEMIS website
+slitwidth=0.5 #/ [arcsec] SlitWidth  from Marianne  
 
-
+continuum=[96,101]
 # ONLY UNCOMMENT ONE BEFORE RUNNING 
 
 #%%
 
-data_files={ 'fe': "t002_b0202_sp_20240723_081105_tc3_p045p124_shifted.fts"}
+data_files={ 'fe': "t002_b0202_sp_20240723_081105", 
+            'o': "_tc3_p045p124_shifted.fts",
+            'v_diff':"_Vdiff.fts",
+            'v_ratio':"_Vratio.fts",
+            'i':"_I.fts",}
 
 
 #%%

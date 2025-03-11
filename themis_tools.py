@@ -28,7 +28,10 @@ from scipy import ndimage
 import datasets as dst
 from tqdm import tqdm
 import matplotlib.colors as mplcolor
-import astropy.units as u
+#import astropy.units as u
+from scipy import signal
+import themis_datasets as dst
+from skimage.registration import phase_cross_correlation
 
 from matplotlib import gridspec
 
@@ -49,16 +52,17 @@ class l1_data:
 
         self.date = ''
         
-class be_data: # beam exchange data
+class v_data: #
     def __init__(self):
     
         self.wavelength = ''  # name
+        self.method = ''
         self.file = ''
         self.wvl = ''         # wavelength array
         self.i = ''          # i image
         self.v = ''          # v image  
         self.date = ''
-
+ 
 
 def calc_v_beamexchange(data):
     v = 0.25*(1.- data.li[0,:]/data.li[1,:]*data.ui[1,:]/data.ui[0,:])
@@ -70,13 +74,14 @@ def calc_i_beamexchange(data):
     return(i)
 
 def beam_exchange(data):
-    out_data = be_data()
+    out_data = v_data()
     out_data.wavelength = data.wavelength
     out_data.file = data.file
     out_data.wvl = data.wvl
     out_data.date = data.date
     out_data.i = calc_i_beamexchange(data)
     out_data.v = calc_v_beamexchange(data)
+    out_data.method = 'beam exchange'
     return(out_data)
 
 def read_images_file(file_name,original=False, verbose=False):  # not needed really
@@ -106,7 +111,209 @@ def read_images_file(file_name,original=False, verbose=False):  # not needed rea
          dummy_dummy = data_dummy[s::steps]
          data.li[i,s,:] = dummy_dummy[:,0:int(dummy.shape[1]/2),:]
          data.ui[i,s,:] = dummy_dummy[:,int(dummy.shape[1]/2):,:]
+    print('Read '+file_name)
+    if original:
+        return(dummy, header) # pol_states+scan pos, camera y, camera x (wvl)
+    else:
+      return(data, header)
+
+def find_all_files(dir_name, stokes='I'):
+    list_of_files = os.listdir(dir_name) #list of files in the current directory
+    num=0
+    filename=[]
+
+    for file in list_of_files:
+     
+       if "_"+stokes+"_" in file:  
+     
+            filename.append(file)
+           
+            num+=1
+            
+    return(filename, num)
+def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, DERIV=None, CONT=None, SHOW=2):
     
+    """
+
+
+    ;+----------------------------------------------------------------------------
+    ;
+    ; F: Cross-correlates an observed spectrum with the fts atlas - translated to python
+    ; 
+    ; Calculates the least square difference in each pixel of the spectrum
+    ; and scales in the wavelength direction. The returned vector contains the 
+    ; wavelength at each observed data point.
+    ; If no solution can be found, then try to change the scaling factors facL and facH
+    ;
+    ;
+    ; Parameter        yin : Array  containing observed data (spectrum in x direction)
+    ;
+    ; Optional parameters and KEYWORDs
+    ;                  FACL   : Lower limit of scaling factor (default 0.8)
+    ;                  FACH   : Upper limit of scaling factor (default 1.5)
+    ;                  FACS   : Scaling factor step between facL and facH  (default 0.01)
+    ;                  CUT    : Number of wavelength points to be discarded at the ([xl,xr]), default [10,10]
+    ;                  SHOW   : Shows plots 0: no plot, 1: plot final result, 2: plot all scaling steps (default 2)
+    ;                  /DERIV : Caluculates derivative of the spectrum before least square difference
+    ;                  CONT   : For broad lines such as Ca K, give the value of continuum
+    ;
+    ;-
+    ; Version  v09.02.2024
+    ;-----------------------------------------------------------------------------
+    example use in example_wavelength_calibration
+
+    """
+
+    
+    if len(xatlas) < 30:
+        print("Provide longer spectrum!")
+        return(0)
+    
+    yin/=yin.max()
+
+    yobs = np.array(yin)
+    if yobs.ndim > 1:
+        yobs = np.sum(yobs[:, :, 0, 0], axis=1)
+        
+
+
+    cut = [10, 10] if CUT is None else CUT
+    facs = 0.01 if FACS is None else FACS
+    facL = 0.8 if FACL is None else FACL
+    facH = 1.5 if FACH is None else FACH
+
+    if not isinstance(SHOW, int):
+        show = 2
+    else:
+        show = SHOW
+
+    # READ atlas data and scale them to 1
+    # data = Z3atlas(wlin, dwl, NOPLOT=True)
+    # xatlas = np.array(data[0, :])
+    # yatlas = np.array(data[1, :])
+    # yatlas /= np.max(yatlas)  # normalization atlas
+
+    sfts = len(xatlas)
+    sobs = len(yobs)
+    
+    xapix = np.arange(sfts)
+
+    yobs /= np.max(yobs[cut[0]:sobs - cut[1] +1 ])
+    if CONT is not None:
+        yobs = CONT * yobs  # normalization data
+
+    newyobs = yobs[cut[0]:sobs - cut[1] + 1]
+    snewyobs = len(newyobs)
+
+
+    # FITTING SPECTRUM, with variable scaling
+    idealshift=0
+    npts=0
+
+    correlold = 100.  # high value
+
+    if DERIV:
+            dyatlas = np.gradient(yatlas)
+
+    for fac in np.arange(facL, facH, facs):
+          
+          
+            ipobs = np.arange(fac * (snewyobs ), dtype=int)
+            #ippts = 1.*ipobs
+            nipobs = len(ipobs)
+            for j in range(nipobs):
+                           ipobs[j] = j/fac
+            ipnewyobs = interp1d(np.arange(snewyobs), newyobs, kind='cubic')(ipobs)   
+            nipnewyobs = len(ipnewyobs)
+            if DERIV:
+                dipnewyobs = np.gradient(ipnewyobs)
+            for s in range(sfts - nipnewyobs):
+                correl = 0.
+                if DERIV:
+                    correl = np.sum((dyatlas[s:(nipnewyobs + s )] - dipnewyobs)**2) / (nipnewyobs - 1)
+                else:
+                    correl = np.sum((yatlas[s:(nipnewyobs + s )] - ipnewyobs)**2) / (nipnewyobs - 1)
+                if correl < correlold:
+                    idealshift = 1*s
+                    correlold = 1.*correl
+                    idealfac = 1.*fac
+                    npts = 1*nipnewyobs
+                    ippts = 1.*ipobs
+
+            # if show > 1:
+            #     plt.figure(num=1)
+            #     plt.plot(xapix, yatlas, color='red')
+            #     plt.plot(np.arange(nipnewyobs) + idealshift, ipnewyobs)
+            #     plt.title('Z3ccspectrum - shift ')
+            #     plt.xlabel('Wavelength [px]')
+            #     plt.ylabel('I!DNormalized')
+            #     plt.show()
+
+
+
+    # CALCULATE OBSERVED WAVELENGTH RANGE
+    xobs0 = xatlas[idealshift]
+    xobs1 = xatlas[idealshift + npts - 1]
+    lambdaperpx = (xobs1 - xobs0) / (ippts[npts - 1])
+    lambda0 = xobs0 - cut[0] * lambdaperpx
+    xobs = lambda0 + np.arange(sobs) * lambdaperpx
+    
+    
+    start_index = np.argmin(abs(xobs[0]-xatlas))
+    end_index = np.argmin(abs(xobs[-1]-xatlas))
+
+    xatlas = xatlas[start_index :end_index]
+    yatlas = yatlas[start_index :end_index]
+
+    # PLOT
+    if show > 0:
+        plt.figure(num=2)
+        plt.plot(xobs, yobs, label='Observation')
+        plt.plot(xatlas, yatlas, color='red', linestyle='--',label='Reference')
+        plt.title('Z3ccspectrum - result')
+        plt.xlabel('Wavelength [A]')
+        plt.ylabel('Normalized')
+        plt.legend()
+        plt.show()
+
+    return(xobs)
+
+def read_v_file(file_name,file_i_name,original=False, i_ct = 0, verbose=False):  # not needed really
+    
+    sif_sp = fits.open(file_name, memmap=True)
+    header=sif_sp[0].header
+    steps=int(header['NBSTEP'])+1
+    
+    dummy=np.array(sif_sp[0].data)
+    if verbose:
+     print(dummy.shape)
+     print(header)
+    # xmin=float(header['WAVEMIN']) #nm
+    # xmax=float(header['WAVEMAX']) #nm
+    # xlam=10.*np.arange(xmin,xmax,(xmax-xmin)/data[0,:].shape[1]) # A
+    sif_sp.close()
+    
+    data = v_data()
+    data.v =  np.zeros((steps,int(dummy.shape[0]/steps), int(dummy.shape[1]), dummy.shape[2]))
+    data.i =  0.*data.v
+    
+    sif_sp = fits.open(file_i_name, memmap=True)
+    # header=sif_sp[0].header
+    
+    dummy_i=np.array(sif_sp[0].data)
+ 
+    sif_sp.close()
+
+    for s in range(steps):
+         dummy_dummy = dummy[s::steps]
+         data.v[s,:] = dummy_dummy[:,0:int(dummy.shape[1]),:]
+         dummy_dummy_i = dummy_i[s::steps]
+         data.i[s,:] = dummy_dummy_i[:,0:int(dummy_i.shape[1]),:]
+        
+    print('Read '+file_name + ' and '+file_i_name)
+    
+    #data.v = data.v + i_ct*data.i
+
     if original:
         return(dummy, header) # pol_states+scan pos, camera y, camera x (wvl)
     else:
@@ -127,7 +334,28 @@ def find_all_files(dir_name, stokes='I'):
             
     return(filename, num)
 
-
+def align_scans(data): # with continuum images
+    
+    template = data.i[:,0,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+    # go through all scans
+    max_x_shift=0
+    max_y_shift=0
+    mask=
+    for i in range(data.i.shape[1]):
+       img = data.i[:,i,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+       detected_shift, _, _ = phase_cross_correlation( img, template )
+       
+       max_x_shift += abs(detected_shift[0])
+       if abs(detected_shift[1]) > max_y_shift:
+           max_y_shift = abs(detected_shift[0])  
+      
+       data.i[:,i,:,:]=np.roll(np.roll(data.i[:,i,:,:], detected_shift[0], axis=0), detected_shift[1], axis=1)
+       data.v[:,i,:,:] = np.roll(np.roll(data.v[:,i,:,:], detected_shift[0], axis=0), detected_shift[1], axis=1)
+       data.i[0:htemplate,i,0:wtemplate,:] = dummy_data
+       data.v[0:htemplate,i,0:wtemplate,:] = dummy_data_v
+       template = data.i[:,i,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+       
+    return(data)
 
 def add_axis(fig,ax,data, wl,label, pixel, xvis='no', yvis='no',title=None):
     
@@ -515,6 +743,7 @@ class ff:
    self.line_file = ''  # line processing
    self.xlam_file = 'xlam'
    self.figure_dir = ''
+   self.v_file= ''
        
     
     
