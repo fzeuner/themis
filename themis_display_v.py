@@ -23,7 +23,7 @@ import qdarkstyle
 from pyqtgraph.dockarea.Dock import Dock
 from pyqtgraph.dockarea.DockArea import DockArea
 from getWidgetColors import getWidgetColors
-
+import gc
 import themis_tools as tt
 
 
@@ -428,11 +428,22 @@ def display_scan_data(data, xlam, coordinates=[0,1,0,1], title='Example'): # 4, 
     win.resize(1600,850)
     win.setWindowTitle(title)
     
-    # if len(np.array(data).shape) < 4:
-    #     data=np.zeros((4,10,500, 500))
-    #     xlam=np.arange(data.shape[2])
-    #     print('Data has the wrong dimensions!')
-    
+    if len(data.i.shape) == 3:
+        data=np.zeros((data.i.shape[0],2,data.i.shape[1], data.i.shape[2]))
+        data[:,0,:] = 1.*data.i
+        data.i = 1.*data
+
+        data[:,0,:] = 1.*data.v
+        data.v = 1.*data
+        
+        del data
+        gc.collect()
+        print('Only one scan - artifically extent to 2 scans!')
+    if len(data.i.shape) > 4:
+        data=np.zeros((10,2,10, 10))
+        data.i = 1.*data
+        data.v = 1*data
+        print('Data has wrong dimensions!')
 
     ## Create docks, place them into the window one at a time.
     ## Note that size arguments are only a suggestion; docks will still have to

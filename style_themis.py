@@ -31,7 +31,7 @@ def style_aa(zoom):
           'font.size': 10*zoom,
           'legend.fontsize': 8*zoom,
           'font.family': 'serif',
-          'font.serif': 'Nimbus Roman No9 L',  #'font.serif': 'DejaVu Sans',
+          'font.serif': 'DejaVu Sans',  #'font.serif': 'DejaVu Sans',
           'mathtext.fontset' : 'cm', 
           'xtick.labelsize': 8*zoom,
           'ytick.labelsize': 8*zoom,       

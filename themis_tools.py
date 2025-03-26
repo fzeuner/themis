@@ -21,21 +21,25 @@ from matplotlib.ticker import (NullFormatter)
 # from mpl_point_clicker import clicker
 # from mpl_interactions import zoom_factory, panhandler
 from scipy.signal import convolve2d
-from scipy.signal import windows
+from scipy.io import readsav
+import themis_datasets as dst
 from scipy.signal import medfilt
-from scipy.ndimage import gaussian_filter
-from scipy import ndimage
-import datasets as dst
 from tqdm import tqdm
 import matplotlib.colors as mplcolor
-#import astropy.units as u
-from scipy import signal
-import themis_datasets as dst
+from scipy.interpolate import interp1d
+from scipy.signal import windows
+
 from skimage.registration import phase_cross_correlation
+from scipy.ndimage import shift
 
 from matplotlib import gridspec
 
 import os
+
+# GLOBAL VARIABLES
+
+directory_atlas = '/home/zeuner/data/atlas' # on x1
+
 
 #%%
 
@@ -210,14 +214,16 @@ def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, D
     idealshift=0
     npts=0
 
-    correlold = 100.  # high value
+    correlold = 1000.  # high value
 
     if DERIV:
             dyatlas = np.gradient(yatlas)
 
     for fac in np.arange(facL, facH, facs):
           
-          
+            # if SAMPLING > 0:   # if correct sampling is already provided - does not work
+            #     fac = (xatlas[1]-xatlas[0])/SAMPLING
+                
             ipobs = np.arange(fac * (snewyobs ), dtype=int)
             #ippts = 1.*ipobs
             nipobs = len(ipobs)
@@ -334,28 +340,312 @@ def find_all_files(dir_name, stokes='I'):
             
     return(filename, num)
 
-def align_scans(data): # with continuum images
+def find_shift(reference, target):
+    # Use phase cross-correlation to find shifts
+    shifts, _, _ = phase_cross_correlation(reference, target)
+    return(shifts[0], shifts[1])
+
+def shift_image(image, y_shift, x_shift):
+    # Use scipy.ndimage.shift for subpixel accuracy
+    return(shift(image, shift=(-y_shift, -x_shift), mode='constant', cval=0))
+
+
+def plot_power_spectrum(data, zoom=1): # data: y, x
+
+    print(r'Power spectrum')
+    image=1.*data
+    # create figure
+    intmeth = 'none' # imshow integration method
+    my_dpi, fig_size_single, fig_size, params=style_aa(zoom)
+    plt.style.use('default')
+    plt.rcParams.update(params)
+    nullfmt=NullFormatter()
     
-    template = data.i[:,0,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+    fig=plt.figure(num=32) 
+    fig.clf()
+    fig.set_size_inches([fig_size_single[0], 1.5*fig_size_single[1]],forward=True)
+
+    gs = gridspec.GridSpec(2,1, height_ratios=[0.38,1] )#width_ratios=[0.25,0.25,0.25,0.25] , height_ratios=[1,1,1,1] )
+    gs.update(top=0.96, bottom=0.1,left=0.13, right=0.99, wspace=0.05, hspace=0.26)
+         
+         
+    axs=fig.add_subplot(gs[1,0]) 
+    ax0=fig.add_subplot(gs[0,0]) 
+    
+    window_x=windows.hann(image.shape[1]) 
+    window_y=windows.hann(image.shape[0]) 
+    for x in range(image.shape[0]):
+        image[x,:]*=window_x
+    for y in range(image.shape[1]):
+        image[:,y]*=window_y
+        
+
+    fs = np.fft.fftn(image)
+    fs_abs=(np.abs(np.fft.fftshift(fs))**2)
+    # fs_sz=np.shape(fs_abs)
+    # axs[0].imshow(np.log(fs_abs/np.amax(fs_abs)), cmap='jet', interpolation=intmeth, aspect='auto')
+   
+    y,x = np.indices((fs_abs.shape)) # first determine radii of all pixels
+    center=[int(np.shape(fs_abs)[0]/2),int(np.shape(fs_abs)[1]/2)]
+    r = np.sqrt((x-center[1])**2+(y-center[0])**2)    
+
+    # radius of the image.
+    r_max = int(np.floor(np.max(r)))
+
+    # ring_brightness, radius = np.histogram(r, weights=fs_abs, bins=r_max*2)
+    # ring_size, radius_1 = np.histogram(r, bins=r_max*2)
+    # #plt.plot(radius[1:], ring_brightness/ring_size)
+    # liney,= axs[1].plot(radius[1:]/np.max(radius[1:])*1./(2.*dst.pixel[dst.line]), 100*ring_brightness/ring_brightness.max(), 
+    #                     color='black', marker='.', linestyle='None') #   
+    # axs[1].set_xlabel("1/arcsec")
+    # axs[1].set_ylim(0.0000001,0.1)
+    # axs[1].set_xlim(0.2,10.1)
+    # axs[1].set_ylabel('Power [a.u]')
+    # axs[1].set_yscale('log')
+    
+    image_2=1.*data
+    fs_ = np.zeros((image_2.shape[0],int(image_2.shape[1]/2)))
+    
+    freqs = (np.fft.fftfreq(image_2.shape[1])* 1./(dst.pixel[dst.line]))[:int(image_2.shape[1]/2)]
+
+    contrast=np.zeros(image_2.shape[0])
+    for i in range(image_2.shape[0]):
+        i_m=np.mean(image_2[i,:])
+      #  max_da=np.mean(data[0,i,550,np.argsort(data[0,i,550,:])][-100:-5])
+        
+        contrast[i]=100.*np.std(image_2[i,:])/i_m
+        
+    print(r'Mean rms contrast [%]: '+str(np.mean(contrast)))
+    ax0.plot(contrast, color='black')
+    ax0.set_ylabel(r'RMS contrast [%]', labelpad=0)
+    ax0.set_xlabel("Scan position", labelpad=-0.8)
+    ax0.axhline(y=contrast.mean(), color='black',
+               linestyle="dotted", alpha=0.8, linewidth=0.8*zoom)
+    for te in range(image_2.shape[0]):
+     # if contrast[te] > contrast.mean():  
+        image_2[te,:]*=window_x
+        fs=np.fft.fftn(image_2[te,:])
+        fs_abs=np.roll((np.abs(np.fft.fftshift(fs))**2)[int(image_2.shape[1]/2):],-int(image_2.shape[1]/2))
+        fs_[te,:]=fs_abs/fs_abs.max()
+    
+    fs_=np.mean(fs_, axis=0)
+    # use only non-zero parts    
+    fs_/=fs_.mean()
+    #idx_nonzero=np.where(fs > 10e-11)
+    
+   # freq_axis=(radius[1:]/np.max(radius[1:])*1./(2.*dst.pixel[dst.line]))[idx_nonzero]
+    freq_axis=freqs#[idx_nonzero]
+  
+    liney,= axs.plot(freq_axis,fs_,  color='black', marker='.', linestyle='None') #   
+    
+    n_filtered = 111 # needs to be odd!!!
+    medi_filtered = medfilt(fs_,n_filtered)
+    
+    
+    axs.plot(freq_axis[int((n_filtered+1)):-int((n_filtered+1))],
+                medi_filtered[int((n_filtered+1)):-int((n_filtered+1))],
+                        color='blue',linestyle='solid', linewidth=2*zoom ) #   
+    
+    # gradient=np.gradient(medi_filtered[int((n_filtered+1)):-int((n_filtered+1))])
+    # axs[2].plot((radius[1:]/np.max(radius[1:])*1./(2.*dst.pixel[dst.line]))[int((n_filtered+1)):-int((n_filtered+1))],
+    #             gradient,
+    #                     color='red',linestyle='solid' )
+    
+    axs.axvline(x=1/0.58, color='red',
+               linestyle="dashed", alpha=0.8, linewidth=0.8*zoom)
+    axs.axhline(y=2e-7, color='black',
+               linestyle="dashed", alpha=0.8, linewidth=0.8*zoom)
+    axs.set_ylabel('Power [a.u]', labelpad=-1)
+    axs.set_yscale('log')
+    axs.set_ylim(0.00000001,0.01)
+    axs.set_xlim(0.1,2.1)
+    axs.set_xlabel(r"arcsec$^{-1}$",labelpad=-1)
+    #fig.show()
+
+    return(fig, fs_)
+
+
+def readpro(filename):
+
+    """ 
+    Reads a line profile from a .per file
+    Call:
+    line_ind, wvlen, StkI, StkQ, StkU, StkV = st.readpro(filename)
+    """
+    
+    from numpy import array
+
+    f = open(filename, 'r')
+
+    line_ind = []
+    wvlen = []
+    StkI = []
+    StkQ = []
+    StkU = []
+    StkV = []
+    
+    for line in f:
+        data = line.split()
+        line_ind.append(float(data[0]))
+        wvlen.append(float(data[1]))
+        StkI.append(float(data[2]))
+        StkQ.append(float(data[3]))
+        StkU.append(float(data[4]))
+        StkV.append(float(data[5]))
+
+    f.close()
+
+    line_ind = array(line_ind)
+    wvlen = array(wvlen)
+    StkI = array(StkI)
+    StkQ = array(StkQ)
+    StkU = array(StkU)
+    StkV = array(StkV)
+
+    return(line_ind, wvlen, StkI, StkQ, StkU, StkV)
+
+
+
+def writepro(filename, line_ind, wvlen, StkI, StkQ, StkU, StkV):
+    """ 
+    Routine that writes the Stokes profiles into a SIR formatted Stokes file.
+    Call:
+    writepro(filename, line_ind, wvlen, StkI, StkQ, StkU, StkV)
+    """
+
+    f = open(filename, "w+")
+
+    for k in range(0, len(line_ind)):
+        f.write('     {0}   {1:> 10.4f}  {2:> 8.6e} {3:> 8.6e} {4:> 8.6e} {5:> 8.6e} \n'.format(line_ind[k], wvlen[k], StkI[k], StkQ[k], StkU[k], StkV[k]))
+
+    f.close()
+
+    return()
+
+
+def align_scans(data): # with continuum images
+
+    reference_v = 1.*data.v[:,0,:, 163:166].mean(axis=2)#dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+    reference_i = 1.*data.i[:,0,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
     # go through all scans
-    max_x_shift=0
-    max_y_shift=0
-    mask=
-    for i in range(data.i.shape[1]):
-       img = data.i[:,i,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
-       detected_shift, _, _ = phase_cross_correlation( img, template )
+
+    mask=np.ma.make_mask(data.i)
+    current_image_i = 1.*reference_i
+    current_image_v = 1.*reference_v
+    for i in range(1, data.i.shape[1]):
+       target_v = 1.*data.v[:,i,:,  163:166].mean(axis=2)#dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+       target_i = 1.*data.i[:,i,:,  dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+       y_shift_i, x_shift_i = find_shift(current_image_i, target_i)
+       y_shift_v, x_shift_v = find_shift(current_image_v, target_v)
+       print(i)
+       print(y_shift_i, x_shift_i)
+       print(y_shift_v, x_shift_v)
        
-       max_x_shift += abs(detected_shift[0])
-       if abs(detected_shift[1]) > max_y_shift:
-           max_y_shift = abs(detected_shift[0])  
-      
-       data.i[:,i,:,:]=np.roll(np.roll(data.i[:,i,:,:], detected_shift[0], axis=0), detected_shift[1], axis=1)
-       data.v[:,i,:,:] = np.roll(np.roll(data.v[:,i,:,:], detected_shift[0], axis=0), detected_shift[1], axis=1)
-       data.i[0:htemplate,i,0:wtemplate,:] = dummy_data
-       data.v[0:htemplate,i,0:wtemplate,:] = dummy_data_v
-       template = data.i[:,i,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+       # decide how to apply shift
+       if abs((abs(y_shift_i)-abs(y_shift_v)) < 2): 
+          if abs((y_shift_i-y_shift_v) > 2):
+              reference = 1.*data.v[:,i-2,:, 163:166].mean(axis=2)
+              y_shift, x_shift_d = find_shift(reference, target_v)
+              print('Exception 1')
+              print(y_shift, x_shift_d)
+          else:
+            y_shift = 0.5*(y_shift_i+y_shift_v)
+       else:
+           if abs(y_shift_i)>5 or abs(y_shift_v)>5:
+             if abs(y_shift_i-y_shift_v)>5:
+               reference = 1.*data.v[:,i-2,:, 163:166].mean(axis=2)
+               y_shift, x_shift_d = find_shift(reference, target_v)
+               print('Exception 1')
+               print(y_shift, x_shift_d)
+             else:
+               if abs(y_shift_i) < abs(y_shift_v):      
+                 y_shift = y_shift_i
+               else:
+                 y_shift = y_shift_v  
+           else:
+              reference = 1.*data.v[:,i-2,:, 163:166].mean(axis=2)
+              y_shift, x_shift_d = find_shift(reference, target_v)
+              print('Exception 1')
+              print(y_shift, x_shift_d)
+       
+       if abs((abs(x_shift_i)-abs(x_shift_v)) < 2): 
+           if abs((x_shift_i-x_shift_v) > 2):
+               reference = 1.*data.v[:,i-2,:, 163:166].mean(axis=2)
+               y_shift, x_shift_d = find_shift(reference, target_v)
+               print('Exception 2')
+               print(y_shift, x_shift_d)
+           else:
+            x_shift = 0.5*(x_shift_i+x_shift_v)
+       else:
+            if abs(x_shift_i)>5 or abs(x_shift_v)>5:
+             if abs(x_shift_i-x_shift_v)>5:
+                reference = 1.*data.v[:,i-2,:, 163:166].mean(axis=2)
+                y_shift_d, x_shift = find_shift(reference, target_v)
+                print('Exception 2')
+                print(y_shift_d, x_shift)
+             else:
+              if abs(x_shift_i) < abs(x_shift_v):      
+                x_shift = x_shift_i
+              else:
+                x_shift = x_shift_v  
+              
+            else:
+               reference = 1.*data.v[:,i-2,:, 163:166].mean(axis=2)
+               y_shift_d, x_shift = find_shift(reference, target_v)
+               print('Exception 2')
+               print(y_shift_d, x_shift)
+           
+       aligned_image_i = shift_image(target_i, -y_shift, -x_shift)
+       
+       aligned_image_v = shift_image(target_v, -y_shift, -x_shift)
+       
+       
+       for w in range(data.i.shape[3]):
+           data.i[:,i,:,w]=shift_image(data.i[:,i,:,w], -y_shift, -x_shift)
+           data.v[:,i,:,w]=shift_image(data.v[:,i,:,w], -y_shift, -x_shift)
+  
+    current_image_i = 1.*aligned_image_i  # Update reference to the latest aligned image
+    current_image_v = 1.*aligned_image_v  # Update reference to the latest aligned image
+    # second iteration:
+    # reference = 1.*data.i[:,0,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+    # current_image = 1.*reference
+    # for i in range(1, data.i.shape[1]):
+    #    target = 1.*data.i[:,i,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+    #    y_shift, x_shift = find_shift(current_image, target)
+    #    print(y_shift, x_shift)
+       
+    #    if (abs(y_shift) > 5) or (abs(x_shift) > 5): 
+    #        reference = 1.*data.i[:,i-2,:, dst.continuum[0]:dst.continuum[1]].mean(axis=2)
+    #        y_shift, x_shift = find_shift(reference, target)
+    #        print(y_shift, x_shift)
+           
+    #    aligned_image = shift_image(target, -y_shift, -x_shift)
+       
+       
+    #    for w in range(data.i.shape[3]):
+    #        data.i[:,i,:,w]=shift_image(data.i[:,i,:,w], -y_shift, -x_shift)
+    #        data.v[:,i,:,w]=shift_image(data.v[:,i,:,w], -y_shift, -x_shift)
        
     return(data)
+
+def binning(data, binning = [1,1,1,1]):
+    
+    if binning[0] > 1:
+        print('not implemented yet')
+    if binning[3] > 1:
+        print('not implemented yet')
+    if binning[1] > 1 or binning[2] > 1:
+        
+      kernel = np.ones((binning[1],binning[2]))/(binning[1]*binning[2])
+        
+      for w in range(data.i.shape[3]):
+          for s in range(data.i.shape[0]):
+            data.v[s,:data.i.shape[1]-binning[1]+1,:data.i.shape[2]-binning[2]+1,w] = convolve2d(data.v[s,:,:,w], kernel, 'valid')
+            data.i[s,:data.i.shape[1]-binning[1]+1,:data.i.shape[2]-binning[2]+1,w] = convolve2d(data.i[s,:,:,w], kernel, 'valid')
+    
+    return(data)
+
+
 
 def add_axis(fig,ax,data, wl,label, pixel, xvis='no', yvis='no',title=None):
     
@@ -400,6 +690,88 @@ def add_axis(fig,ax,data, wl,label, pixel, xvis='no', yvis='no',title=None):
    return(ax)
 
 
+def read_fts5(wl_start, wl_end): # wavelenght start and end in Angstroem
+
+     # -- fts data
+    file_fts5 = directory_atlas+'/fts5.sav'
+        
+    s =  readsav(file_fts5 , verbose=False,python_dict=True)
+
+    wavelength=s['w']      # wavelength (Å)
+    fts_i=s['b'] 	       # I/Ic
+    fts_v=s['vi'] 	       # Stokes V/Ic (unsmoothed, recommended)
+
+    s_idx =  np.argmin(abs(wavelength-wl_start))  # in Angstrom
+    e_idx = np.argmin(abs(wavelength-wl_end))     # in Angstrom
+
+    wavelength = wavelength[s_idx-1:e_idx]
+    fts_i = fts_i[s_idx-1:e_idx]
+    fts_v = fts_v[s_idx-1:e_idx]
+    
+    print("read_fts: Only working for start wavelength below 6906 and above 5253.8")
+    return(wavelength, fts_i, fts_v)
+
+def dummy_binning(data, binning=[1,1]):
+    kernel = np.ones((binning[0],binning[1]))/(binning[0]*binning[1])
+    data_dummy = 0.*data
+    for i in range(data.shape[2]):
+     conv_data = 1.*convolve2d(data[:,:,i], kernel, 'valid')
+     data_dummy[:conv_data.shape[0],:conv_data.shape[1],i] = conv_data
+    return(data_dummy)
+    
+
+def check_continuum_noise(data): # stokes V in continuum only
+    
+    zoom=2
+    my_dpi, fig_size_single, fig_size, params=style_aa(zoom)
+    plt.style.use('default')
+    plt.rcParams.update(params)
+    nullfmt=NullFormatter()
+
+    fig=plt.figure(num=89) 
+    fig.clf()
+    fig.set_size_inches([fig_size_single[0], fig_size_single[1]],forward=True)
+
+    gs = gridspec.GridSpec(1,1, )#width_ratios=[0.25,0.25,0.25,0.25] , height_ratios=[1,1,1,1] )
+    gs.update(top=0.96, bottom=0.2,left=0.15, right=0.99, wspace=0.05, hspace=0.26)
+         
+    ax=fig.add_subplot(gs[0,0]) 
+    
+    #use standard deviation along slit 
+    initial_noise = np.mean(np.std(data, axis=2))
+    
+    
+    ideal_binned_noise = []
+    
+    binned_noise = []
+    
+    binning_x = []
+    binning_x.append(1)
+    
+    ideal_binned_noise.append(initial_noise)
+    binned_noise.append(initial_noise)
+    
+    
+    for i in range(1,data.shape[0]-2):
+        for p in range(1,data.shape[1]-2):
+            binning_x.append((i)*(p))
+            ideal_binned_noise.append(initial_noise/np.sqrt((i)*(p)))
+            __dummy = np.mean(np.std(dummy_binning(data, binning=[i,p]), axis=2))
+            binned_noise.append(__dummy)
+            
+    
+    binning_x = np.array(binning_x)
+    binned_noise = np.array(binned_noise)
+    ideal_binned_noise = np.array(ideal_binned_noise)
+    sort = np.argsort(binning_x)
+    
+    # print(binning_x.shape, binned_noise.shape, ideal_binned_noise.shape)
+    ax.plot(binning_x[sort],100*ideal_binned_noise[sort], label = 'theoretical V noise')
+    ax.plot(binning_x[sort],100*binned_noise[sort], label = 'V continuum noise')
+    ax.set_xlabel('# pixel binned')
+    ax.set_ylabel('noise [%]')
+    ax.legend()
+    return(0)
 def add_scan_axis(fig,ax,data, label, stokes =False, clim=[0,0], xvis='no', yvis='no', x_offset=0, title=None, total=False):
     
    if stokes:  
@@ -509,69 +881,7 @@ def add_axis_contour(fig, ax, data, data2, threshold, zoom, wl,label, pixel, xvi
    ax.contour(data2, threshold, colors='magenta', origin='lower', extent=extent, linewidths= linewidth_contour, alpha=alpha_value)
    return(ax)
 
-def add_axis_scan_contour(fig, ax, data, data2, threshold,label, stokes=False, zoom=1,clim=[0,0], xvis='no', yvis='no',x_offset=0, title=None, total=False):
-    
-    if stokes:  
-     if total:
-         cdict = {'red':   ((0.0, 0.0, 0.0), (0.25, 1.0, 1.0), (0.75,1.0,1.0), (1.0,1.0,1.0)),
-                 'green': ((0.0, 0.0, 0.0),  (0.25, 1.0, 1.0), (0.75,0.0,0.0), (1.0,1.0,1.0)),
-                 'blue':  ((0.0, 1.0, 1.0),  (0.25, 0.0, 0.0), (0.75,0.0,0.0), (1.0,1.0,1.0))}
-     else:
 
-      cdict = {'red':  ((0.0, 0.0, 0.0), (0.25, 0.0, 0.0), (0.5, 1.0, 1.0), (0.75,1.0,1.0)  , (1.0,1.0,1.0)),
-              'green': ((0.0, 1.0, 1.0), (0.25, 0.0, 0.0), (0.5, 1.0, 1.0), (0.75,0.75,0.75), (1.0,0.0,1.0)),
-              'blue':  ((0.0, 0.0, 0.0), (0.25, 1.0, 1.0), (0.5, 1.0, 1.0), (0.75,0.0,0.0)  , (1.0,0.0,0.0))}
-
-     p_cmap = mplcolor.LinearSegmentedColormap('p_colormap',cdict,256)    
-     
-    else: 
-        p_cmap='gray'
-     
-    ax.cla()
-    intmeth = 'none' # imshow integration method
-    dmin,dmax=np.percentile(data.flatten(),(0.5,99.5))
-    mn=np.mean(data)
-    fct=np.mean(data)/mn
-    
-    image_sz=np.array(data.shape)
-    linewidth_contour=1.2*zoom
-    alpha_value=0.7
-    
-    clim_plot=[fct*dmin,fct*dmax]
-    if abs(clim[0] - clim[1]) > 10e-8:
-        clim_plot=clim
-    
-    extent=[0,image_sz[1]*dst.pixel[dst.line],0,image_sz[0]*dst.slitwidth]
-
-    if title != None:
-        ax.set_title(title)
-    
-    im=ax.imshow(data, cmap=p_cmap,origin='lower',\
-    interpolation=intmeth,clim=clim_plot, 
-    extent=extent, aspect='auto')#
-        
-    #Plot color bar   
-    cb=fig.colorbar(im,ax=ax, orientation="vertical")
-    cb.ax.minorticks_on()
-    cb.set_label(label)
-    
-    if xvis == 'no':
-        ax.get_xaxis().set_visible(False)
-    else:
-        ax.get_xaxis().set_visible(True)
-        if xvis != 'yes':         
-            ax.set_xlabel(xvis, labelpad=-0.1)  
-    if yvis == 'no':
-        ax.get_yaxis().set_visible(False)
-    else:
-        ax.get_yaxis().set_visible(True)
-        if yvis != 'yes':         
-            ax.set_ylabel(yvis, labelpad=-0.1)  
-   
-    
-    ax.contour(data2, threshold, colors=('black','green','darkviolet','green', 'cyan' ), origin='lower', extent=extent, linewidths= linewidth_contour, alpha=alpha_value)
-
-    return(ax)
  
 
 def plot_stokes_simple(data, wl, pixel=1,zoom=1, fnum=0, label_up = False, title=None, save_figure=[False,'None',__file__]):
@@ -694,8 +1004,23 @@ def plot_scan_images(data, wl_idx, zoom=2, fnum=0, binning= [1,1,1], clim=[0,0],
     fig2.show() 
     return(fig)
 
+def add_noise_to_profiles(file, noise): # gaussian noise
+    
+    line_ind, wvlen, StkI, StkQ, StkU, StkV = readpro(file)
+    noise_v = np.random.normal(0.0, noise, StkV.shape[0])
+    noise_q = np.random.normal(0.0, noise, StkQ.shape[0])
+    noise_u = np.random.normal(0.0, noise, StkU.shape[0])
 
-
+    print('max SNR Q: '+str(max(StkQ)/noise))
+    print('max SNR U: '+str(max(StkU)/noise))
+    print('max SNR V: '+str(max(StkV)/noise))
+    
+    filename_without_ext = os.path.splitext(os.path.basename(file))[0]
+    dirname, fname = os.path.split(file)
+    
+    writepro(dirname+'/'+filename_without_ext+'_n.per',line_ind, wvlen, StkI, StkQ+noise_q, StkU+noise_u, StkV+noise_v)
+        
+    return(0)
 
 
 
@@ -735,17 +1060,126 @@ class ff:
     # Class object to store folder and file names
  def __init__(self):
          
-   self.directory = ''
-   self.vbi_directory = ''
-   self.co_file = ''
-   self.red_data_file = ''
-   self.date = ''
-   self.line_file = ''  # line processing
-   self.xlam_file = 'xlam'
-   self.figure_dir = ''
-   self.v_file= ''
+   self.directory = dst.directory
+   self.inversion_dir = dst.directory + dst.directory_inversion
+   self.inversion_inp_ext = '_inv_inp.fits'
+   self.inv_inp_data_file = 'obs_prof_'+ dst.data_files[dst.line] # compliant with SIRExplorer
+   self.red_data_file = dst.directory + dst.data_files[dst.line]+dst.data_files['r']
+   self.figure_dir = dst.directory_figures
+   self.v_file= dst.directory + dst.data_files[dst.line]+dst.data_files['v_i']
+   self.i_file= dst.directory + dst.data_files[dst.line]+dst.data_files['i']
        
+# def process_data(data, xlam, pca=False,  #data is a scan_pos, Y, wavelength
+#                              continuum=False):
+         
     
+    
+#     if background: 
+#          data = denoise(data) 
+         
+#     if continuum:
+#          data = continuum_correction(data, xlam, dst.continuum[dst.line])
+         
+#     return(data)
+    
+
+def save_inv_input_data(data, xlam,ff,scan, overwrite = True):
+    
+    hdr = fits.Header()
+    hdr.set('RED_ROUT',  'themis/save_reduced_data', comment='Code used for reduction')
+    
+    primary_hdu = fits.PrimaryHDU(data, header=hdr)
+    hdul = fits.HDUList(
+        [primary_hdu])
+    
+    inv_inp_data_file= ff.inversion_dir + ff.inv_inp_data_file +'_{:.0f}'.format(scan) + '.fits'
+    
+    if os.path.basename(inv_inp_data_file) in os.listdir(ff.inversion_dir):
+        if overwrite:
+          hdul.writeto( inv_inp_data_file, overwrite=True)
+    else:
+        hdul.writeto(inv_inp_data_file, overwrite=True)
+    print('Inverison input data file created: \n '+inv_inp_data_file)
+    return()
+
+
+def write_wht_file(xlam, directory):
+    file=open(directory+'profiles.wht','w')
+    for x in xlam:
+       file.write(str(1)+'   {:>4.3f}'.format(x)+'    {:>1.3f}'.format(1)+'   {:>1.3f}'.format(0)+'    {:>1.3f}'.format(0)+'   {:>1.3f}'.format(1)+'\n')
+    file.close()
+    print('.wht file written')
+
+def process_data_for_inversion(data,  scan=0, ff_p =ff,  
+                                             align = True,
+                                             wl_calibration = True,
+                                             binning =  1, # scan pos, scan, x along slit, wavelength
+                                             mask = True,
+                                             pca = True,
+                                             continuum = True,  # correct continuum: intensity/I_c, V - V_c
+                                             cut=True, 
+                                             test = False, debug = False, save = True): #only one scan at a time
+    
+
+    if binning == 1:
+       print("process_dataset: Processing data \n"+ff_p.v_file)
+    else:
+       print("process_dataset: Processing data \n"+ff_p.v_file+' \n with binning '+ str(binning)+'scans')
+    print('----------------------')
+    
+    # figure out if it is a single scan
+    single_scan=False
+    if len(data.i.shape) == 3: 
+       single_scan = True
+       print('process_dataset: There is only one scan in the data. \n')
+    if not single_scan:   
+       # mask tellurics
+        for tel in range(2):
+         data.i[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -1
+         data.v[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -1
+
+        
+        i_c = data.i[:,:,20:-20,dst.continuum[0]:dst.continuum[1]].mean(axis=3)
+        i_c = i_c.max()
+        
+        if continuum:
+            data.i /= i_c
+            for i in range(data.v.shape[0]):
+               for m in range(data.v.shape[1]):
+                 for n in range(data.v.shape[2]):
+                     data.v[i,m,:,n] -= data.v[i,m,n,dst.continuum[0]:dst.continuum[1]].mean()
+        
+        if cut:
+               data.i = data.i[dst.yroi[0]:dst.yroi[1],:,dst.roi[0]:dst.roi[1],dst.sroi[0]:dst.sroi[1]]
+               data.v = data.v[dst.yroi[0]:dst.yroi[1],:,dst.roi[0]:dst.roi[1],dst.sroi[0]:dst.sroi[1]]
+
+               if continuum:
+                    data.i /= data.i.max()    
+                            
+        reduced_data = np.zeros((data.i.shape[3], 4, data.i.shape[0], data.i.shape[2] ) ) 
+        # stokes, wvl, x, y
+        xlam = 1000*(np.arange( data.i.shape[3]) - dst.line_core+dst.sroi[0])*dst.spectral_sampling # to be used in the wavelength grid for SIR
+        print('According to the parameters in themis_datasets:'+'\n'+\
+              'start wavelength [mA]: '+str(xlam[0]) +'\n' + \
+              'wl step [mA]: '+str(1000*dst.spectral_sampling)+'\n' + \
+               'end wavelength [mA]: '+str(xlam[-1]) +'\n'  )
+        if wl_calibration:
+            wl_reference, ref_spectrum, _ = read_fts5(6299, 6305)
+            spectrum = data.i.mean(axis=(0,1,2))
+            spectrum/=spectrum.max()
+            xlam = z3ccspectrum(spectrum,  wl_reference, ref_spectrum, FACL=0.8, FACH=1.5, FACS=0.005, 
+                                   CUT=[10,20], DERIV=None, CONT=1.01, SHOW=2)
+            
+        for i in range(reduced_data.shape[0]):
+            for m in range(reduced_data.shape[2]):
+              reduced_data[i,0, m,:] = data.i[m,scan,:,i]
+              
+              reduced_data[i,3,m,:] = data.v[m,scan,:,i]
+        if save:
+            
+            save_inv_input_data(reduced_data, xlam,ff_p, scan, overwrite = True)
+   
+    return(reduced_data, xlam, ff_p)    
     
     
     
