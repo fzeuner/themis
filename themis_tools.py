@@ -7,19 +7,16 @@ Created on Wed Mar 05 2025
 
 This toolbox contains useful functions
 
-Version: 2025-3-05
+Version: 2025-3-27
 """
 
-from astropy.time import Time
 
-#from sunpy.net import Fido, attrs as a
 import matplotlib.pyplot as plt
 from astropy.io import fits 
 import numpy as np
 from style_themis import style_aa
 from matplotlib.ticker import (NullFormatter)
-# from mpl_point_clicker import clicker
-# from mpl_interactions import zoom_factory, panhandler
+
 from scipy.signal import convolve2d
 from scipy.io import readsav
 import themis_datasets as dst
@@ -33,7 +30,8 @@ from skimage.registration import phase_cross_correlation
 from scipy.ndimage import shift
 
 from matplotlib import gridspec
-
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 import os
 
 # GLOBAL VARIABLES
@@ -121,20 +119,6 @@ def read_images_file(file_name,original=False, verbose=False):  # not needed rea
     else:
       return(data, header)
 
-def find_all_files(dir_name, stokes='I'):
-    list_of_files = os.listdir(dir_name) #list of files in the current directory
-    num=0
-    filename=[]
-
-    for file in list_of_files:
-     
-       if "_"+stokes+"_" in file:  
-     
-            filename.append(file)
-           
-            num+=1
-            
-    return(filename, num)
 def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, DERIV=None, CONT=None, SHOW=2):
     
     """
@@ -325,20 +309,6 @@ def read_v_file(file_name,file_i_name,original=False, i_ct = 0, verbose=False): 
     else:
       return(data, header)
 
-def find_all_files(dir_name, stokes='I'):
-    list_of_files = os.listdir(dir_name) #list of files in the current directory
-    num=0
-    filename=[]
-
-    for file in list_of_files:
-     
-       if "_"+stokes+"_" in file:  
-     
-            filename.append(file)
-           
-            num+=1
-            
-    return(filename, num)
 
 def find_shift(reference, target):
     # Use phase cross-correlation to find shifts
@@ -463,6 +433,48 @@ def plot_power_spectrum(data, zoom=1): # data: y, x
     #fig.show()
 
     return(fig, fs_)
+
+def run_pca(data, n_components):
+    X = data
+    sc = StandardScaler()
+    X = X.reshape((X.shape[0]*X.shape[1], X.shape[2],X.shape[3]))
+
+    dummy=np.zeros((X.shape[1],X.shape[0],X.shape[2]))
+
+    for i in range(dummy.shape[1]):
+        dummy[:,i,:]=1.*X[i,:,:]
+
+    X=1.*dummy.reshape(dummy.shape[0], dummy.shape[1]*dummy.shape[2])
+    for i in range(X.shape[0]):
+        X[i,:]=X[i,:]-np.mean(X[i,:])
+    
+    
+    #X = sc.fit_transform(X)
+    pca = PCA(n_components=n_components)
+    pca.fit(X)
+    pca.transform(X)
+    
+    transformed = pca.fit_transform(X)
+    inverted = pca.inverse_transform(transformed)
+    print(pca.explained_variance_ratio_)
+    
+    return(pca,transformed, inverted)
+
+def run_pca_s(data, n_components): # data is already wvl,observations
+    X = data
+    #sc = StandardScaler()
+    
+    #X = sc.fit_transform(X)
+    pca = PCA(n_components=n_components)
+    pca.fit(X)
+    pca.transform(X)
+    
+    transformed = pca.fit_transform(X)
+    inverted = pca.inverse_transform(transformed)
+    print('Explained variances by PCA components:')
+    print(pca.explained_variance_ratio_)
+    
+    return(pca,transformed, inverted)
 
 
 def readpro(filename):
@@ -1025,35 +1037,6 @@ def add_noise_to_profiles(file, noise): # gaussian noise
 
 
 
-def plot_stokes_contours(data, threshold, wl, pixel=1,zoom=1, fnum=0, title=None, save_figure=[False,'None',__file__]):
-    
-    plt.close(fnum)
-    my_dpi, fig_size_single, fig_size, params=style_aa(zoom)
-    plt.style.use('default')
-    plt.rcParams.update(params)
-    nullfmt=NullFormatter()
-    
-    fig, axs = plt.subplots(4,constrained_layout=True, num=3)
-    fig.set_size_inches(fig_size,forward=True)
-    
-    stokes_str=[r'$I$',r'$Q/I$ [$\%$]',r'$U/I$ [$\%$]',r'$V/I$ [$\%$]']
-    titles=[title, None, None, None]
-    yvis=[r'Wavelength $[\mathrm{\AA}]$', r'Wavelength $[\mathrm{\AA}]$', r'Wavelength $[\mathrm{\AA}]$', r'Wavelength $[\mathrm{\AA}]$']
-    #yvis=[r'arcsec', r'arcsec',r'arcsec', r'arcsec']
-    xvis=[r'no', r'no',r'no', r'pixel']
-    data2=data[0,:] # reference    
-    for i,s in enumerate(stokes_str):
-        ax=add_axis_contour(fig,axs[i],data[i,:], data2, threshold, zoom, wl,s, pixel,xvis=xvis[i], yvis=yvis[i], title=titles[i])
-        # if i ==2:
-        #     ax.contour(data[2,:], np.arange(0.2,0.35, 0.1), colors='red', origin='upper', alpha=0.5)
-    fig.show()
-    
-    if save_figure[0]:
-        
-       fig.savefig(save_figure[1], 
-              dpi=my_dpi, metadata={'Software': save_figure[2]})
-    return(fig)
-
 
 
 class ff:
@@ -1107,15 +1090,31 @@ def write_wht_file(xlam, directory):
     file=open(directory+'profiles.wht','w')
     for x in xlam:
        file.write(str(1)+'   {:>4.3f}'.format(x)+'    {:>1.3f}'.format(1)+'   {:>1.3f}'.format(0)+'    {:>1.3f}'.format(0)+'   {:>1.3f}'.format(1)+'\n')
+   # correction_second_line = (dst.line_core[1]-dst.line_core[0])*dst.spectral_sampling
+   # for x in xlam:
+   #    file.write(str(2)+'   {:>4.3f}'.format(x+correction_second_line)+'    {:>1.3f}'.format(1)+'   {:>1.3f}'.format(0)+'    {:>1.3f}'.format(0)+'   {:>1.3f}'.format(1)+'\n')
+
     file.close()
+    
     print('.wht file written')
+    
+def prep_data_for_pca(data):
+    # prepare data for PCA - first dimension is wavelength << other dimension
+    # print(data.shape)
+    if len(data.shape) == 3:
+        data_prep =data.reshape((data.shape[0], data.shape[1]*data.shape[2]))
+    else:
+        print('Data for PCA has the wrong dimensions')
+        data_prep = 0
+    mean = np.mean(data_prep)
+    data_prep-=mean
+    return(data_prep, mean)
 
 def process_data_for_inversion(data,  scan=0, ff_p =ff,  
-                                             align = True,
                                              wl_calibration = True,
                                              binning =  1, # scan pos, scan, x along slit, wavelength
                                              mask = True,
-                                             pca = True,
+                                             pca = 0,  # define number of pca components
                                              continuum = True,  # correct continuum: intensity/I_c, V - V_c
                                              cut=True, 
                                              test = False, debug = False, save = True): #only one scan at a time
@@ -1136,7 +1135,7 @@ def process_data_for_inversion(data,  scan=0, ff_p =ff,
        # mask tellurics
         for tel in range(2):
          data.i[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -1
-         data.v[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -1
+         data.v[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = 0.0 # 
 
         
         i_c = data.i[:,:,20:-20,dst.continuum[0]:dst.continuum[1]].mean(axis=3)
@@ -1158,7 +1157,8 @@ def process_data_for_inversion(data,  scan=0, ff_p =ff,
                             
         reduced_data = np.zeros((data.i.shape[3], 4, data.i.shape[0], data.i.shape[2] ) ) 
         # stokes, wvl, x, y
-        xlam = 1000*(np.arange( data.i.shape[3]) - dst.line_core+dst.sroi[0])*dst.spectral_sampling # to be used in the wavelength grid for SIR
+        xlam = 1000*(np.arange( data.i.shape[3]) - dst.line_core[0]+dst.sroi[0])*dst.spectral_sampling # to be used in the wavelength grid for SIR
+        
         print('According to the parameters in themis_datasets:'+'\n'+\
               'start wavelength [mA]: '+str(xlam[0]) +'\n' + \
               'wl step [mA]: '+str(1000*dst.spectral_sampling)+'\n' + \
@@ -1175,10 +1175,27 @@ def process_data_for_inversion(data,  scan=0, ff_p =ff,
               reduced_data[i,0, m,:] = data.i[m,scan,:,i]
               
               reduced_data[i,3,m,:] = data.v[m,scan,:,i]
+              
+        if pca > 0:
+            data_line_1, mean_1=prep_data_for_pca(reduced_data[int(reduced_data.shape[0]/2):,3, :])
+            data_line_2, mean_2=prep_data_for_pca(reduced_data[:int(reduced_data.shape[0]/2),3, :])
+            
+            pca_line_1, transformed_line_1, inverted_line_1 = run_pca_s(data_line_1, pca)
+            pca_line_2, transformed_line_2, inverted_line_2 = run_pca_s(data_line_2, pca)
+            
+            X_pca_1 = pca_line_1.transform(data_line_1)
+            X_reconstructed_1 = pca_line_1.inverse_transform(X_pca_1) + mean_1
+            
+            X_pca_2 = pca_line_2.transform(data_line_2)
+            X_reconstructed_2 = pca_line_2.inverse_transform(X_pca_2) + mean_2
+
+            reduced_data[int(reduced_data.shape[0]/2):,3,:] = X_reconstructed_1.reshape((int(reduced_data.shape[0]/2),reduced_data.shape[2],reduced_data.shape[3]))
+            reduced_data[:int(reduced_data.shape[0]/2),3,:] = X_reconstructed_2.reshape((int(reduced_data.shape[0]/2),reduced_data.shape[2],reduced_data.shape[3]))
+  
         if save:
             
             save_inv_input_data(reduced_data, xlam,ff_p, scan, overwrite = True)
-   
+        
     return(reduced_data, xlam, ff_p)    
     
     

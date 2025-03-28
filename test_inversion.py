@@ -37,10 +37,9 @@ data, header = tt.read_v_file(ff.v_file, ff.i_file)
 #%%
 
 reduced_data, xlam, ff_p =  tt.process_data_for_inversion(data,  scan=0, ff_p =ff,  
-                                             align = False,
                                              wl_calibration = False,
                                              binning =  1, # scan binning
-                                             mask = True,
+                                             mask = False,
                                              pca = False,
                                              continuum = True,  # correct continuum: intensity/I_c, V - V_c
                                              cut=True, 
@@ -48,6 +47,6 @@ reduced_data, xlam, ff_p =  tt.process_data_for_inversion(data,  scan=0, ff_p =f
 
 #tt.write_wht_file(xlam, '/home/zeuner/data/themis/inversion/test_parallel/run_files/')
 #%%
-# test adding noise to profile
+# test adding noise to profile for SIR inversion
 
 _ = tt.add_noise_to_profiles(ff.inversion_dir+'test/bincl1.per', 0.05)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Tue Nov  5 15:52:55 2024
+Created on Tue Mar 3 11:52:55 2025
 
 @author: franziskaz
 
@@ -19,16 +19,18 @@ slitwidth=0.5 #/ [arcsec] SlitWidth  from Marianne
 
 spectral_sampling = 0.01348  # in \AA
 
+# INVERSION parameters
+
 continuum=[96,101] # continuum region - original data pixel scale 
 
-tellurics = [[200,215],[261,273]] # masking areas for tellurics - original data pixel scale 
+tellurics = [[200,215],[261,273]] # masking areas for tellurics - original data x pixel scale 
 
-line_core= 172  # pixel for line cores - original data pixel scale 
+line_core= [172,246]  # pixel for line cores - original data x pixel scale 
 
-yroi = [0,1]# scan position
+yroi = [0,40]  # scan position
 roi = [20,220] # spatial - 227 max
-sroi = [130,300] # spectral - 512 max  
-# ONLY UNCOMMENT ONE BEFORE RUNNING 
+sroi = [130,280] # spectral - 512 max - not too large!!
+
 
 #%%
 

@@ -27,7 +27,7 @@ MAIN:
 # initialize files and folder object
 
 ff = tt.ff() 
-ff.v_file =  dst.directory + dst.data_files[dst.line]+dst.data_files['v_i']
+ff.v_file =  dst.directory + dst.data_files[dst.line]+dst.data_files['v_diff']
 
 #wvl = tt.z3ccspectrum(spectrum,  wavelengthscale, ref_spectrum, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, DERIV=None, CONT=None, SHOW=2)
 
