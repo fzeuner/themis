@@ -1044,7 +1044,7 @@ class ff:
  def __init__(self):
          
    self.directory = dst.directory
-   self.inversion_dir = dst.directory + dst.directory_inversion
+   self.inversion_dir = dst.directory_inversion
    self.inversion_inp_ext = '_inv_inp.fits'
    self.inv_inp_data_file = 'obs_prof_'+ dst.data_files[dst.line] # compliant with SIRExplorer
    self.red_data_file = dst.directory + dst.data_files[dst.line]+dst.data_files['r']

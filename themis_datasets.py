@@ -10,7 +10,7 @@ Configuration file
 
 directory = "/home/franziskaz/data/themis/"
 directory_figures = "/home/franziskaz/figures/themis/"
-directory_inversion = "inversion/"
+directory_inversion = "/home/franziskaz/data/themis/inversion/"
 
 line='fe' # 'fe'
 
