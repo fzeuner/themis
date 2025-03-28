@@ -27,6 +27,8 @@ tellurics = [[200,215],[261,273]] # masking areas for tellurics - original data 
 
 line_core= [172,246]  # pixel for line cores - original data x pixel scale 
 
+line_idx = 1 # left Fe line index, this is needed to create the correct input file, same as ine LINE and wavelength.grid
+
 yroi = [0,40]  # scan position
 roi = [20,220] # spatial - 227 max
 sroi = [130,280] # spectral - 512 max - not too large!!

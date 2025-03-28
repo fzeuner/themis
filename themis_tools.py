@@ -300,7 +300,8 @@ def read_v_file(file_name,file_i_name,original=False, i_ct = 0, verbose=False): 
          dummy_dummy_i = dummy_i[s::steps]
          data.i[s,:] = dummy_dummy_i[:,0:int(dummy_i.shape[1]),:]
         
-    print('Read '+file_name + ' and '+file_i_name)
+    print('Read \n'+file_name + '\n and \n'+file_i_name)
+    print('------------------------------------\n')
     
     #data.v = data.v + i_ct*data.i
 
@@ -528,11 +529,36 @@ def writepro(filename, line_ind, wvlen, StkI, StkQ, StkU, StkV):
     f = open(filename, "w+")
 
     for k in range(0, len(line_ind)):
-        f.write('     {0}   {1:> 10.4f}  {2:> 8.6e} {3:> 8.6e} {4:> 8.6e} {5:> 8.6e} \n'.format(line_ind[k], wvlen[k], StkI[k], StkQ[k], StkU[k], StkV[k]))
+     
+         f.write('     {0}   {1:> .4f}  {2:> 8.6e} {3:> 8.6e} {4:> 8.6e} {5:> 8.6e} \n'.format(line_ind[k], wvlen[k], StkI[k], StkQ[k], StkU[k], StkV[k]))
 
     f.close()
 
     return()
+
+def make_grid_file(file_dir,line_idx,xlam):
+    """
+    Create .grid file for SIR
+
+    Parameters
+    ----------
+    first : number of lines
+    second : line index based on the standart LINE file excluding blends
+    third : array with min wavelenght
+    fourth: array with wavelenght step
+    fifth: array with max wavelenght
+    """
+    file_grid=open(file_dir+'/wavelength.grid','w')
+    file_grid.write('IMPORTANT: a) All items must be separated by commas.\n')
+    file_grid.write('           b) The first six characters of the last line\n')
+    file_grid.write('              in the header (if any) must contain the symbol ---\n')
+    file_grid.write('\n')
+    file_grid.write('Line and blends indices   :   Initial lambda     Step     Final lambda\n')
+    file_grid.write('(in this order)                    (mA)          (mA)         (mA)\n')
+    file_grid.write('-----------------------------------------------------------------------\n')
+   
+    file_grid.write(str(line_idx)+'                      :       '+'{:>4.3f}'.format(xlam[0])+',      '+str(xlam[-1]-xlam[-2])+',        '+'{:>4.3f}'.format(xlam[-1])+'\n')
+    file_grid.close()
 
 
 def align_scans(data): # with continuum images
@@ -1052,24 +1078,11 @@ class ff:
    self.v_file= dst.directory + dst.data_files[dst.line]+dst.data_files['v_i']
    self.i_file= dst.directory + dst.data_files[dst.line]+dst.data_files['i']
        
-# def process_data(data, xlam, pca=False,  #data is a scan_pos, Y, wavelength
-#                              continuum=False):
-         
-    
-    
-#     if background: 
-#          data = denoise(data) 
-         
-#     if continuum:
-#          data = continuum_correction(data, xlam, dst.continuum[dst.line])
-         
-#     return(data)
-    
 
 def save_inv_input_data(data, xlam,ff,scan, overwrite = True):
     
     hdr = fits.Header()
-    hdr.set('RED_ROUT',  'themis/save_reduced_data', comment='Code used for reduction')
+    hdr.set('RED_ROUT',  'themis/save_inv_input_data', comment='Code used for processing')
     
     primary_hdu = fits.PrimaryHDU(data, header=hdr)
     hdul = fits.HDUList(
@@ -1082,7 +1095,8 @@ def save_inv_input_data(data, xlam,ff,scan, overwrite = True):
           hdul.writeto( inv_inp_data_file, overwrite=True)
     else:
         hdul.writeto(inv_inp_data_file, overwrite=True)
-    print('Inverison input data file created: \n '+inv_inp_data_file)
+    print('Inversion input data file created for parallel SIR: \n '+inv_inp_data_file)
+    print('-----------------------------')
     return()
 
 
@@ -1111,19 +1125,17 @@ def prep_data_for_pca(data):
     return(data_prep, mean)
 
 def process_data_for_inversion(data,  scan=0, ff_p =ff,  
-                                             wl_calibration = True,
-                                             binning =  1, # scan pos, scan, x along slit, wavelength
-                                             mask = True,
+                                             binning_x =  1, # scan pos, scan, x along slit, wavelength
                                              pca = 0,  # define number of pca components
                                              continuum = True,  # correct continuum: intensity/I_c, V - V_c
                                              cut=True, 
-                                             test = False, debug = False, save = True): #only one scan at a time
+                                             test = False, save = True): #only one scan at a time
     
 
     if binning == 1:
        print("process_dataset: Processing data \n"+ff_p.v_file)
     else:
-       print("process_dataset: Processing data \n"+ff_p.v_file+' \n with binning '+ str(binning)+'scans')
+       print("process_dataset: Processing data \n"+ff_p.v_file+' \n with binning '+ str(binning_x)+'scans')
     print('----------------------')
     
     # figure out if it is a single scan
@@ -1134,12 +1146,12 @@ def process_data_for_inversion(data,  scan=0, ff_p =ff,
     if not single_scan:   
        # mask tellurics
         for tel in range(2):
-         data.i[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -1
+         data.i[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -2*np.max(data.i)
          data.v[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = 0.0 # 
 
         
         i_c = data.i[:,:,20:-20,dst.continuum[0]:dst.continuum[1]].mean(axis=3)
-        i_c = i_c.max()
+        i_c = i_c.max() 
         
         if continuum:
             data.i /= i_c
@@ -1163,14 +1175,14 @@ def process_data_for_inversion(data,  scan=0, ff_p =ff,
               'start wavelength [mA]: '+str(xlam[0]) +'\n' + \
               'wl step [mA]: '+str(1000*dst.spectral_sampling)+'\n' + \
                'end wavelength [mA]: '+str(xlam[-1]) +'\n'  )
-        if wl_calibration:
-            wl_reference, ref_spectrum, _ = read_fts5(6299, 6305)
-            spectrum = data.i.mean(axis=(0,1,2))
-            spectrum/=spectrum.max()
-            xlam = z3ccspectrum(spectrum,  wl_reference, ref_spectrum, FACL=0.8, FACH=1.5, FACS=0.005, 
-                                   CUT=[10,20], DERIV=None, CONT=1.01, SHOW=2)
+        # if wl_calibration:
+        #     wl_reference, ref_spectrum, _ = read_fts5(6299, 6305)
+        #     spectrum = data.i.mean(axis=(0,1,2))
+        #     spectrum/=spectrum.max()
+        #     xlam = z3ccspectrum(spectrum,  wl_reference, ref_spectrum, FACL=0.8, FACH=1.5, FACS=0.005, 
+        #                            CUT=[10,20], DERIV=None, CONT=1.01, SHOW=2)
             
-        for i in range(reduced_data.shape[0]):
+        for i in tqdm(range(reduced_data.shape[0])):
             for m in range(reduced_data.shape[2]):
               reduced_data[i,0, m,:] = data.i[m,scan,:,i]
               
@@ -1198,5 +1210,101 @@ def process_data_for_inversion(data,  scan=0, ff_p =ff,
         
     return(reduced_data, xlam, ff_p)    
     
+
+def process_pixel_for_inversion(data,  x=0, y=0, scan=0, ff_p =ff,  
+                                             pca = 0,  # define number of pca components
+                                             continuum = True,  # correct continuum: intensity/I_c, V - V_c
+                                             cut=True, 
+                                             test = False, save = True, dir_= '', ext = ''): #only one scan at a time
     
+
+    print("process_pixel: Processing data \n"+ff_p.v_file)
+
+    print('----------------------')
+    
+    
+    # figure out if it is a single scan
+    single_scan=False
+    if len(data.i.shape) == 3: 
+       single_scan = True
+       print('process_dataset: There is only one scan in the data. \n')
+    if not single_scan:   
+       # mask tellurics
+        for tel in range(2):
+         data.i[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -2*np.max(data.i)
+         data.v[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = 0.0 # 
+
+        
+        i_c = data.i[:,:,20:-20,dst.continuum[0]:dst.continuum[1]].mean(axis=3)
+        i_c = i_c.max()
+        
+        if continuum:
+            data.i /= i_c
+            for i in range(data.v.shape[0]):
+               for m in range(data.v.shape[1]):
+                 for n in range(data.v.shape[2]):
+                     data.v[i,m,:,n] -= data.v[i,m,n,dst.continuum[0]:dst.continuum[1]].mean()
+        
+        if cut:
+               data.i = data.i[:,:,dst.roi[0]:dst.roi[1],dst.sroi[0]:dst.sroi[1]]
+               data.v = data.v[:,:,dst.roi[0]:dst.roi[1],dst.sroi[0]:dst.sroi[1]]
+        
+
+        if continuum:
+                    data.i /= data.i.max()    
+                            
+        reduced_data = np.zeros((data.i.shape[3], 4, data.i.shape[0], data.i.shape[2] ) ) 
+        # stokes, wvl, x, y
+        xlam = 1000*(np.arange( data.i.shape[3]) - dst.line_core[0]+dst.sroi[0])*dst.spectral_sampling # to be used in the wavelength grid for SIR
+        
+        print('According to the parameters in themis_datasets:'+'\n'+\
+              'start wavelength [mA]: '+str(xlam[0]) +'\n' + \
+              'wl step [mA]: '+str(1000*dst.spectral_sampling)+'\n' + \
+               'end wavelength [mA]: '+str(xlam[-1]) +'\n'  )
+        # if wl_calibration:
+        #     wl_reference, ref_spectrum, _ = read_fts5(6299, 6305)
+        #     spectrum = data.i.mean(axis=(0,1,2))
+        #     spectrum/=spectrum.max()
+        #     xlam = z3ccspectrum(spectrum,  wl_reference, ref_spectrum, FACL=0.8, FACH=1.5, FACS=0.005, 
+        #                            CUT=[10,20], DERIV=None, CONT=1.01, SHOW=2)
+            
+        for i in range(reduced_data.shape[0]):
+            for m in range(reduced_data.shape[2]):
+              reduced_data[i,0, m,:] = data.i[m,scan,:,i]
+              
+              reduced_data[i,3,m,:] = data.v[m,scan,:,i]
+              
+        if pca > 0:
+            data_line_1, mean_1=prep_data_for_pca(reduced_data[int(reduced_data.shape[0]/2):,3, :])
+            data_line_2, mean_2=prep_data_for_pca(reduced_data[:int(reduced_data.shape[0]/2),3, :])
+            
+            pca_line_1, transformed_line_1, inverted_line_1 = run_pca_s(data_line_1, pca)
+            pca_line_2, transformed_line_2, inverted_line_2 = run_pca_s(data_line_2, pca)
+            
+            X_pca_1 = pca_line_1.transform(data_line_1)
+            X_reconstructed_1 = pca_line_1.inverse_transform(X_pca_1) + mean_1
+            
+            X_pca_2 = pca_line_2.transform(data_line_2)
+            X_reconstructed_2 = pca_line_2.inverse_transform(X_pca_2) + mean_2
+
+            reduced_data[int(reduced_data.shape[0]/2):,3,:] = X_reconstructed_1.reshape((int(reduced_data.shape[0]/2),reduced_data.shape[2],reduced_data.shape[3]))
+            reduced_data[:int(reduced_data.shape[0]/2),3,:] = X_reconstructed_2.reshape((int(reduced_data.shape[0]/2),reduced_data.shape[2],reduced_data.shape[3]))
+        
+        single_profile = reduced_data[:,:,x,y]
+        
+        if save:
+            
+            
+            file_name="profile_"+format(scan,'02')+'_'+format(x,'03')+'_'+format(y,'03')+ext+".per"
+            print('Save single pixel SIR input file:\n')
+            print(file_name)
+            print('Save wavelength.grid file\n')
+            
+            writepro(ff_p.inversion_dir+'/'+dir_+'/'+file_name,np.zeros(xlam.shape)+dst.line_idx,xlam,\
+                          single_profile[:,0], single_profile[:,1], single_profile[:,2], single_profile[:,3])  
+            make_grid_file(ff_p.inversion_dir+'/'+dir_,dst.line_idx,xlam)
+            print('----------------')
+            print('Important: you still need to add the blend line 2 if you would like to invert it in the wavelength.grid file!')
+            print('---------------------------------------')
+    return(single_profile, xlam, ff_p)    
     

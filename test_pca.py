@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Wed Mar  5 15:24:27 2025
+Created on Thu Mar  27 13:16:46 2025
 
 @author: zeuner
 """
@@ -161,11 +161,10 @@ data, header = tt.read_v_file(ff.v_file, ff.i_file)
 reduced_data_pca, xlam, ff_p =  tt.process_data_for_inversion(data,  scan=0, ff_p =ff,  
                                              wl_calibration = False,
                                              binning =  1, # scan binning
-                                             mask = False,
                                              pca = 4,
                                              continuum = True,  # correct continuum: intensity/I_c, V - V_c
                                              cut=True, 
-                                             test = False, debug = False, save = True) #only one scan at a time
+                                             test = False, save = True) #only one scan at a time
 
 #%%
 # difference between data with and without PCA

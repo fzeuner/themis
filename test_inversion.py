@@ -37,13 +37,11 @@ data, header = tt.read_v_file(ff.v_file, ff.i_file)
 #%%
 
 reduced_data, xlam, ff_p =  tt.process_data_for_inversion(data,  scan=0, ff_p =ff,  
-                                             wl_calibration = False,
                                              binning =  1, # scan binning
-                                             mask = False,
                                              pca = False,
                                              continuum = True,  # correct continuum: intensity/I_c, V - V_c
                                              cut=True, 
-                                             test = False, debug = False, save = True) #only one scan at a time
+                                             test = False, save = True) #only one scan at a time
 
 #tt.write_wht_file(xlam, '/home/zeuner/data/themis/inversion/test_parallel/run_files/')
 #%%
