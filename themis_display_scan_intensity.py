@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Wed Nov  6 09:56:31 2024
+Created on Fri Jul 4 19:56:31 2025
 
 @author: franziskaz
 """
@@ -9,6 +9,8 @@ Created on Wed Nov  6 09:56:31 2024
 """
 
 WARNING: if the qdarkstyle is used, there is some bug in Dock and VerticalLabel (look at the files in the folder.)
+
+Display the upper and lower image of many frames and the mean
 """
 
 import numpy as np
@@ -17,13 +19,12 @@ import matplotlib.colors as mplcolor
 import pyqtgraph as pg
 
 from pyqtgraph.Qt import QtWidgets
-import themis_datasets as dst
 from pyqtgraph.Qt import QtCore
 import qdarkstyle
 from pyqtgraph.dockarea.Dock import Dock
 from pyqtgraph.dockarea.DockArea import DockArea
 from getWidgetColors import getWidgetColors
-import gc
+
 import themis_tools as tt
 
 
@@ -36,15 +37,14 @@ class StokesImageWindow((QtWidgets.QWidget)):
     
     positionChanged = QtCore.pyqtSignal(float)
     
-    def __init__(self, xlam, data, win_spectrum, win_image_spectrum, coordinates = [0,0,0,0],parent=None):
+    def __init__(self, data, win_spectrum, win_image_spectrum,stokes=0, coordinates = [0,0,0,0],parent=None):
         super().__init__(parent)   
         
-        self.data=data[ :, :, :, :] # state, scan pos, scan, x, wvl
+        self.data=data[ :, :, :] # scan pos,x,wvl
         # print(self.data.shape)
-        self.n_x_pixel = self.data[:,0,:, 0].shape[1]
-        self.n_y_pixel = self.data[:,0,:, 0].shape[0]
+        self.n_x_pixel = self.data[0,:,:,].shape[1]
+        self.n_y_pixel = self.data[0,:,:].shape[0]
         
-        self.xlam = xlam
         self.wavelength_pos = 0
         self.scan = 0
         # Set up the main layout for this widget
@@ -55,7 +55,7 @@ class StokesImageWindow((QtWidgets.QWidget)):
         self.graphics_widget.setBackground(getWidgetColors.BG_NORMAL)
         # Create and configure an ImageItem to display the image
         self.image_item = pg.ImageItem()
-        self.image_item.setImage(self.data[:,self.scan, :, self.wavelength_pos]) # initial image
+        self.image_item.setImage(self.data[:, :, self.wavelength_pos]) # initial image
         
         self.plotItem = self.graphics_widget.addPlot(row = 0, col=0,colspan=1,rowspan=4)      # add PlotItem to the main GraphicsLayoutWidget
         self.plotItem.invertY(False)              # orient y axis to run bottom-to-top
@@ -85,6 +85,22 @@ class StokesImageWindow((QtWidgets.QWidget)):
         self.plotItem.getAxis('left').setWidth(50)
         self.plotItem.getAxis('bottom').setHeight(15)
         
+        
+        #  -------- COLORMAP IS NOT YET WORKING      
+        # if 0 == stokes:
+        #   colorMap = pg.colormap.getFromMatplotlib("grey")     # choose color map
+         
+        # else:
+        #    colorMap=p_cmap 
+           
+        # # Get colormap data as RGBA lookup table values and scale to 0-255 for pyqtgraph   
+        # lut = (colorMap(np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
+         
+        # # # Apply the colormap
+        # self.image_item.setLookupTable(lut)  # Apply the custom colormap
+       
+        # self.image_item.setLevels([data[stokes, :, 0, :].min(), data[stokes, :, 0, :].max()])  # Set the levels to the data range
+        #  --------
        
         self.plotItem.addItem(self.image_item)    # display 
         pg.setConfigOptions(imageAxisOrder="row-major")
@@ -143,9 +159,9 @@ class StokesImageWindow((QtWidgets.QWidget)):
         index_y = np.abs(self.yscale - ypos).argmin()
         self.label.setText(
                # Find the closest index in xpos to the mouse 
-                "x={:.1f}".format(xpos*dst.pixel[dst.line]) +
-                " y={:.1f} ".format(ypos*dst.slitwidth) +
-                "z={:.5f}".format(self.data[index_y,self.scan,index_x, self.wavelength_pos ] ),     
+                "x={:.1f}".format(xpos*ff.cam.pixel_scale) +
+                " y={:.1f} ".format(ypos*ff.slit_width) +
+                "z={:.5f}".format(self.data[index_y,index_x, self.wavelength_pos ] ),     
             size='6pt')
         self.label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
@@ -164,8 +180,8 @@ class StokesImageWindow((QtWidgets.QWidget)):
                 if 0 <= index_x < self.n_x_pixel and 0 <= index_y < self.n_y_pixel:
                     self.update_vline(xpos)
                     self.update_hline(ypos)
-                    self.win_spectrum.update_plot_data(self.data[index_y, self.scan, index_x, :])
-                    self.win_image_spectrum.update_plot_data(self.data[index_y, self.scan, :, :])
+                    self.win_spectrum.update_plot_data(self.data[index_y, index_x, :])
+                    self.win_image_spectrum.update_plot_data(self.data[index_y, :, :])
                     self.update_label()
                                    
     def mouseClicked(self, event):
@@ -177,7 +193,7 @@ class StokesImageWindow((QtWidgets.QWidget)):
             self.crosshair_locked = not self.crosshair_locked  # Toggle lock state
        
     def update_image(self):
-         self.image_item.setImage(self.data[:,self.scan,:,self.wavelength_pos]) #
+         self.image_item.setImage(self.data[:,:,self.wavelength_pos]) #
          self.update_label()
          
     def update_vline(self, xpos):
@@ -186,7 +202,7 @@ class StokesImageWindow((QtWidgets.QWidget)):
         self.hLine.setPos(vpos)
         
 class StokesSpectrumWindow((QtWidgets.QWidget)):
-    def __init__(self, xlam, data, coordinates = [0,0,0,0], parent=None):
+    def __init__(self,  data, parent=None):
         super().__init__(parent)
 
         # Set up the main layout for this widget
@@ -197,13 +213,12 @@ class StokesSpectrumWindow((QtWidgets.QWidget)):
         self.graphics_widget.setBackground(getWidgetColors.BG_NORMAL)
         # Create and configure an ImageItem to display the image
         
-        self.xlam = xlam
         
         self.plot = self.graphics_widget.addPlot(row = 0, col=0)      # add PlotItem to the main GraphicsLayoutWidget
         
-        self.plot_data = data[ 0, 0, 0, :]
+        self.plot_data = data[0, 0, :]
         
-        self.plot.plot(xlam, self.plot_data)
+        self.plot.plot(self.plot_data)
         self.plot.invertY(False)              # orient y axis to run bottom-to-top
         self.plot.setDefaultPadding(0.0)      # plot without padding data range
         
@@ -211,7 +226,7 @@ class StokesSpectrumWindow((QtWidgets.QWidget)):
         self.plot.showAxes( True, showValues=(True, True, False, False), size=15 )
 
          # Configure x-axis ticks
-        x_ticks = xlam[0] + np.arange(xlam.shape[0], step=int(xlam.shape[0] / 10))
+        x_ticks = np.arange(self.plot_data.shape[0], step=int(self.plot_data.shape[0] / 10))
         self.plot.getAxis('top').setTicks([[(tick, f'{tick:.1f}') for tick in x_ticks]])
         self.plot.getAxis('top').enableAutoSIPrefix(False)
         self.plot.getAxis('bottom').enableAutoSIPrefix(False)
@@ -233,25 +248,24 @@ class StokesSpectrumWindow((QtWidgets.QWidget)):
         
     def update_plot_data(self, new_data):
             self.plot.clear()
-            self.plot.plot(self.xlam, new_data)
+            self.plot.plot(new_data)
 
 class StokesSpectrumImageWindow(QtWidgets.QWidget):
-    def __init__(self, xlam, data, coordinates=[0, 0, 0, 0], parent=None):
+    def __init__(self, data, parent=None):
         super().__init__(parent)
 
         # Extract specific data for the stokes parameter
-        self.data = data[:, :, :, :]
-        self.n_x_pixel = self.data.shape[2]
-        self.n_y_pixel = self.data.shape[3]
+        self.data = data
+        self.n_x_pixel = self.data.shape[1]
+        self.n_y_pixel = self.data.shape[2]
         
-        self.xlam = xlam
         
         # Set up the main layout
         layout = QtWidgets.QHBoxLayout(self)
         self.graphics_widget = pg.GraphicsLayoutWidget()
         self.graphics_widget.setBackground(getWidgetColors.BG_NORMAL)
         self.image_item = pg.ImageItem()
-        self.image_item.setImage(self.data[0, 0, :, :])  # Initial image display
+        self.image_item.setImage(self.data[0, :, :])  # Initial image display
         
         # Configure the plot and add ImageItem
         self.plotItem = self.graphics_widget.addPlot(row=0, col=0)
@@ -277,23 +291,22 @@ class StokesSpectrumImageWindow(QtWidgets.QWidget):
 
     
 class InteractiveSpectrumWidget(QtWidgets.QWidget):
-    def __init__(self, xlam, data, wins,parent=None):
+    def __init__(self,  data, wins,stokes=0,parent=None):
         super().__init__(parent)
 
         # Initialize the GraphicsLayoutWidget for plotting
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot_widget.setBackground(getWidgetColors.BG_NORMAL)
-        self.xlam = xlam
         # Create a plot within the GraphicsLayoutWidget
         self.plot = self.plot_widget.addPlot(row=1, col=0)
         
         # Plot the initial data
         self.data = data
-        self.plot_data = data[ :, :, :].mean(axis=(0,1, 2))
-        self.plot.plot(xlam, self.plot_data)
+        self.plot_data = data[ :, :, :].mean(axis=(0, 2))
+        self.plot.plot( self.plot_data)
         
         # Configure x-axis ticks
-        x_ticks = xlam[0] + np.arange(xlam.shape[0], step=int(xlam.shape[0] / 10))
+        x_ticks = np.arange(self.plot_data.shape[0], step=int(self.plot_data.shape[0] / 10))
         self.plot.getAxis('top').setTicks([[(tick, f'{tick:.1f}') for tick in x_ticks]])
         self.plot.getAxis('top').enableAutoSIPrefix(False)
         self.plot.getAxis('bottom').enableAutoSIPrefix(False)
@@ -349,7 +362,7 @@ class InteractiveSpectrumWidget(QtWidgets.QWidget):
                 
                 
 class InteractiveScanPosWidget(QtWidgets.QWidget):
-    def __init__(self, xlam, data, wins,parent=None):
+    def __init__(self, xlam, data, wins,stokes=0,parent=None):
         super().__init__(parent)
 
         # Initialize the GraphicsLayoutWidget for plotting
@@ -363,7 +376,7 @@ class InteractiveScanPosWidget(QtWidgets.QWidget):
 
         
         # Plot the initial data
-        self.plot_data = data[ :, :, :].mean(axis=(0,2, 3))
+        self.plot_data = data[stokes, :, :, :].mean(axis=(0,2, 3))
         self.scan_pos = np.arange(self.plot_data.shape[0])
         self.plot.plot(self.scan_pos, self.plot_data, symbol='o')
         
@@ -418,72 +431,69 @@ class InteractiveScanPosWidget(QtWidgets.QWidget):
                 self.vLine.setPos(mouse_point.x())
                 self.crosshair_locked = not self.crosshair_locked  # Toggle lock state
 
-def display_scan_data(data, xlam, coordinates=[0,1,0,1], title='Example'): # 4, X, wl, Y
+def display_scan_data(data,  title='Example'): # 4, X, wl, Y
    
     # Initialize the application
-    app = pg.mkQApp("THEMIS Data V/I")
+    app = pg.mkQApp("THEMIS Data")
     win = QtWidgets.QMainWindow()
     area = DockArea()
     win.setCentralWidget(area)
     win.resize(1600,850)
     win.setWindowTitle(title)
     
-    if len(data.i.shape) == 3:
-        data=np.zeros((data.i.shape[0],2,data.i.shape[1], data.i.shape[2]))
-        data[:,0,:] = 1.*data.i
-        data.i = 1.*data
-
-        data[:,0,:] = 1.*data.v
-        data.v = 1.*data
-        
-        del data
-        gc.collect()
-        print('Only one scan - artifically extent to 2 scans!')
-    if len(data.i.shape) > 4:
-        data=np.zeros((10,2,10, 10))
-        data.i = 1.*data
-        data.v = 1*data
-        print('Data has wrong dimensions!')
+    # if len(np.array(data).shape) < 4:
+    #     data=np.zeros((4,10,500, 500))
+    #     xlam=np.arange(data.shape[2])
+    #     print('Data has the wrong dimensions!')
+    
 
     ## Create docks, place them into the window one at a time.
     ## Note that size arguments are only a suggestion; docks will still have to
     ## fill the entire dock area and obey the limits of their internal widgets.
-    d_scan_image_v = Dock("Scan V/I", size=(300, 300))     ## give this dock the minimum possible size
-    d_scan_image_i = Dock("Scan I", size=(300, 300))     ## give this dock the minimum possible size
-   
+    d_scan_ui_state0 = Dock("Scan upper image, state 0", size=(300, 300))     ## give this dock the minimum possible size
+    d_scan_li_state0 = Dock("Scan lower image, state 0", size=(300, 300))     ## give this dock the minimum possible size
+
+    
     # -----------------
     
-    d_spectrum_v = Dock("Spectrum V/I", size=(300,300))
-     
-    d_spectrum_image_v = Dock("Spectrum image V/I", size=(300,300))
-    
-    d_spectrum_i = Dock("Spectrum I", size=(300,300))
-     
-    d_spectrum_image_i = Dock("Spectrum image I", size=(300,300))
+    d_spectrum_ui_state0 = Dock("Upper spectrum, state 0", size=(300,300))
+    d_spectrum_li_state0 = Dock("Lower spectrum, state 0", size=(300,300))
     
     
-    d_spectrum = Dock("I spectrum", size=(20,170))
-    d_scan = Dock("Scan", size=(30,100))
+    d_spectrum_image_ui_state0 = Dock("Upper spectrum image, state 0", size=(300,300))
+    d_spectrum_image_li_state0 = Dock("Lower spectrum image, state 0", size=(300,300))
+    
+    
 
+    # ------------
+    
+    d_spectrum_ui = Dock("Upper full spectrum", size=(20,170))
+    d_spectrum_li = Dock("Lower full spectrum", size=(20,170))
+    
+    d_scan_ui = Dock("Upper scan", size=(30,100))
+    d_scan_li = Dock("Lower scan", size=(30,100))
+   
     # ------------------
 
     
-    area.addDock(d_scan_image_i, 'left')      ##  
-    area.addDock(d_scan_image_v, 'bottom', )      ##  
+    area.addDock(d_scan_ui_state0, 'left')      ##  
+    area.addDock(d_scan_li_state0, 'right')      ## 
     
+    area.addDock(d_spectrum_ui, 'bottom', d_scan_ui_state0 )      ## 
+    area.addDock(d_spectrum_li, 'bottom', d_scan_li_state0)      ## 
+     
     
-    area.addDock(d_spectrum, 'bottom')      ## 
-    area.addDock(d_scan, 'bottom', d_spectrum)      ## 
-    
+    area.addDock(d_scan_ui, 'bottom', d_spectrum_ui)      ## 
+    area.addDock(d_scan_li, 'bottom', d_spectrum_li)      ## 
        
-    area.addDock(d_spectrum_image_i, 'right', d_scan_image_i)      ##  
-    area.addDock(d_spectrum_image_v, 'right', d_scan_image_v)      ##
+    area.addDock(d_spectrum_ui_state0, 'right', d_scan_ui_state0)      ##  
+    area.addDock(d_spectrum_li_state0, 'right', d_scan_li_state0)      ##
   
     
-    area.addDock(d_spectrum_i, 'above', d_spectrum_image_i)       ## tab
-    area.addDock(d_spectrum_v, 'above', d_spectrum_image_v) 
+    area.addDock(d_spectrum_image_ui_state0, 'above', d_spectrum_ui_state0)       ## tab
+    area.addDock(d_spectrum_image_li_state0, 'above', d_spectrum_li_state0) 
     
-   
+
     
     # area.addDock(d10, 'bottom')## place at the bottom  
     # area.addDock(d21, 'right')
@@ -497,52 +507,61 @@ def display_scan_data(data, xlam, coordinates=[0,1,0,1], title='Example'): # 4, 
 # --------------------------------------------------------        
     ## Stokes I spectrum and spectrum image dock setup
 
-    win_spectrum_i = StokesSpectrumWindow(xlam, data.i)  # Create a GraphicsLayoutWidget
+    win_spectrum_ui_state0 = StokesSpectrumWindow(data.ui)  # Create a GraphicsLayoutWidget
     
     # Add the GraphicsLayoutWidget to the dock
-    d_spectrum_i.addWidget(win_spectrum_i)
+    d_spectrum_ui_state0.addWidget(win_spectrum_ui_state0)
     
-    win_image_spectrum_i = StokesSpectrumImageWindow(xlam, data.i)
-    d_spectrum_image_i.addWidget(win_image_spectrum_i)
+    win_image_spectrum_ui_state0 = StokesSpectrumImageWindow(data.ui)
+    d_spectrum_image_ui_state0.addWidget(win_image_spectrum_ui_state0)
     
-    win_spectrum_v = StokesSpectrumWindow(xlam, data.v)  # Create a GraphicsLayoutWidget
+    
+    win_spectrum_li_state0 = StokesSpectrumWindow(data.li)  # Create a GraphicsLayoutWidget
     
     # Add the GraphicsLayoutWidget to the dock
-    d_spectrum_v.addWidget(win_spectrum_v)
+    d_spectrum_li_state0.addWidget(win_spectrum_li_state0)
     
-    win_image_spectrum_v = StokesSpectrumImageWindow(xlam, data.v)
-    d_spectrum_image_v.addWidget(win_image_spectrum_v)
-    
+    win_image_spectrum_li_state0 = StokesSpectrumImageWindow(data.li)
+    d_spectrum_image_li_state0.addWidget(win_image_spectrum_li_state0)
     
 # --------------------------------------------------------    
     
     ## First state scan image dock setup   
     
-    win_image_i = StokesImageWindow(xlam, data.i, win_spectrum_i, win_image_spectrum_i)  # Create a GraphicsLayoutWidget
+    win_image_ui_state0 = StokesImageWindow(data.ui, win_spectrum_ui_state0, win_image_spectrum_ui_state0)  # Create a GraphicsLayoutWidget
     
     # # Add the GraphicsLayoutWidget to the dock
-    d_scan_image_i.addWidget(win_image_i)
+    d_scan_ui_state0.addWidget(win_image_ui_state0)
     
-    win_image_v = StokesImageWindow(xlam, data.v, win_spectrum_v, win_image_spectrum_v)  # Create a GraphicsLayoutWidget
+    win_image_li_state0 = StokesImageWindow(data.li, win_spectrum_li_state0, win_image_spectrum_li_state0)  # Create a GraphicsLayoutWidget
     
     # # Add the GraphicsLayoutWidget to the dock
-    d_scan_image_v.addWidget(win_image_v)
-    
+    d_scan_li_state0.addWidget(win_image_li_state0)
+
+
 # --------------------------------------------------------  
     ## full spectrum dock 
 
-    spectrum_widget_i = InteractiveSpectrumWidget(xlam,  data.i, [win_image_i,win_image_v])
+    spectrum_widget_ui = InteractiveSpectrumWidget( data.ui, [win_image_ui_state0])
     # # Add the GraphicsLayoutWidget to the dock
-    d_spectrum.addWidget(spectrum_widget_i)
+    d_spectrum_ui.addWidget(spectrum_widget_ui)
     
     
     ## scan dock
-    scan_widget_i = InteractiveScanPosWidget(xlam,  data.i, [win_image_i,win_image_v])
+    scan_widget_ui = InteractiveScanPosWidget( data.ui, [win_image_ui_state0])
     # # Add the GraphicsLayoutWidget to the dock
-    d_scan.addWidget(scan_widget_i)
+    d_scan_ui.addWidget(scan_widget_ui)
+    
+    spectrum_widget_li = InteractiveSpectrumWidget( data.li, [win_image_li_state0])
+    # # Add the GraphicsLayoutWidget to the dock
+    d_spectrum_li.addWidget(spectrum_widget_li)
     
     
- 
+    ## scan dock
+    scan_widget_li = InteractiveScanPosWidget(data.li, [win_image_li_state0])
+    # # Add the GraphicsLayoutWidget to the dock
+    d_scan_li.addWidget(scan_widget_li)
+    
 
 # --------------------------------------------------------  
 
@@ -556,8 +575,8 @@ def display_scan_data(data, xlam, coordinates=[0,1,0,1], title='Example'): # 4, 
 if __name__ == '__main__':
     #create numpy arrays
     #make the numbers large to show that the range shows data from 10000 to all the way 0
-    data = tt.be_data()
-    data.i = np.random.random(size=(41,16,256, 512))   # stokes, scan position, wavelength, spatial along slit
-    data.v = 1.*data.i
-    xlam = np.arange(data.i.shape[3])
-    display_scan_data(data, xlam,  title = 'Test data')
+    data = tt.l1_data()
+    ff = tt.init() 
+    data.ui = np.random.random(size=(41,256, 512))   # scan position, wavelength, spatial along slit
+    data.li = 1.*data.ui
+    display_scan_data(data, title = 'Test data')

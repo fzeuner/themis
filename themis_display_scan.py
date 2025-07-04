@@ -17,7 +17,6 @@ import matplotlib.colors as mplcolor
 import pyqtgraph as pg
 
 from pyqtgraph.Qt import QtWidgets
-import datasets as dst
 from pyqtgraph.Qt import QtCore
 import qdarkstyle
 from pyqtgraph.dockarea.Dock import Dock
@@ -159,8 +158,8 @@ class StokesImageWindow((QtWidgets.QWidget)):
         index_y = np.abs(self.yscale - ypos).argmin()
         self.label.setText(
                # Find the closest index in xpos to the mouse 
-                "x={:.1f}".format(xpos*dst.pixel[dst.line]) +
-                " y={:.1f} ".format(ypos*dst.slitwidth) +
+                "x={:.1f}".format(xpos*ff.cam.pixel_scale) +
+                " y={:.1f} ".format(ypos*ff.slit_width) +
                 "z={:.5f}".format(self.data[index_y,self.scan,index_x, self.wavelength_pos ] ),     
             size='6pt')
         self.label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
@@ -623,7 +622,8 @@ if __name__ == '__main__':
     #create numpy arrays
     #make the numbers large to show that the range shows data from 10000 to all the way 0
     data = tt.l1_data()
+    ff = tt.init() 
     data.ui = np.random.random(size=(2,41,16,256, 512))   # stokes, scan position, wavelength, spatial along slit
     data.li = 1.*data.ui
     xlam = np.arange(data.ui.shape[4])
-    display_scan_data(data, xlam,  title = 'Test data')
+    display_scan_data(data, xlam, ff, title = 'Test data', )

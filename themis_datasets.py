@@ -36,12 +36,18 @@ sroi = [130,280] # spectral - 512 max - not too large!!
 
 #%%
 
+# data_files={ 'fe': "t002_b0202_sp_20240723_081105",  # name of data set and camera 
+#             'r': "_tc3_p045p124_shifted.fts",        # reduced data extension
+#             'v_diff':"_Vdiff.fts",                   # V by difference method
+#             'v_ratio':"_Vratio.fts",                 # V by beam exchange method
+#             'v_i':"_VoverI_noflat.fts",              # V/I with beam exchange
+#             'i':"_I.fts",}                           # I by beam combination
+
 data_files={ 'fe': "t002_b0202_sp_20240723_081105",  # name of data set and camera 
             'r': "_tc3_p045p124_shifted.fts",        # reduced data extension
             'v_diff':"_Vdiff.fts",                   # V by difference method
             'v_ratio':"_Vratio.fts",                 # V by beam exchange method
             'v_i':"_VoverI_noflat.fts",              # V/I with beam exchange
-            'i':"_I.fts",}                           # I by beam combination
-
+            'i':"_I.fts",}   
 
 #%%

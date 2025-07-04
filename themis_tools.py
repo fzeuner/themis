@@ -19,7 +19,6 @@ from matplotlib.ticker import (NullFormatter)
 
 from scipy.signal import convolve2d
 from scipy.io import readsav
-import themis_datasets as dst
 from scipy.signal import medfilt
 from tqdm import tqdm
 import matplotlib.colors as mplcolor
@@ -33,26 +32,28 @@ from matplotlib import gridspec
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import os
+import gc
+import warnings
+from pathlib import Path
 
 # GLOBAL VARIABLES
 
 directory_atlas = '/home/zeuner/data/atlas' # on x1
 
+import themis_datasets_2025 as dst
+import cam_config as cc
+
 
 #%%
 
 class l1_data:
-    def __init__(self, upper = '-V', lower = '+V'):
-    
-        self.wavelength = ''  # name
-        self.file = ''
+    def __init__(self, upper = '-V', lower = '+V'):   
+
         self.wvl = ''         # wavelength array
         self.ui = ''          # upper image
         self.li = ''          # lower image 
         self.upper_state = upper
         self.lower_state = lower
-
-        self.date = ''
         
 class v_data: #
     def __init__(self):
@@ -64,7 +65,7 @@ class v_data: #
         self.i = ''          # i image
         self.v = ''          # v image  
         self.date = ''
- 
+
 
 def calc_v_beamexchange(data):
     v = 0.25*(1.- data.li[0,:]/data.li[1,:]*data.ui[1,:]/data.ui[0,:])
@@ -118,6 +119,34 @@ def read_images_file(file_name,original=False, verbose=False):  # not needed rea
         return(dummy, header) # pol_states+scan pos, camera y, camera x (wvl)
     else:
       return(data, header)
+  
+def read_any_file(ff, verbose=False):  
+    gc.collect()
+    
+    hdu = fits.open(ff.file, memmap=False)
+    header=hdu[0].header
+       
+    data_d=np.array(hdu[0].data)
+    
+    data = l1_data()
+    
+    if ff.status == 'raw':  
+        r1, r2 = ff.cam.roi.extract(data_d)
+        
+        data.li = r1
+        data.ui = r2
+    else:
+        print('not supported yet')    
+       
+    if verbose:
+     print('Reading a '+ff.data_type.name+' file with reduction status '+ff.status)
+     print(data.shape)
+     print(header)
+
+    hdu.close()
+    del data_d 
+    gc.collect()
+    return(data, header)
 
 def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, DERIV=None, CONT=None, SHOW=2):
     
@@ -1060,11 +1089,6 @@ def add_noise_to_profiles(file, noise): # gaussian noise
         
     return(0)
 
-
-
-
-
-
 class ff:
     # Class object to store folder and file names
  def __init__(self):
@@ -1077,6 +1101,58 @@ class ff:
    self.figure_dir = dst.directory_figures
    self.v_file= dst.directory + dst.data_files[dst.line]+dst.data_files['v_i']
    self.i_file= dst.directory + dst.data_files[dst.line]+dst.data_files['i']
+   
+class init:
+    # Class object to store folder, file names etc stored in datasets
+ def __init__(self):
+         
+   self.directory = Path(dst.directory)
+   self.figure_dir = dst.directory_figures
+   
+   self.line = dst.line
+   self.seq = dst.sequence
+   self.date = dst.date
+   self.cam = cc.cam[dst.line]
+   self.data_type = cc.data_type[dst.data_t]
+   self.slit_width = dst.slit_width
+   
+   self.status = dst.status
+   
+   self.file = self.directory / self.find_files()
+   
+ def find_files(self):
+    cam_str = self.cam.file_ext if hasattr(self.cam, 'file_ext') else str(self.cam)
+    data_str = self.data_type.file_ext if hasattr(self.data_type, 'file_ext') else str(self.data_type)
+    seq_str = f"t{self.seq:03d}"
+
+    red_suffix = dst.reduction_levels[self.status]  # e.g., '', '_shifted'
+    known_suffixes = [s for s in dst.reduction_levels.values() if s]
+
+    files = list(self.directory.glob("*"))
+    matches = []
+
+    for f in files:
+        name = f.name
+        if cam_str in name and data_str in name and seq_str in name:
+            if red_suffix == "":
+                # Exclude files with any known suffix
+                if not any(suffix in name for suffix in known_suffixes):
+                    matches.append(f)
+            else:
+                if red_suffix in name:
+                    matches.append(f)
+
+    if not matches:
+        warnings.warn(f"No matching files found for status '{self.status}'.")
+        return 'none'
+
+    # Prefer file with '_fx' in the name
+    matches.sort(key=lambda x: (0 if '_fx' in x.name else 1, x.name))
+
+    if len(matches) > 1:
+        warnings.warn(f"Multiple matching files found for status '{self.status}'. Returning: {matches[0].name}")
+
+    return matches[0]
        
 
 def save_inv_input_data(data, xlam,ff,scan, overwrite = True):
