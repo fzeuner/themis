@@ -6,6 +6,8 @@ Created on Fri Jul  4 09:03:29 2025
 @author: zeuner
 
 Camera configuration file for MTR 2 spectropolarimeter on THEMIS for one observing run/configuration
+
+Campaign July 2025
 """
 
 class ROI:
@@ -59,7 +61,7 @@ class Camera:
             self.roi = ROI(lower=tuple(map(tuple, r1)), upper=tuple(map(tuple, r2)))
 
     def __repr__(self):
-        return f"<Camera(name={self.name}, target={self.target})>"
+        return f"<Camera(name={self.name}, target={self.target}), file_ext={self.file_ext})>"
 
 class CameraRegistry:
     def __init__(self):
@@ -107,12 +109,14 @@ class DataTypeRegistry:
         return list(self._types.keys())
 
 
-cam1 = Camera(name="Zyla 5", target="sr", pixel_scale=0.3, file_ext='b0505', wavelength='4607', roi=[[[0,100],[0,100]],[[0,100],[0,100]]])
-
-roi = ROI(lower=((50, 877), (250, 1750)), upper=((1122, 1987), (250, 1750)))
-cam2 = Camera(name="Zyla 6", target="ti", pixel_scale=0.3, file_ext='b0606', wavelength='4536', roi=roi)
-cam3 = Camera(name="iXon 2", target="fe", pixel_scale=0.3, file_ext='b0202', wavelength='6302', roi=[[[0,100],[0,100]],[[0,100],[0,100]]])
-
+cam1 = Camera(name="Zyla 5", target="sr", pixel_scale=0.065, file_ext='b0505', 
+              wavelength='4607', roi=ROI(lower=((50, 928), (350, 1600)), upper=((1112, 1990), (350, 1600))))
+cam2 = Camera(name="Zyla 6", target="ti", pixel_scale=0.065, file_ext='b0606', 
+              wavelength='4536', roi=ROI(lower=((50, 925), (250, 1750)), upper=((1122, 1997), (250, 1750))))
+cam3 = Camera(name="iXon 2", target="fe", pixel_scale=0.235, file_ext='b0202', 
+              wavelength='6302', roi=ROI(lower=((8, 252), (113, 300)), upper=((254, 498), (113, 300))))
+#ROI(lower=((8, 252), (113, 300)), upper=((254, 498), (113, 300))
+#ROI(lower=((0, -1), (0, -1)), upper=((0, -1), (0, -1))
 # Register them
 cam = CameraRegistry()
 cam.add_camera(cam1)

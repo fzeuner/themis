@@ -11,10 +11,10 @@ Configuration file
 # --- parameters for the loading
 
 line = 'ti'
-date = '2025-07-04'
-sequence = 6
-data_t = 'flat'
-status = 'raw'
+date = '2025-07-07'
+sequence = 15
+data_t = 'flat'  # only scan, flat, dark
+status = 'raw'   # only raw
 
 # --- parameters to be changed only once  (in principle)
 

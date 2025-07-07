@@ -35,6 +35,8 @@ import os
 import gc
 import warnings
 from pathlib import Path
+import imreg_dft as ird# pip install git+https://github.com/matejak/imreg_dft.git
+
 
 # GLOBAL VARIABLES
 
@@ -123,7 +125,7 @@ def read_images_file(file_name,original=False, verbose=False):  # not needed rea
 def read_any_file(ff, verbose=False):  
     gc.collect()
     
-    hdu = fits.open(ff.file, memmap=False)
+    hdu = fits.open(ff.file, memmap=True, do_not_scale_image_data=True)
     header=hdu[0].header
        
     data_d=np.array(hdu[0].data)
@@ -133,8 +135,10 @@ def read_any_file(ff, verbose=False):
     if ff.status == 'raw':  
         r1, r2 = ff.cam.roi.extract(data_d)
         
-        data.li = r1
-        data.ui = r2
+        data.li = np.flip(r1, axis=-2) # mirrored image, need to check if this has to be flipped or the other one
+        data.ui = np.flip(r2, axis=-2)
+        
+        
     else:
         print('not supported yet')    
        
