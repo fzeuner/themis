@@ -36,7 +36,8 @@ import gc
 import warnings
 from pathlib import Path
 import imreg_dft as ird# pip install git+https://github.com/matejak/imreg_dft.git
-
+import themis_data_reduction as tdr
+import data_classes as dct
 
 # GLOBAL VARIABLES
 
@@ -122,35 +123,61 @@ def read_images_file(file_name,original=False, verbose=False):  # not needed rea
     else:
       return(data, header)
   
-def read_any_file(ff, verbose=False):  
+def get_pol_half_names(frame_name: str):
+    """
+    Given a polarization frame name like 'pQ' or 'mU', return the names for
+    the upper and lower halves based on the sign.
+
+    Args:
+        frame_name (str): Name starting with 'p' or 'm', e.g., 'pQ', 'mU'
+
+    Returns:
+        tuple: (upper_name, lower_name)
+    """
+    if not frame_name or len(frame_name) < 2:
+        raise ValueError("Frame name must be at least two characters long (e.g., 'pQ').")
+
+    sign = frame_name[0]
+    pol_axis = frame_name[1:]
+
+    if sign == 'p':
+        return (f"p{pol_axis}", f"m{pol_axis}")
+    elif sign == 'm':
+        return (f"m{pol_axis}", f"p{pol_axis}")
+    else:
+        raise ValueError("Frame name must start with 'p' or 'm'.")
+  
+def read_any_file(config, data_type, status='raw', frame = 'pV', verbose=False):  
     gc.collect()
     
-    hdu = fits.open(ff.file, memmap=True, do_not_scale_image_data=True)
+    hdu = fits.open(config.dataset[data_type]['files'][status], memmap=True, do_not_scale_image_data=True)
+    
+    
     header=hdu[0].header
        
-    data_d=np.array(hdu[0].data)
+    data_d=np.array(hdu[0].data) 
     
-    data = l1_data()
+    single_frame = dct.Frame(frame)
     
-    if ff.status == 'raw':  
-        r1, r2 = ff.cam.roi.extract(data_d)
-        
-        data.li = np.flip(r1, axis=-2) # mirrored image, need to check if this has to be flipped or the other one
-        data.ui = np.flip(r2, axis=-2)
-        
+    upper_name, lower_name = get_pol_half_names(frame)
+    
+    if status == 'raw':  
+        r1, r2 = config.cam.roi.extract(data_d)
+        single_frame.set_half("upper", np.flip(r1, axis=-2) , upper_name)
+        single_frame.set_half("lower", np.flip(r2, axis=-2), lower_name)
         
     else:
         print('not supported yet')    
        
     if verbose:
-     print('Reading a '+ff.data_type.name+' file with reduction status '+ff.status)
-     print(data.shape)
+     print('Reading a '+ff.data_type.name+' file with reduction status '+status)
+     print(single_frame)
      print(header)
 
     hdu.close()
     del data_d 
     gc.collect()
-    return(data, header)
+    return(single_frame, header)
 
 def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, DERIV=None, CONT=None, SHOW=2):
     
@@ -1106,78 +1133,113 @@ class ff:
    self.v_file= dst.directory + dst.data_files[dst.line]+dst.data_files['v_i']
    self.i_file= dst.directory + dst.data_files[dst.line]+dst.data_files['i']
    
+   
+class FileSet:
+    def __init__(self):
+        self._files = {}
+
+    def add(self, level_name, file_path):
+        self._files[level_name] = file_path
+
+    def get(self, level_name, default=None):
+        return self._files.get(level_name, default)
+
+    def __getitem__(self, level_name):
+        return self._files[level_name]
+
+    def __contains__(self, level_name):
+        return level_name in self._files
+
+    def items(self):
+        return self._files.items()
+
+    def keys(self):
+        return self._files.keys()
+
+    def values(self):
+        return self._files.values()
+
+    def __repr__(self):
+        lines = [f"<FileSet with {len(self._files)} entries>"]
+        for level, path in self._files.items():
+            exists = "✓" if path.exists() else "✗"
+            lines.append(f"  {level}: {path.name} {exists}")
+        return "\n".join(lines)
+   
+   
 class init:
-    # Class object to store folder, file names etc stored in datasets
- def __init__(self):
-         
-   self.directory = Path(dst.directory)
-   self.figure_dir = dst.directory_figures
-   
-   self.line = dst.line
-   self.seq = dst.sequence
-   self.date = dst.date
-   self.cam = cc.cam[dst.line]
-   self.data_type = cc.data_type[dst.data_t]
-   self.slit_width = dst.slit_width
-   
-   self.status = dst.status
-   
-   self.file = self.directory / self.find_files()
-   
- def find_files(self):
-    cam_str = self.cam.file_ext if hasattr(self.cam, 'file_ext') else str(self.cam)
-    data_str = self.data_type.file_ext if hasattr(self.data_type, 'file_ext') else str(self.data_type)
-    seq_str = f"t{self.seq:03d}"
+    def __init__(self):
+        self.directories = dst.directories
+        self.dataset = dst.dataset
+        self.cam = cc.cam[self.dataset['line']]
+        self.data_types = dst.data_types
+        self.reduction_levels = tdr.reduction_levels
+        self.slit_width = dst.slit_width
 
-    red_suffix = dst.reduction_levels[self.status]  # e.g., '', '_shifted'
-    known_suffixes = [s for s in dst.reduction_levels.values() if s]
+        # Fill file sets for all dataset types
+        for key in dst.file_types:
+            entry = self.dataset[key]
+            entry['files'] = self.build_file_set(entry)
 
-    files = list(self.directory.glob("*"))
-    matches = []
+    def build_file_set(self, entry):
+        file_set = FileSet()
+        data_t = entry['data_type']
+        seq = entry['sequence']
+        cam_str = self.cam.file_ext
+        data_str = self.data_types[data_t].file_ext
+        seq_str = f"t{seq:03d}"
 
-    for f in files:
-        name = f.name
-        if cam_str in name and data_str in name and seq_str in name:
-            if red_suffix == "":
-                # Exclude files with any known suffix
-                if not any(suffix in name for suffix in known_suffixes):
-                    matches.append(f)
-            else:
-                if red_suffix in name:
-                    matches.append(f)
+        for level_name, level_obj in self.reduction_levels.items():
+            suffix = level_obj.file_ext
+            directory = self.directories.get(level_name, self.directories['raw'])
 
-    if not matches:
-        warnings.warn(f"No matching files found for status '{self.status}'.")
-        return 'none'
+            known_suffixes = [lvl.file_ext for lvl in self.reduction_levels.values() if lvl.file_ext]
+            files = list(Path(directory).glob("*"))
+            matches = []
 
-    # Prefer file with '_fx' in the name
-    matches.sort(key=lambda x: (0 if '_fx' in x.name else 1, x.name))
+            for f in files:
+                name = f.name
+                if cam_str in name and data_str in name and seq_str in name:
+                    if suffix == '':
+                        if not any(suf in name for suf in known_suffixes):
+                            matches.append(f)
+                    else:
+                        if suffix in name:
+                            matches.append(f)
 
-    if len(matches) > 1:
-        warnings.warn(f"Multiple matching files found for status '{self.status}'. Returning: {matches[0].name}")
+            # Prefer _fx if available
+            matches.sort(key=lambda x: (0 if '_fx' in x.name else 1, x.name))
+            if matches:
+                file_set.add(level_name, matches[0])
 
-    return matches[0]
-       
-
-def save_inv_input_data(data, xlam,ff,scan, overwrite = True):
+        return file_set
     
-    hdr = fits.Header()
-    hdr.set('RED_ROUT',  'themis/save_inv_input_data', comment='Code used for processing')
-    
-    primary_hdu = fits.PrimaryHDU(data, header=hdr)
-    hdul = fits.HDUList(
-        [primary_hdu])
-    
-    inv_inp_data_file= ff.inversion_dir + ff.inv_inp_data_file +'_{:.0f}'.format(scan) + '.fits'
-    
-    if os.path.basename(inv_inp_data_file) in os.listdir(ff.inversion_dir):
-        if overwrite:
-          hdul.writeto( inv_inp_data_file, overwrite=True)
-    else:
-        hdul.writeto(inv_inp_data_file, overwrite=True)
-    print('Inversion input data file created for parallel SIR: \n '+inv_inp_data_file)
-    print('-----------------------------')
-    return()
+    def __repr__(self):
+     lines = [
+        f"<Init Configuration>",
+        f"  Line:       {self.dataset['line']}",
+        f"  Camera:     {self.cam}",
+        f"  Slit Width: {self.slit_width} arcsec",
+        f"  Directories:",
+        f"    Raw:      {self.directories.raw}",
+        f"    Reduced:  {self.directories.reduced}",
+        f"    Figures:  {self.directories.figures}",
+        f"    Inversion:{self.directories.inversion}",
+        f"  Files:"
+     ]
+
+     for key in dst.file_types:
+        entry = self.dataset[key]
+        file_set = entry.get('files')
+        if file_set:
+            for level in self.reduction_levels.list_levels():
+                path = file_set.get(level)
+                exists = "✓" if path and path.exists() else "✗"
+                lines.append(f"    {key} ({level}): {path.name if path else '—'} {exists}")
+        else:
+            lines.append(f"    {key}: —")
+
+     return "\n".join(lines)
 
 
 def write_wht_file(xlam, directory):

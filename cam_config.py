@@ -61,7 +61,7 @@ class Camera:
             self.roi = ROI(lower=tuple(map(tuple, r1)), upper=tuple(map(tuple, r2)))
 
     def __repr__(self):
-        return f"<Camera(name={self.name}, target={self.target}), file_ext={self.file_ext})>"
+        return f"<Camera(name={self.name}, wavelength={self.wavelength}), file_ext={self.file_ext}, pixel_scale={self.pixel_scale})>"
 
 class CameraRegistry:
     def __init__(self):
@@ -80,33 +80,6 @@ class CameraRegistry:
 
     def list_targets(self):
         return list(self._cameras_by_target.keys())
-    
-class DataType:
-    def __init__(self, name, file_ext):
-        self.name = name
-        self.file_ext = file_ext
-
-    def __repr__(self):
-        return f"<DataType(name={self.name}, file_extension={self.file_ext})>"
-
-
-class DataTypeRegistry:
-    def __init__(self):
-        self._types = {}
-
-    def add(self, datatype):
-        self._types[datatype.name] = datatype
-
-    def __getitem__(self, name):
-        return self._types[name]
-
-    def __getattr__(self, name):
-        if name in self._types:
-            return self._types[name]
-        raise AttributeError(f"No data type named '{name}'")
-
-    def list_types(self):
-        return list(self._types.keys())
 
 
 cam1 = Camera(name="Zyla 5", target="sr", pixel_scale=0.065, file_ext='b0505', 
@@ -130,13 +103,3 @@ cam.add_camera(cam3)
 # List available targets
 #print(cam.list_targets())  # ['target1', 'target2', 'target3']
 
-# Create data types
-dark = DataType(name="dark", file_ext="_x3")
-flat = DataType(name="flat", file_ext="_y3")
-scan = DataType(name="scan", file_ext="_b3")
-
-# Register them
-data_type = DataTypeRegistry()
-data_type.add(dark)
-data_type.add(flat)
-data_type.add(scan)
