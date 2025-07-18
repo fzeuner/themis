@@ -40,20 +40,25 @@ class DataTypeRegistry:
     def list_types(self):
         return list(self._types.keys())
 
-
+# ++++++++++++++++++++++++++++++++++++++++++
 # --- parameters for the loading
+# ++++++++++++++++++++++++++++++++++++++++++
 
 line = 'sr'
 date = '2025-07-07'
 sequence = 26
 dark_sequence = 1
 flat_sequence = 25
-stokes = ['pQ', '-Q', '+U', ]
+states = ['pQ', 'mQ', 'pU', 'mU', 'pV', 'mV' ]
 
+# ++++++++++++++++++++++++++++++++++++++++++
 # --- parameters to be changed only once  (in principle)
+# ++++++++++++++++++++++++++++++++++++++++++
 
 slit_width=0.33 #/ [arcsec] SlitWidth
 file_types = ['scan', 'dark', 'flat']
+
+# ++++++++++++++++++++++++++++++++++++++++++
 
 # Create data types
 dark = DataType(name=file_types[1], file_ext="_x3")
@@ -66,8 +71,8 @@ class DirectoryPaths:
         self.date = date
 
         # Define paths
-        self.raw = self.base / date
-        self.reduced = self.base / date / "reduced"
+        self.raw = self.base / "rdata" / date
+        self.reduced = self.base / "pdata" /date 
         self.figures = Path("/home/franziskaz/figures/themis/")
         self.inversion = self.base / "inversion"
 

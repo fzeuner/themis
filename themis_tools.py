@@ -147,38 +147,91 @@ def get_pol_half_names(frame_name: str):
     else:
         raise ValueError("Frame name must start with 'p' or 'm'.")
   
-def read_any_file(config, data_type, status='raw', frame = 'pV', verbose=False):  
+def read_any_file(config, data_type, status='raw', verbose=False):  
+    """
+    Reads a FITS file and populates a CycleSet with Frames for all defined
+    polarization states.
+
+    Args:
+        config (init): An initialized configuration object.
+        data_type (str): The key for the dataset entry (e.g., 'science_data').
+        status (str): The reduction level (e.g., 'raw', 'reduced').
+        verbose (bool): If True, print verbose output.
+
+    Returns:
+        tuple: (CycleSet, header) - A CycleSet containing all polarization frames,
+               and the FITS header.
+    """
     gc.collect()
     
-    hdu = fits.open(config.dataset[data_type]['files'][status], memmap=True, do_not_scale_image_data=True)
+    file_path = config.dataset[data_type]['files'].get(status)
+    if not file_path or not file_path.exists():
+        raise FileNotFoundError(f"File for data_type '{data_type}' at status '{status}' not found: {file_path}")
+
+    hdu = fits.open(file_path, memmap=True, do_not_scale_image_data=True)
     
+    header = hdu[0].header
     
-    header=hdu[0].header
-       
-    data_d=np.array(hdu[0].data) 
+    num_slit_positions = header['NBSTEP']+1
+    data = np.array(hdu[0].data)
     
-    single_frame = dct.Frame(frame)
-    
-    upper_name, lower_name = get_pol_half_names(frame)
+    full_cycle_set = dct.CycleSet()
     
     if status == 'raw':  
-        r1, r2 = config.cam.roi.extract(data_d)
-        r1 = np.reshape(r1, (np.flip(r1, axis=-2),6,int(240/6),878, 1250))
-        single_frame.set_half("upper", 1 , upper_name)
-        single_frame.set_half("lower", np.flip(r2, axis=-2), lower_name)
+        num_pol_states = len(config.polarization_states)
+        total_frames_in_file = data.shape[0]
+        if total_frames_in_file % (num_pol_states * num_slit_positions) != 0:
+            raise ValueError(
+                f"Raw data dimension mismatch. Expected total frames to be a multiple of "
+                f"({config.polarization_states} states * {num_slit_positions} slit_positions). "
+                f"Got {total_frames_in_file} frames."
+            )
         
+        num_maps = total_frames_in_file // (num_pol_states * num_slit_positions)
+
+        if verbose:
+            print(f"Detected {config.polarization_states} polarization states, {num_slit_positions} slit positions, {num_maps} maps.")
+
+        for map_idx in range(num_maps):
+            for s_idx in range(num_slit_positions): # Iterate by index instead of name
+                for p_idx, pol_state in enumerate(config.polarization_states):
+                    
+                    frame_index_in_data_d = (map_idx * num_slit_positions * num_pol_states) + \
+                                            (s_idx * num_pol_states) + \
+                                             p_idx
+                                             
+                    current_frame_data_3d = data[frame_index_in_data_d]
+                    
+                    r1_data, r2_data = config.cam.roi.extract(current_frame_data_3d)
+
+                    frame_name_str = f"{pol_state}_slit{s_idx:02d}_map{map_idx:02d}" # Name using index
+                    single_frame = dct.Frame(frame_name_str)
+                    upper_name, lower_name = get_pol_half_names(pol_state)
+                    
+                    r2_data_flipped = np.flip(r2_data, axis=-2)
+
+                    single_frame.set_half("upper", r1_data, upper_name)
+                    single_frame.set_half("lower", r2_data_flipped, lower_name)
+                    
+                    full_cycle_set.add_frame(single_frame, (pol_state, s_idx, map_idx)) # Key uses index
+            
     else:
-        print('not supported yet')    
-       
+        print(f"Reading status '{status}' not fully supported for multi-frame extraction.")
+        single_frame = dct.Frame(f"{data_type}_full")
+        single_frame.set_half("full_data", data, "Unknown")
+        full_cycle_set.add_frame(single_frame, (data_type, -1, 0)) # Use -1 for slit_idx if not applicable
+
+
     if verbose:
-     print('Reading a '+ff.data_type.name+' file with reduction status '+status)
-     print(single_frame)
-     print(header)
+        print(f'Reading a {config.data_types[data_type].name} file with reduction status {status}')
+        print(full_cycle_set) 
+        print("Header:")
+        print(header)
 
     hdu.close()
-    del data_d 
+    del data
     gc.collect()
-    return(single_frame, header)
+    return full_cycle_set, header
 
 def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, DERIV=None, CONT=None, SHOW=2):
     
@@ -1176,6 +1229,7 @@ class init:
         self.data_types = dst.data_types
         self.reduction_levels = tdr.reduction_levels
         self.slit_width = dst.slit_width
+        self.polarization_states = dst.states
 
         # Fill file sets for all dataset types
         for key in dst.file_types:
@@ -1221,6 +1275,7 @@ class init:
         f"  Line:       {self.dataset['line']}",
         f"  Camera:     {self.cam}",
         f"  Slit Width: {self.slit_width} arcsec",
+        f"  Polarization States: {', '.join(self.polarization_states)}",
         f"  Directories:",
         f"    Raw:      {self.directories.raw}",
         f"    Reduced:  {self.directories.reduced}",

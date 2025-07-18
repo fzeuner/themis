@@ -25,10 +25,10 @@ if __name__ == '__main__':
 
 # -----------------------------------------------------
     # initialize files and folder object
-    ff = tt.init() 
+    config = tt.init() 
 
     # read data
-    data, header = tt.read_any_file(ff, 'scan', verbose=False, status='raw')
+    data, header = tt.read_any_file(config, 'scan', verbose=False, status='raw')
     #result = ird.similarity(data.ui[0]/data.ui[0].max(), data.li[0]/data.li[0].max(), numiter=3)
     #ird.imshow(data.ui[0]/data.ui[0].max(), data.li[0]/data.li[0].max(), resulti)
     #plt.imshow(data.li[0]/data.li[0].max()-data.ui[0]/data.ui[0].max(), origin='lower')
