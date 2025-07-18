@@ -163,7 +163,8 @@ def read_any_file(config, data_type, status='raw', frame = 'pV', verbose=False):
     
     if status == 'raw':  
         r1, r2 = config.cam.roi.extract(data_d)
-        single_frame.set_half("upper", np.flip(r1, axis=-2) , upper_name)
+        r1 = np.reshape(r1, (np.flip(r1, axis=-2),6,int(240/6),878, 1250))
+        single_frame.set_half("upper", 1 , upper_name)
         single_frame.set_half("lower", np.flip(r2, axis=-2), lower_name)
         
     else:
