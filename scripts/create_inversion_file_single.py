@@ -6,8 +6,10 @@ Created on Fri Mar  28 14:10:21 2025
 @author: zeuner
 """
 
-import themis_tools as tt
-import themis_datasets as dst
+import os, sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+from themis.core import themis_tools as tt
+from themis.datasets import themis_datasets as dst
 
 import matplotlib.pyplot as plt
 import numpy as np

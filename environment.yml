@@ -1,0 +1,21 @@
+name: themis
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - matplotlib
+  - astropy
+  - scikit-learn
+  - scikit-image
+  - tqdm
+  - pyqt
+  - pyqtgraph
+  - qdarkstyle
+  - lmfit
+  - imageio
+  - pip
+  - pip:
+      - imreg_dft

@@ -23,9 +23,9 @@ from pyqtgraph.Qt import QtCore
 import qdarkstyle
 from pyqtgraph.dockarea.Dock import Dock
 from pyqtgraph.dockarea.DockArea import DockArea
-from getWidgetColors import getWidgetColors
+from themis.ui.getWidgetColors import getWidgetColors
 
-import themis_tools as tt
+from themis.core import themis_tools as tt
 
 
 # import pyqtgraph.examples

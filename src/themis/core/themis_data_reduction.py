@@ -58,7 +58,7 @@ class ReductionRegistry:
 
 
 def reduce_raw(ff):
-    print('No processing')
+    print('No processing for reduction level raw')
     return None
 
 def reduce_raw_to_l0(ff):

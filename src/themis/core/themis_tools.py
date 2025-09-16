@@ -14,7 +14,7 @@ Version: 2025-3-27
 import matplotlib.pyplot as plt
 from astropy.io import fits 
 import numpy as np
-from style_themis import style_aa
+from themis.ui.style_themis import style_aa
 from matplotlib.ticker import (NullFormatter)
 
 from scipy.signal import convolve2d
@@ -36,15 +36,15 @@ import gc
 import warnings
 from pathlib import Path
 import imreg_dft as ird# pip install git+https://github.com/matejak/imreg_dft.git
-import themis_data_reduction as tdr
-import data_classes as dct
+from themis.core import themis_data_reduction as tdr
+from themis.core import data_classes as dct
 
 # GLOBAL VARIABLES
 
 directory_atlas = '/home/zeuner/data/atlas' # on x1
 
-import themis_datasets_2025 as dst
-import cam_config as cc
+from themis.datasets import themis_datasets_2025 as dst
+from themis.core import cam_config as cc
 
 
 #%%
