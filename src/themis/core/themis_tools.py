@@ -24,9 +24,10 @@ from tqdm import tqdm
 import matplotlib.colors as mplcolor
 from scipy.interpolate import interp1d
 from scipy.signal import windows
+from scipy import ndimage
+from scipy.ndimage import shift
 
 from skimage.registration import phase_cross_correlation
-from scipy.ndimage import shift
 
 from matplotlib import gridspec
 from sklearn.decomposition import PCA
@@ -34,10 +35,13 @@ from sklearn.preprocessing import StandardScaler
 import os
 import gc
 import warnings
+
 from pathlib import Path
 import imreg_dft as ird# pip install git+https://github.com/matejak/imreg_dft.git
 from themis.core import themis_data_reduction as tdr
 from themis.core import data_classes as dct
+
+
 
 # GLOBAL VARIABLES
 
@@ -89,6 +93,80 @@ def beam_exchange(data):
     out_data.v = calc_v_beamexchange(data)
     out_data.method = 'beam exchange'
     return(out_data)
+
+
+
+def z3denoise(image, method='poly_fit', rand=None, verbose=False):
+    # Get image dimensions
+    sz = image.shape
+    xd = sz[0]
+    yd = sz[1] 
+ 
+    at = image.dtype  # Type of the image array
+
+    # Handle the rand array
+    rd = np.zeros(4, dtype=int)
+    if rand is not None:
+        rd += rand
+    rdnull = np.all(rd == 0)
+
+    # Handle method input
+    method = method.lower().split() if isinstance(method, str) else method
+    res = np.zeros((xd, yd), dtype=at)
+
+    ok = False
+
+    if method[0] == 'poly_fit':
+        if verbose:
+         print('Method: poly_fit')
+        ok = True
+        degx = int(method[1]) if len(method) > 1 else 7
+        degy = int(method[2]) if len(method) > 2 else degx
+        ix = np.arange(xd)
+        iy = np.arange(yd)
+
+   
+        if xd > degx:
+                    for y in range(yd):
+                        ce = np.polyfit(ix[rd[0]:xd-rd[1]], image[rd[0]:xd-rd[1], y], degx)
+                        if rdnull:
+                            res[:, y] = np.polyval(ce, ix)
+                        else:
+                            for n in range(degx + 1):
+                                res[:, y] += ce[n] * ix ** n
+
+        if yd > degy:
+                    for x in range(xd):
+                        ce = np.polyfit(iy[rd[2]:yd-rd[3]], res[x, rd[2]:yd-rd[3]], degy)
+                        if rdnull:
+                            res[x, :] = np.polyval(ce, iy)
+                        else:
+                            res[x, :] = 0
+                            for n in range(degy + 1):
+                                res[x, :] += ce[n] * iy ** n
+
+    elif method[0] == 'smooth':
+        if verbose:
+         print('Method: smooth')
+        ok = True
+        width = int(method[1]) if len(method) > 1 else 5
+
+
+        if rdnull:
+                    res[:, :] = ndimage.gaussian_filter(image[:, :], width)
+        else:
+                    sim = ndimage.gaussian_filter(image[rd[0]:xd-rd[1], rd[2]:yd-rd[3]], width)
+                    res[:, :,] = ndimage.zoom(sim, (xd / sim.shape[0], yd / sim.shape[1]))
+                    res[rd[0]:xd-rd[1], rd[2]:yd-rd[3]] = sim
+
+
+    if ok:
+        return(res)
+
+    print(f'z3denoise: Method {method[0]} unknown!')
+    return(None)
+
+
 
 def read_images_file(file_name,original=False, verbose=False):  # not needed really
     
@@ -159,7 +237,7 @@ def read_any_file(config, data_type, status='raw', verbose=False):
         verbose (bool): If True, print verbose output.
 
     Returns:
-        tuple: (CycleSet, header) - A CycleSet containing all polarization frames,
+        tuple: (collection, header) - A CycleSet or FramesSet containing frames,
                and the FITS header.
     """
     gc.collect()
@@ -172,66 +250,91 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     
     header = hdu[0].header
     
-    num_slit_positions = header['NBSTEP']+1
+    num_slit_positions = header.get('NBSTEP', 0) + 1 if 'NBSTEP' in header else 1
     data = np.array(hdu[0].data)
     
-    full_cycle_set = dct.CycleSet()
+    collection = None
     
     if status == 'raw':  
-        num_pol_states = len(config.polarization_states)
-        total_frames_in_file = data.shape[0]
-        if total_frames_in_file % (num_pol_states * num_slit_positions) != 0:
-            raise ValueError(
-                f"Raw data dimension mismatch. Expected total frames to be a multiple of "
-                f"({config.polarization_states} states * {num_slit_positions} slit_positions). "
-                f"Got {total_frames_in_file} frames."
-            )
-        
-        num_maps = total_frames_in_file // (num_pol_states * num_slit_positions)
-
-        if verbose:
-            print(f"Detected {config.polarization_states} polarization states, {num_slit_positions} slit positions, {num_maps} maps.")
-
-        for map_idx in range(num_maps):
-            for s_idx in range(num_slit_positions): # Iterate by index instead of name
-                for p_idx, pol_state in enumerate(config.polarization_states):
-                    
-                    frame_index_in_data_d = (map_idx * num_slit_positions * num_pol_states) + \
-                                            (s_idx * num_pol_states) + \
-                                             p_idx
-                                             
-                    current_frame_data_3d = data[frame_index_in_data_d]
-                    
-                    r1_data, r2_data = config.cam.roi.extract(current_frame_data_3d)
-
-                    frame_name_str = f"{pol_state}_slit{s_idx:02d}_map{map_idx:02d}" # Name using index
-                    single_frame = dct.Frame(frame_name_str)
-                    upper_name, lower_name = get_pol_half_names(pol_state)
-                    
-                    r2_data_flipped = np.flip(r2_data, axis=-2)
-
-                    single_frame.set_half("upper", r1_data, upper_name)
-                    single_frame.set_half("lower", r2_data_flipped, lower_name)
-                    
-                    full_cycle_set.add_frame(single_frame, (pol_state, s_idx, map_idx)) # Key uses index
+        if data_type == 'scan':  
+            # Original scan handling: build CycleSet keyed by (pol_state, slit_idx, map_idx)
+            collection = dct.CycleSet()
+            num_pol_states = len(config.polarization_states)
+            total_frames_in_file = data.shape[0]
+            if total_frames_in_file % (num_pol_states * num_slit_positions) != 0:
+                raise ValueError(
+                    f"Raw data dimension mismatch. Expected total frames to be a multiple of "
+                    f"({config.polarization_states} states * {num_slit_positions} slit_positions). "
+                    f"Got {total_frames_in_file} frames."
+                )
             
+            num_maps = total_frames_in_file // (num_pol_states * num_slit_positions)
+
+            if verbose:
+                print(f"Detected {config.polarization_states} polarization states, {num_slit_positions} slit positions, {num_maps} maps.")
+
+            for map_idx in range(num_maps):
+                for s_idx in range(num_slit_positions): # Iterate by index instead of name
+                    for p_idx, pol_state in enumerate(config.polarization_states):
+                        frame_index_in_data_d = (map_idx * num_slit_positions * num_pol_states) + \
+                                                (s_idx * num_pol_states) + \
+                                                 p_idx
+                        current_frame_data_3d = data[frame_index_in_data_d]
+                        r1_data, r2_data = config.cam.roi.extract(current_frame_data_3d)
+
+                        frame_name_str = f"{pol_state}_slit{s_idx:02d}_map{map_idx:02d}"  # Name using index
+                        single_frame = dct.Frame(frame_name_str)
+                        upper_name, lower_name = get_pol_half_names(pol_state)
+
+                        # Keep current orientation choice (adjust if needed)
+                        r2_data_flipped = r2_data  # np.flip(r2_data, axis=(-2)) # flip y axis if desired
+
+                        single_frame.set_half("upper", r1_data, upper_name)
+                        single_frame.set_half("lower", r2_data_flipped, lower_name)
+                        collection.add_frame(single_frame, (pol_state, s_idx, map_idx))
+
+        elif data_type in ('flat', 'dark'):
+            # Generic frames (no states/slit/map semantics): use FramesSet keyed by frame_idx
+            total_frames_in_file = data.shape[0]
+            collection = dct.FramesSet()
+            if verbose:
+                print(f"Detected {total_frames_in_file} frames in file for '{data_type}'.")
+
+            for frame_idx in range(total_frames_in_file):
+                current_frame_data_3d = data[frame_idx]
+                # Apply camera ROI to split into upper/lower halves
+                r1_data, r2_data = config.cam.roi.extract(current_frame_data_3d)
+                # Orientation: mirror choice from scan branch unless you decide to flip here
+                r2_data_flipped = r2_data  # np.flip(r2_data, axis=(-2)) # flip y axis if desired
+                frame_name_str = f"{data_type}_frame{frame_idx:04d}"
+                single_frame = dct.Frame(frame_name_str)
+                single_frame.set_half("upper", r1_data)  # no pol_state
+                single_frame.set_half("lower", r2_data_flipped)  # no pol_state
+                collection.add_frame(single_frame, frame_idx)
+        else:
+            # Fallback: treat as single full-data frame in a FramesSet
+            collection = dct.FramesSet()
+            single_frame = dct.Frame(f"{data_type}_full")
+            single_frame.set_half("full_data", np.array(hdu[0].data))
+            collection.add_frame(single_frame, 0)
     else:
-        print(f"Reading status '{status}' not fully supported for multi-frame extraction.")
+        # Non-raw status fallback
+        collection = dct.FramesSet()
         single_frame = dct.Frame(f"{data_type}_full")
-        single_frame.set_half("full_data", data, "Unknown")
-        full_cycle_set.add_frame(single_frame, (data_type, -1, 0)) # Use -1 for slit_idx if not applicable
+        single_frame.set_half("full_data", np.array(hdu[0].data))
+        collection.add_frame(single_frame, 0)
 
 
     if verbose:
         print(f'Reading a {config.data_types[data_type].name} file with reduction status {status}')
-        print(full_cycle_set) 
+        print(collection) 
         print("Header:")
         print(header)
 
     hdu.close()
     del data
     gc.collect()
-    return full_cycle_set, header
+    return collection, header
 
 def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, DERIV=None, CONT=None, SHOW=2):
     

@@ -9,20 +9,21 @@ Data class handling
 """
 
 from dataclasses import dataclass
+from typing import Optional
 import numpy as np
 
 
 @dataclass
 class FrameHalf:
     data: np.ndarray
-    pol_state: str
+    pol_state: Optional[str] = None
 
 class Frame:
     def __init__(self, name):
         self.name = name
         self.halves = {}  # 'upper' → FrameHalf, 'lower' → FrameHalf
 
-    def set_half(self, position: str, data: np.ndarray, pol_state: str):
+    def set_half(self, position: str, data: np.ndarray, pol_state: Optional[str] = None):
         assert position in ['upper', 'lower']
         self.halves[position] = FrameHalf(data=data, pol_state=pol_state)
 
@@ -33,44 +34,139 @@ class Frame:
         for pos, half in self.halves.items():
             if half.pol_state == pol_state:
                 return half.data
-        return None  # or raise?
-    
+        return None  # not found
 
 class CycleSet:
-   def __init__(self):
-       # frames keyed by (polarization_state, slit_position_index, map_index)
-       self.frames = {} 
+    def __init__(self):
+        # frames keyed by (polarization_state, slit_position_index, map_index)
+        self.frames = {}
 
-   def add_frame(self, frame: Frame, key_tuple: tuple):
-       """
-       Adds a frame with a composite key (pol_state, slit_pos_idx, map_idx).
-       """
-       self.frames[key_tuple] = frame
+    def add_frame(self, frame: Frame, key_tuple: tuple):
+        """
+        Adds a frame with a composite key (pol_state, slit_pos_idx, map_idx).
+        """
+        self.frames[key_tuple] = frame
 
-   def get_state_slit_map(self, pol_state: str, slit_pos_idx: int, map_idx: int):
-       """
-       Retrieves a specific frame by its polarization state, slit position index, and map index.
-       """
-       return self.frames.get((pol_state, slit_pos_idx, map_idx))
+    def get_state_slit_map(self, pol_state: str, slit_pos_idx: int, map_idx: int):
+        """
+        Retrieves a specific frame by its polarization state, slit position index, and map index.
+        """
+        return self.frames.get((pol_state, slit_pos_idx, map_idx))
 
-   def get_state(self, pol_state: str):
-       """
-       Returns a new CycleSet containing only frames for the specified polarization state.
-       """
-       new_collection = CycleSet()
-       for key, frame in self.frames.items():
-           if key[0] == pol_state:
-               new_collection.add_frame(frame, key)
-       return new_collection
-   
-   def get_arrays(self):
-       return [half.data for f_key in sorted(self.frames.keys()) for half in self.frames[f_key].halves.values()]
+    def get_state(self, pol_state: str):
+        """
+        Returns a new CycleSet containing only frames for the specified polarization state.
+        """
+        new_collection = CycleSet()
+        for key, frame in self.frames.items():
+            if key[0] == pol_state:
+                new_collection.add_frame(frame, key)
+        return new_collection
+    
+    def get_arrays(self):
+        return [half.data for f_key in sorted(self.frames.keys()) for half in self.frames[f_key].halves.values()]
 
-   def __repr__(self):
-       frame_keys_summary = sorted(list(self.frames.keys()))
-       if len(frame_keys_summary) > 5:
-           frame_keys_summary = frame_keys_summary[:2] + ['...'] + frame_keys_summary[-2:]
-       return f"CycleSet(frames_keys={frame_keys_summary}, total_frames={len(self.frames)})"
+    def __repr__(self):
+        frame_keys_summary = sorted(list(self.frames.keys()))
+        if len(frame_keys_summary) > 5:
+            frame_keys_summary = frame_keys_summary[:2] + ['...'] + frame_keys_summary[-2:]
+        return f"CycleSet(frames_keys={frame_keys_summary}, total_frames={len(self.frames)})"
+
+    # Convenience methods
+    def get_all_halves(self, position: str = 'upper'):
+        """
+        Return a list of FrameHalf objects for the requested position over all frames
+        in key-sorted order. Position must be 'upper' or 'lower'.
+        """
+        assert position in ('upper', 'lower')
+        halves = []
+        for _, frame in sorted(self.frames.items()):
+            half = frame.get_half(position)
+            if half is not None:
+                halves.append(half)
+        return halves
+
+    def get_all(self, position: str = 'upper'):
+        """
+        Return a list of np.ndarray data for the requested half position over all frames
+        in key-sorted order. Position must be 'upper' or 'lower'.
+        """
+        return [h.data for h in self.get_all_halves(position)]
+
+    def stack_all(self, position: str = 'upper', axis: int = 0):
+        """
+        Stack all arrays of the requested half position along a new axis.
+        All arrays must have matching shapes. Raises if list is empty.
+        """
+        arrays = self.get_all(position)
+        if not arrays:
+            raise ValueError("No frames available to stack for position='{}'".format(position))
+        return np.stack(arrays, axis=axis)
+
+class FramesSet:
+    """
+    Simple container for a sequence of Frame instances keyed by an integer frame index.
+    Use this when you just have a list/sequence of frames without the (state, slit, map) semantics.
+    """
+    def __init__(self):
+        self.frames = {}
+
+    def add_frame(self, frame: Frame, frame_idx: int):
+        self.frames[int(frame_idx)] = frame
+
+    def get(self, frame_idx: int):
+        return self.frames.get(int(frame_idx))
+
+    def __len__(self):
+        return len(self.frames)
+
+    def keys(self):
+        return sorted(self.frames.keys())
+
+    def items(self):
+        for k in self.keys():
+            yield k, self.frames[k]
+
+    def get_arrays(self):
+        return [half.data for f_key in self.keys() for half in self.frames[f_key].halves.values()]
+
+    def __repr__(self):
+        frame_keys_summary = self.keys()
+        if len(frame_keys_summary) > 5:
+            frame_keys_summary = frame_keys_summary[:2] + ['...'] + frame_keys_summary[-2:]
+        return f"FramesSet(frame_indices={frame_keys_summary}, total_frames={len(self.frames)})"
+
+    # Convenience methods
+    def get_all_halves(self, position: str = 'upper'):
+        """
+        Return a list of FrameHalf objects for the requested position over all frames
+        in index-sorted order. Position must be 'upper' or 'lower'.
+        """
+        assert position in ('upper', 'lower')
+        halves = []
+        for idx in self.keys():
+            frame = self.frames[idx]
+            half = frame.get_half(position)
+            if half is not None:
+                halves.append(half)
+        return halves
+
+    def get_all(self, position: str = 'upper'):
+        """
+        Return a list of np.ndarray data for the requested half position over all frames
+        in index-sorted order. Position must be 'upper' or 'lower'.
+        """
+        return [h.data for h in self.get_all_halves(position)]
+
+    def stack_all(self, position: str = 'upper', axis: int = 0):
+        """
+        Stack all arrays of the requested half position along a new axis.
+        All arrays must have matching shapes. Raises if list is empty.
+        """
+        arrays = self.get_all(position)
+        if not arrays:
+            raise ValueError("No frames available to stack for position='{}'".format(position))
+        return np.stack(arrays, axis=axis)
 
     
     

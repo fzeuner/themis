@@ -12,8 +12,14 @@ Reduction levels supported: raw, l0
 
 """
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from dataclasses import dataclass
+
+# Python 3.11+ has tomllib in the stdlib. For 3.12 (used here) this is available.
+try:
+    import tomllib  # type: ignore[attr-defined]
+except Exception as e:  # pragma: no cover
+    tomllib = None
 
 # Core dependencies used to assemble a configuration
 from themis.core import themis_data_reduction as tdr
@@ -46,22 +52,55 @@ class DataTypeRegistry:
     def list_types(self):
         return list(self._types.keys())
 
-# ++++++++++++++++++++++++++++++++++++++++++
-# --- parameters for the loading
-# ++++++++++++++++++++++++++++++++++++++++++
+"""
+Configuration loading
 
-line = 'sr'
-date = '2025-07-07'
-sequence = 26
-dark_sequence = 1
-flat_sequence = 25
-states = ['pQ', 'mQ', 'pU', 'mU', 'pV', 'mV' ]
+This module supports both hardcoded defaults and external configuration files
+in TOML format. Use get_config(config_path=...) to populate dataset variables
+from a TOML file. If no config is provided, the previous hardcoded defaults
+are used to preserve backward compatibility.
 
-# ++++++++++++++++++++++++++++++++++++++++++
-# --- parameters to be changed only once  (in principle)
-# ++++++++++++++++++++++++++++++++++++++++++
+Example TOML structure:
 
-slit_width=0.33 #/ [arcsec] SlitWidth
+    [dataset]
+    line = "sr"
+    date = "2025-07-07"
+    sequence = 26
+    dark_sequence = 1
+    flat_sequence = 25
+    states = ["pQ", "mQ", "pU", "mU", "pV", "mV"]
+
+    [paths]
+    base = "/home/USER/data/themis"          # optional; defaults to prior value
+    figures = "/home/USER/figures/themis/"   # optional override
+    inversion = "/home/USER/data/themis/inversion"  # optional override
+
+    [params]
+    slit_width = 0.33
+
+Notes:
+- file_types are fixed as ["scan", "dark", "flat"] to match the existing code.
+"""
+
+# defaults (preserve behavior if no config file is supplied)
+DEFAULTS = {
+    "dataset": {
+        "line": "sr",
+        "date": "2025-07-07",
+        "sequence": 26,
+        "dark_sequence": 1,
+        "flat_sequence": 25,
+        "states": ["pQ", "mQ", "pU", "mU", "pV", "mV"],
+    },
+    "paths": {
+        "base": "/home/franziskaz/data/themis",
+        # figures and inversion derived below if not provided
+    },
+    "params": {
+        "slit_width": 0.33,
+    },
+}
+
 file_types = ['scan', 'dark', 'flat']
 
 # ++++++++++++++++++++++++++++++++++++++++++
@@ -72,15 +111,16 @@ flat = DataType(name=file_types[2], file_ext="_y3")
 scan = DataType(name=file_types[0], file_ext="_b3")
 
 class DirectoryPaths:
-    def __init__(self, date: str, base="/home/franziskaz/data/themis", auto_create=False):
+    def __init__(self, date: str, base: str, figures: Optional[str] = None,
+                 inversion: Optional[str] = None, auto_create: bool = False):
         self.base = Path(base)
         self.date = date
 
         # Define paths
         self.raw = self.base / "rdata" / date
-        self.reduced = self.base / "pdata" /date 
-        self.figures = Path("/home/franziskaz/figures/themis/")
-        self.inversion = self.base / "inversion"
+        self.reduced = self.base / "pdata" / date
+        self.figures = Path(figures) if figures else Path("/home/franziskaz/figures/themis/")
+        self.inversion = Path(inversion) if inversion else (self.base / "inversion")
 
         # Automatically create directories if they don't exist
         if auto_create:
@@ -99,31 +139,91 @@ class DirectoryPaths:
     def __repr__(self):
         return "\n".join(f"{key}: {getattr(self, key)}" for key in ['raw', 'reduced', 'figures', 'inversion'])
 
-directories = DirectoryPaths(date=date)
+def _deep_get(dct: dict, path: str, default=None):
+    cur = dct
+    for part in path.split('.'):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
+
+
+def _load_config_from_toml(config_path: Path) -> dict:
+    if tomllib is None:
+        raise RuntimeError("tomllib is not available. Please use Python >= 3.11 or install tomli for older versions.")
+    with config_path.open('rb') as f:
+        data = tomllib.load(f)
+    return data
+
+
+def _merge_defaults(user_cfg: Optional[dict]) -> dict:
+    # merge DEFAULTS with user_cfg (shallow nested merge for our keys)
+    cfg = {k: (v.copy() if isinstance(v, dict) else v) for k, v in DEFAULTS.items()}
+    if not user_cfg:
+        return cfg
+    for top_key in ("dataset", "paths", "params"):
+        if top_key in user_cfg and isinstance(user_cfg[top_key], dict):
+            cfg[top_key].update(user_cfg[top_key])
+    return cfg
 
 
 # --- useful functions
 
 
-dataset = {
-    'line': line,
-    
-    file_types[0]: {
-        'data_type': file_types[0],
-        'sequence': sequence,
-        'files' : ''
-    },
-    file_types[2]: {
-        'data_type': file_types[2],
-        'sequence': flat_sequence,
-        'files' : ''
-    },
-    file_types[1]: {
-        'data_type': file_types[1],
-        'sequence': dark_sequence,
-        'files' : ''
+def _project_root() -> Path:
+    # this file: .../src/themis/datasets/themis_datasets_2025.py
+    # project root is three levels above this file: datasets -> themis -> src -> [project root]
+    return Path(__file__).resolve().parents[3]
+
+
+def _resolve_config_path(config_path_str: str) -> Optional[Path]:
+    """Resolve a config path with project-root semantics.
+
+    Policy:
+    - If an absolute path is provided, return it if it exists; otherwise None.
+    - If a relative path is provided, ALWAYS resolve it relative to the project root.
+      If that doesn't exist and the path is a bare filename (no directory parts),
+      try `project_root/configs/<filename>`.
+    """
+    p = Path(config_path_str)
+    if p.is_absolute():
+        return p if p.exists() else None
+
+    root = _project_root()
+
+    # Resolve relative to project root
+    cand = (root / p)
+    if cand.exists():
+        return cand
+
+    # If given a bare filename, try project_root/configs/<filename>
+    if p.parent == Path('.'):
+        cand2 = root / 'configs' / p.name
+        if cand2.exists():
+            return cand2
+
+    return None
+
+
+def _make_dataset_dict(line: str, sequence: int, flat_sequence: int, dark_sequence: int) -> dict:
+    return {
+        'line': line,
+        file_types[0]: {
+            'data_type': file_types[0],
+            'sequence': sequence,
+            'files': ''
+        },
+        file_types[2]: {
+            'data_type': file_types[2],
+            'sequence': flat_sequence,
+            'files': ''
+        },
+        file_types[1]: {
+            'data_type': file_types[1],
+            'sequence': dark_sequence,
+            'files': ''
+        }
     }
-}
 
 
 # Register them
@@ -202,13 +302,45 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
     return file_set
 
 
-def get_config(auto_discover_files: bool = True) -> Config:
+def get_config(auto_discover_files: bool = True,
+               config_path: Optional[str] = None,
+               auto_create_dirs: bool = False) -> Config:
     """
     Build and return a configuration object for the current dataset selection.
 
     Returns a lightweight dataclass holding directory paths, dataset metadata,
     camera configuration, reduction registry, and pre-discovered file paths per level.
     """
+    # Load user configuration if provided, else use defaults
+    user_cfg = None
+    if config_path:
+        resolved = _resolve_config_path(config_path)
+        if not resolved:
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        user_cfg = _load_config_from_toml(resolved)
+
+    merged = _merge_defaults(user_cfg)
+
+    # Unpack merged configuration
+    line = merged['dataset']['line']
+    date = merged['dataset']['date']
+    sequence = int(merged['dataset']['sequence'])
+    dark_sequence = int(merged['dataset']['dark_sequence'])
+    flat_sequence = int(merged['dataset']['flat_sequence'])
+    states = list(merged['dataset']['states'])
+
+    slit_width = float(merged['params']['slit_width'])
+
+    base = merged['paths'].get('base', DEFAULTS['paths']['base'])
+    figures = merged['paths'].get('figures', None)
+    inversion = merged['paths'].get('inversion', None)
+
+    directories = DirectoryPaths(date=date, base=base, figures=figures,
+                                 inversion=inversion, auto_create=auto_create_dirs)
+
+    dataset = _make_dataset_dict(line=line, sequence=sequence,
+                                 flat_sequence=flat_sequence, dark_sequence=dark_sequence)
+
     cfg = Config(
         directories=directories,
         dataset=dataset,
