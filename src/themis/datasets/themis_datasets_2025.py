@@ -52,6 +52,45 @@ class DataTypeRegistry:
     def list_types(self):
         return list(self._types.keys())
 
+    def items(self):
+        """Return (name, DataType) pairs in insertion order."""
+        return self._types.items()
+
+    def keys(self):
+        """Return registered data type names in insertion order."""
+        return self._types.keys()
+
+    def values(self):
+        """Return registered DataType objects in insertion order."""
+        return self._types.values()
+
+    def __len__(self):
+        return len(self._types)
+
+    def __iter__(self):
+        """Iterate over DataType objects (in insertion order)."""
+        return iter(self._types.values())
+
+    def __repr__(self):
+        """Human-friendly summary with explicit fields per type.
+
+        Example:
+            DataTypeRegistry(n=3, types=[{name='scan', file_extension='_b3'}, {name='dark', file_extension='_x3'}, {name='flat', file_extension='_y3'}])
+        """
+        if not self._types:
+            return "DataTypeRegistry(n=0, types=[])"
+
+        parts = [
+            f"{{name='{dt.name}', file_extension='{dt.file_ext}'}}"
+            for dt in self._types.values()
+        ]
+        # Keep representation compact if many entries
+        if len(parts) > 6:
+            shown = parts[:3] + ["..."] + parts[-2:]
+        else:
+            shown = parts
+        return f"DataTypeRegistry(n={len(self._types)}, types=[" + ", ".join(shown) + "])"
+
 """
 Configuration loading
 
@@ -247,6 +286,25 @@ class FileSet:
     def items(self):
         return self._files.items()
 
+    # Dict-style access and helpers
+    def __getitem__(self, level_name: str) -> Path:
+        return self._files[level_name]
+
+    def __setitem__(self, level_name: str, file_path: Path):
+        self._files[level_name] = file_path
+
+    def __contains__(self, level_name: str) -> bool:
+        return level_name in self._files
+
+    def keys(self):
+        return self._files.keys()
+
+    def values(self):
+        return self._files.values()
+
+    def __len__(self):
+        return len(self._files)
+
     def __repr__(self) -> str:
         lines = [f"<FileSet with {len(self._files)} entries>"]
         for level, path in self._files.items():
@@ -280,19 +338,25 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
 
     for level_name, level_obj in reduction_levels.items():
         suffix = level_obj.file_ext
-        directory = getattr(directories, level_name, directories.raw)
+        # Map level to directory: raw -> raw, others -> reduced
+        directory = directories.raw if level_name == 'raw' else directories.reduced
         files = list(Path(directory).glob("*"))
         matches = []
 
         for f in files:
             name = f.name
-            if cam_str in name and data_str in name and seq_str in name:
-                if suffix == '':
-                    if not any(suf in name for suf in known_suffixes):
-                        matches.append(f)
-                else:
-                    if suffix in name:
-                        matches.append(f)
+            has_seq = (seq_str in name)
+            has_suffix = (suffix in name) if suffix else (not any(suf in name for suf in known_suffixes))
+
+            if level_name == 'raw':
+                # Raw discovery: accept instrument-native naming as long as sequence and raw suffix are present
+                if has_seq and has_suffix:
+                    matches.append(f)
+            else:
+                # Only accept the new naming pattern: <line>_<data_type>_tNNN<level_ext>
+                new_pattern = (f"_{data_t}_" in name)
+                if has_seq and has_suffix and new_pattern:
+                    matches.append(f)
 
         # Prefer files marked with _fx if available
         matches.sort(key=lambda x: (0 if '_fx' in x.name else 1, x.name))

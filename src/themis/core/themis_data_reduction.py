@@ -7,6 +7,7 @@ Created on Tue Jul  8 12:43:33 2025
 """
 from themis.core import themis_tools as tt
 from themis.core import data_classes as dct
+from themis.core import themis_io as tio
 
 class ReductionLevel:
     def __init__(self, name, file_ext, func, per_type_meta=None):
@@ -27,6 +28,23 @@ class ReductionLevel:
         if data_type and data_type in self.per_type_meta:
             return self.per_type_meta[data_type]
         return f"{self.name} level. For full description provide optional keyword data_type='data_type'"
+
+    def __repr__(self):
+        """Concise, informative summary of this reduction level.
+
+        Example:
+            ReductionLevel(name='l0', file_extension='_l0.fits', func='reduce_raw_to_l0', supports=['dark','scan','flat'])
+        """
+        func_name = getattr(self.func, "__name__", str(self.func))
+        supports = list(self.per_type_meta.keys()) if self.per_type_meta else []
+        return (
+            "ReductionLevel("
+            f"name='{self.name}', "
+            f"file_extension='{self.file_ext}', "
+            f"func='{func_name}', "
+            f"supports={supports}"
+            ")"
+        )
     
     
 class ReductionRegistry:
@@ -60,7 +78,29 @@ class ReductionRegistry:
         return list(self._levels.keys())
 
     def __repr__(self):
-        return f"<ReductionRegistry: {list(self._levels.keys())}>"
+        if not self._levels:
+            return "ReductionRegistry(n=0, levels=[])"
+
+        # Render per level with explicit fields
+        parts = []
+        for name, lvl in self._levels.items():
+            func_name = getattr(lvl.func, "__name__", str(lvl.func))
+            parts.append(
+                f"{{name='{name}', file_extension='{lvl.file_ext}', func='{func_name}'}}"
+            )
+
+        # Compact if many
+        if len(parts) > 6:
+            shown = parts[:3] + ["..."] + parts[-2:]
+        else:
+            shown = parts
+
+        return (
+            "ReductionRegistry("
+            f"n={len(self._levels)}, "
+            "levels=[" + ", ".join(shown) + "]"
+            ")"
+        )
 
 
 
@@ -75,8 +115,9 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False):
         print('No processing - provide a specific data type.')
         return None
     
-    elif data_type == 'dark':
-        data, header = tt.read_any_file(config, 'dark', verbose=False, status='raw')
+    else:
+      if data_type == 'dark':
+        data, header = tio.read_any_file(config, 'dark', verbose=False, status='raw')
         
         upper = data.stack_all('upper') # should always return one extra dimension that we can "average"
         lower = data.stack_all('lower') # should always return one extra dimension that we can "average"
@@ -94,21 +135,34 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False):
         single_frame.set_half("upper", tt.z3denoise(upper.mean(axis=0)) )
         single_frame.set_half("lower", tt.z3denoise(lower.mean(axis=0))   )
         reduced_frames.add_frame(single_frame, 1)
+      else:
+            print('Unknown data_type.')
+            return None
         
-        if return_reduced:
+    if return_reduced:
             return reduced_frames
         
-        else:
-            print('saving not implemented yet')
-            return None
     else:
-        print('Unknown data_type.')
-        return None
+            out_path = tio.save_reduction(
+                config,
+                data_type=data_type,
+                level='l0',
+                frames=reduced_frames,
+                source_header=header,
+                verbose=True,
+                overwrite=True,  # set True if you want to allow replacing an existing file
+                )
+            return out_path
+
 
 
 reduction_levels = ReductionRegistry()
 
-reduction_levels.add(ReductionLevel("raw", "fts", reduce_raw))
+reduction_levels.add(ReductionLevel("raw", "fts", reduce_raw, {
+    "dark": "Nothing.",
+    "scan": "Nothing.",
+    "flat": "Nothing."
+}))
 reduction_levels.add(ReductionLevel("l0", "_l0.fits", reduce_raw_to_l0, {
     "dark": "Averaging raw, create a low-order polynomial",
     "scan": "Apply dark, cut upper and lower image, flatfield, shift images",

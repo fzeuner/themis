@@ -36,6 +36,35 @@ class Frame:
                 return half.data
         return None  # not found
 
+    # Convenience: dict-like access, e.g. frame['upper'] or frame['name']
+    def __getitem__(self, key: str):
+        if key == 'name':
+            return self.name
+        return self.halves[key]
+
+    def keys(self):
+        """Return available keys for mapping-style access (includes 'name' and halves)."""
+        return ['name', *list(self.halves.keys())]
+
+    def __repr__(self):
+        """Compact summary of the frame content.
+
+        Example:
+            Frame(name='dark_l0_frame0000', upper: shape=(1024, 2048), lower: shape=(1024, 2048))
+            Frame(name='scan_pQ...', upper: shape=(..), lower: shape=(..), notes=pol_states)
+        """
+        if not self.halves:
+            return f"Frame(name='{self.name}', no halves)"
+
+        parts = []
+        for pos, half in sorted(self.halves.items()):
+            shape = None if getattr(half, 'data', None) is None else tuple(half.data.shape)
+            if getattr(half, 'pol_state', None):
+                parts.append(f"{pos}: shape={shape}, pol_state='{half.pol_state}'")
+            else:
+                parts.append(f"{pos}: shape={shape}")
+        return "Frame(name='" + self.name + "', " + ", ".join(parts) + ")"
+
 class CycleSet:
     def __init__(self):
         # frames keyed by (polarization_state, slit_position_index, map_index)
@@ -119,6 +148,10 @@ class FramesSet:
 
     def __len__(self):
         return len(self.frames)
+
+    # Convenience: index-like access, e.g. frames_set[0]
+    def __getitem__(self, frame_idx: int) -> Frame:
+        return self.frames[int(frame_idx)]
 
     def keys(self):
         return sorted(self.frames.keys())

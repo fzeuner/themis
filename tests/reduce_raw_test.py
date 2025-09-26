@@ -4,10 +4,14 @@
 Created on Fri Jul 4 15:24:27 2025
 
 @author: zeuner
+
+Testing the reduction of raw to l0
+
 """
 
 from themis.core import themis_tools as tt
 from themis.core import themis_data_reduction as tdr
+from themis.core import themis_io as tio
 from themis.datasets import themis_datasets_2025 as dst
 from themis.datasets.themis_datasets_2025 import get_config
 from spectator.controllers.app_controller import display_data # from spectator
@@ -34,21 +38,21 @@ if __name__ == '__main__':
     # 
     lv0 = tdr.reduction_levels["l0"]
     
-    data, header = tt.read_any_file(config, 'dark', verbose=False, status='raw')
+    # data, header = tio.read_any_file(config, 'dark', verbose=False, status='raw')
     
-    upper = data.stack_all('upper')
-    lower = data.stack_all('lower')
-    
-  
-    
-    data_plot = np.array([upper.mean(axis=0),lower.mean(axis=0)])
+    # upper = data.stack_all('upper')
+    # lower = data.stack_all('lower')
+      
+    # data_plot = np.array([upper.mean(axis=0),lower.mean(axis=0)])
     # viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
     #                  title='dark raw', 
     #                  state_names=['upper', 'lower'])
+#%%     
     
+   # result = lv0.reduce(config, data_type='dark', return_reduced = False)
     
-    result = lv0.reduce(config, data_type='dark', return_reduced = True)
-    
+    data_l0, header_l0 = tio.read_any_file(config, 'dark', verbose=False, status='l0')
+#%%      
     
     data_plot = np.array([result.get(0).get_half('upper').data-result.get(1).get_half('upper').data,result.get(0).get_half('lower').data -result.get(1).get_half('lower').data ])
     viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
@@ -62,5 +66,3 @@ if __name__ == '__main__':
                      title='dark raw single - l0', 
                      state_names=['upper', 'lower'])
     
-    # print(lvl.file_ext)  # .lf.fits
-    # print(lvl.get_description("scan"))  # Gaussian fitting applied
