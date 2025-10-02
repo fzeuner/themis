@@ -5,6 +5,7 @@ Created on Tue Jul  8 12:43:33 2025
 
 @author: zeuner
 """
+import textwrap
 from themis.core import themis_tools as tt
 from themis.core import data_classes as dct
 from themis.core import themis_io as tio
@@ -24,9 +25,26 @@ class ReductionLevel:
         """
         return self.func(*args, **kwargs)
 
-    def get_description(self, data_type=None):
+    def get_description(self, data_type=None, width=80, indent="  "):
+        """Get formatted description for this reduction level.
+        
+        Args:
+            data_type: Specific data type ('dark', 'scan', 'flat', etc.)
+            width: Maximum line width for text wrapping
+            indent: Indentation string for wrapped lines
+            
+        Returns:
+            Formatted description string
+        """
         if data_type and data_type in self.per_type_meta:
-            return self.per_type_meta[data_type]
+            desc = self.per_type_meta[data_type]
+            # Clean up the description: remove line continuation backslashes and extra whitespace
+            desc = desc.replace('\\\n', ' ').replace('\n', ' ')
+            desc = ' '.join(desc.split())  # Normalize whitespace
+            # Wrap text nicely
+            wrapped = textwrap.fill(desc, width=width, initial_indent=indent, 
+                                   subsequent_indent=indent)
+            return f"{self.name} level for '{data_type}':\n{wrapped}"
         return f"{self.name} level. For full description provide optional keyword data_type='data_type'"
 
     def __repr__(self):
@@ -108,7 +126,7 @@ def reduce_raw(config):
     print('No processing for reduction level raw')
     return None
 
-def reduce_raw_to_l0(config, data_type=None, return_reduced=False):
+def reduce_raw_to_l0(config, data_type=None, return_reduced=False, auto_reduce_dark: bool = False):
     # No processing
     
     if data_type==None:
@@ -116,9 +134,9 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False):
         return None
     
     else:
+      data, header = tio.read_any_file(config, data_type, verbose=False, status='raw')
       if data_type == 'dark':
-        data, header = tio.read_any_file(config, 'dark', verbose=False, status='raw')
-        
+         
         upper = data.stack_all('upper') # should always return one extra dimension that we can "average"
         lower = data.stack_all('lower') # should always return one extra dimension that we can "average"
         
@@ -126,15 +144,89 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False):
         
         frame_name_str = f"{data_type}_l0_frame{0:04d}"
         single_frame = dct.Frame(frame_name_str)
-        single_frame.set_half("upper", upper.mean(axis=0)) 
-        single_frame.set_half("lower", lower.mean(axis=0))  
+        # Explicitly convert to float32 for consistency
+        single_frame.set_half("upper", upper.mean(axis=0).astype('float32')) 
+        single_frame.set_half("lower", lower.mean(axis=0).astype('float32'))  
         reduced_frames.add_frame(single_frame, 0)
         
         frame_name_str = f"{data_type}_l0_frame{1:04d}"
         single_frame = dct.Frame(frame_name_str)
-        single_frame.set_half("upper", tt.z3denoise(upper.mean(axis=0)) )
-        single_frame.set_half("lower", tt.z3denoise(lower.mean(axis=0))   )
+        # z3denoise already returns float32, but be explicit
+        single_frame.set_half("upper", tt.z3denoise(upper.mean(axis=0).astype('float32')) )
+        single_frame.set_half("lower", tt.z3denoise(lower.mean(axis=0).astype('float32'))   )
         reduced_frames.add_frame(single_frame, 1)
+        
+        # Store number of averaged frames
+        n_frames_averaged = upper.shape[0]
+        
+      elif data_type == 'flat':
+        upper = data.stack_all('upper') # should always return one extra dimension that we can "average"
+        lower = data.stack_all('lower') # should always return one extra dimension that we can "average"
+        
+        # Filter frames based on std deviation difference between upper and lower
+        n_total_frames = upper.shape[0]
+        std_threshold = 130
+        good_frame_indices = []
+        
+        for i in range(n_total_frames):
+            std_upper = upper[i].std()
+            std_lower = lower[i].std()
+            std_diff = abs(std_upper - std_lower)
+            
+            if std_diff <= std_threshold:
+                good_frame_indices.append(i)
+        
+        n_good_frames = len(good_frame_indices)
+        n_rejected_frames = n_total_frames - n_good_frames
+        
+        if n_rejected_frames > 0:
+            print(f"WARNING: {n_rejected_frames} out of {n_total_frames} frames rejected for flat averaging")
+            print(f"         (std difference between upper/lower > {std_threshold} counts)")
+        
+        if n_good_frames == 0:
+            print(f"ERROR: No frames passed the std difference filter (threshold={std_threshold})")
+            return None
+        
+        # Use only good frames for averaging
+        upper_filtered = upper[good_frame_indices]
+        lower_filtered = lower[good_frame_indices]
+        
+        # Ensure LV0 dark is available; optionally auto-reduce if missing
+        try:
+            dark_frame, header_dark = tio.read_any_file(config, 'dark', verbose=False, status='l0')
+        except FileNotFoundError as e:
+            if auto_reduce_dark:
+                print("LV0 dark not found. Auto-reducing 'dark' to LV0...")
+                # Trigger dark reduction and try again
+                out_path = reduce_raw_to_l0(config, data_type='dark', return_reduced=False)
+                if out_path is None:
+                    # Upstream failed gracefully
+                    print("Automatic dark reduction did not produce an output. Aborting flat reduction.")
+                    return None
+                # Retry reading LV0 dark
+                dark_frame, header_dark = tio.read_any_file(config, 'dark', verbose=False, status='l0')
+            else:
+                print(
+                    "LV0 dark file is required for flat reduction but was not found. "
+                    "Run LV0 dark reduction first or pass auto_reduce_dark=True.\n"
+                    f"Reason: {e}"
+                )
+                return None
+          
+        reduced_frames = dct.FramesSet()
+          
+        frame_name_str = f"{data_type}_l0_frame{0:04d}"
+        single_frame = dct.Frame(frame_name_str)
+        # Convert to float32 to match dark data type and avoid precision issues
+        upper_mean = upper_filtered.mean(axis=0).astype('float32')
+        lower_mean = lower_filtered.mean(axis=0).astype('float32')
+        single_frame.set_half("upper", upper_mean - dark_frame[0]['upper'].data) 
+        single_frame.set_half("lower", lower_mean - dark_frame[0]['lower'].data)  
+        reduced_frames.add_frame(single_frame, 0)
+        
+        # Store number of averaged frames for later use
+        n_frames_averaged = n_good_frames
+     
       else:
             print('Unknown data_type.')
             return None
@@ -143,6 +235,11 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False):
             return reduced_frames
         
     else:
+            # Prepare additional header keywords
+            extra_keywords = {}
+            if 'n_frames_averaged' in locals():
+                extra_keywords['NFRAMAVG'] = (n_frames_averaged, 'Number of averaged raw frames')
+            
             out_path = tio.save_reduction(
                 config,
                 data_type=data_type,
@@ -151,6 +248,7 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False):
                 source_header=header,
                 verbose=True,
                 overwrite=True,  # set True if you want to allow replacing an existing file
+                extra_keywords=extra_keywords,
                 )
             return out_path
 
@@ -164,8 +262,12 @@ reduction_levels.add(ReductionLevel("raw", "fts", reduce_raw, {
     "flat": "Nothing."
 }))
 reduction_levels.add(ReductionLevel("l0", "_l0.fits", reduce_raw_to_l0, {
-    "dark": "Averaging raw, create a low-order polynomial",
-    "scan": "Apply dark, cut upper and lower image, flatfield, shift images",
-    "flat": "Generate flatfield"
+    "dark": ("Splitting original camera image into upper/lower frames. Flip x axis. "
+             "Averaging raw frames."),
+    "scan": ("Splitting original camera image into upper/lower frames. Flip x axis. "
+             "Apply dark subtraction, flatfield correction, and shift alignment."),
+    "flat": ("Splitting original camera image into upper/lower frames. Flip x axis. "
+             "Averaging raw frames (filtering: only include frames where std difference "
+             "between upper and lower is below 130 counts). Subtract l0 dark.")
 }))
 

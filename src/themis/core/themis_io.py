@@ -11,6 +11,10 @@ from datetime import datetime
 
 from pathlib import Path
 
+from astropy.utils.exceptions import AstropyWarning
+import warnings
+warnings.simplefilter('ignore', AstropyWarning)
+
 def _build_output_path(config, *, data_type: str, level: str) -> Path:
     """Construct the output file path following discovery conventions.
 
@@ -39,7 +43,8 @@ def _sanitize_primary_header(hdr: fits.Header) -> fits.Header:
     """
     to_drop = [
         'EXTNAME', 'XTENSION', 'EXTVER', 'HDUCLAS1', 'HDUCLAS2', 'HDUCLAS3', 'HDUCLAS4', 'HDUVERS',
-        'TFIELDS', 'PCOUNT', 'GCOUNT'
+        'TFIELDS', 'PCOUNT', 'GCOUNT', 'FILTERCH', 'FILTERFE', 'TIMESTEP', 'WAVEUNIT', 'ATMOS_R0', 'AO_LOCK',
+        'OBSGEO-X', 'OBSGEO-Y', 'OBSGEO-Z', 'TEXPOSUR', 'NSUMEXP', 'TCYCLE'
     ]
     for key in to_drop:
         if key in hdr:
@@ -68,7 +73,7 @@ def _sanitize_primary_header(hdr: fits.Header) -> fits.Header:
     return hdr
 
 
-def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet, source_header, verbose: bool = False, overwrite: bool = False):
+def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet, source_header, verbose: bool = False, overwrite: bool = False, extra_keywords: dict = None):
     """Save a reduced product to FITS, update config, and mirror read_any_file conventions.
 
     Args:
@@ -79,6 +84,8 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
         source_header: FITS header to copy/augment
         verbose: Print informative messages
         overwrite: Allow overwriting existing files (emits a warning)
+        extra_keywords: Optional dict of additional FITS header keywords to add.
+                       Format: {key: (value, comment)} or {key: value}
 
     Returns:
         The updated config (same object, modified in place)
@@ -99,6 +106,16 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
     hdr.add_history(f"{now} - Reduced to level {level} for data_type '{data_type}'")
     hdr['REDLEV'] = (level, 'Reduction level')
     hdr['DATATYPE'] = (data_type, 'Data type reduced')
+    
+    # Add extra keywords if provided
+    if extra_keywords:
+        for key, value in extra_keywords.items():
+            if isinstance(value, tuple) and len(value) == 2:
+                # Format: (value, comment)
+                hdr[key] = value
+            else:
+                # Just a value, no comment
+                hdr[key] = value
 
     # Write data_type + level specific HDUs
     hdus = [fits.PrimaryHDU(header=hdr)]
@@ -114,6 +131,18 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
         lower_avg = avg.get_half('lower').data.astype('float32', copy=False)
         hdus.append(fits.ImageHDU(upper_avg, name='UPPER_AVG'))
         hdus.append(fits.ImageHDU(lower_avg, name='LOWER_AVG'))
+
+    elif data_type == 'flat' and level == 'l0':
+        # Expect FramesSet with index {0: averaged flat}
+        avg = frames.get(0)
+
+        if avg is None:
+            raise ValueError("Expected reduced flat frames to contain index 0 (averaged)")
+
+        upper_avg = avg.get_half('upper').data.astype('float32', copy=False)
+        lower_avg = avg.get_half('lower').data.astype('float32', copy=False)
+        hdus.append(fits.ImageHDU(upper_avg, name='UPPER_FLAT'))
+        hdus.append(fits.ImageHDU(lower_avg, name='LOWER_FLAT'))
 
     else:
         # Placeholder for other data types/levels
@@ -135,7 +164,7 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
 
     del hdus
     gc.collect()
-    return out_path
+    return config
 
 
 
@@ -202,9 +231,10 @@ def read_any_file(config, data_type, status='raw', verbose=False):
                         upper_name, lower_name = tt.get_pol_half_names(pol_state)
 
                         # Keep current orientation choice (adjust if needed)
-                        r2_data_flipped = r2_data  # np.flip(r2_data, axis=(-2)) # flip y axis if desired
+                        r1_data_flipped = np.flip(r1_data, axis=(-1)) # flip x axis if desired
+                        r2_data_flipped = np.flip(r2_data, axis=(-1)) # flip x axis if desired
 
-                        single_frame.set_half("upper", r1_data, upper_name)
+                        single_frame.set_half("upper", r1_data_flipped, upper_name)
                         single_frame.set_half("lower", r2_data_flipped, lower_name)
                         collection.add_frame(single_frame, (pol_state, s_idx, map_idx))
 
@@ -220,10 +250,11 @@ def read_any_file(config, data_type, status='raw', verbose=False):
                 # Apply camera ROI to split into upper/lower halves
                 r1_data, r2_data = config.cam.roi.extract(current_frame_data_3d)
                 # Orientation: mirror choice from scan branch unless you decide to flip here
-                r2_data_flipped = r2_data  # np.flip(r2_data, axis=(-2)) # flip y axis if desired
+                r1_data_flipped = np.flip(r1_data, axis=(-1)) # flip x axis if desired
+                r2_data_flipped = np.flip(r2_data, axis=(-1)) # flip x axis if desired
                 frame_name_str = f"{data_type}_frame{frame_idx:04d}"
                 single_frame = dct.Frame(frame_name_str)
-                single_frame.set_half("upper", r1_data)  # no pol_state
+                single_frame.set_half("upper", r1_data_flipped)  # no pol_state
                 single_frame.set_half("lower", r2_data_flipped)  # no pol_state
                 collection.add_frame(single_frame, frame_idx)
         else:
@@ -251,16 +282,6 @@ def read_any_file(config, data_type, status='raw', verbose=False):
         single_frame.set_half("upper", upper_avg)
         single_frame.set_half("lower", lower_avg)
         collection.add_frame(single_frame, 0)
-
-        # Optional denoised frames (if present)
-        if 'UPPER_DENOISED' in hdu_names and 'LOWER_DENOISED' in hdu_names:
-            upper_den = np.array(hdu[hdu_names['UPPER_DENOISED']].data)
-            lower_den = np.array(hdu[hdu_names['LOWER_DENOISED']].data)
-            frame_name_str = f"{data_type}_l0_frame{1:04d}"
-            single_frame = dct.Frame(frame_name_str)
-            single_frame.set_half("upper", upper_den)
-            single_frame.set_half("lower", lower_den)
-            collection.add_frame(single_frame, 1)
 
     else:
         # Non-raw status fallback

@@ -14,6 +14,9 @@ Reduction levels supported: raw, l0
 from pathlib import Path
 from typing import Dict, Optional
 from dataclasses import dataclass
+from astropy.utils.exceptions import AstropyWarning
+import warnings
+warnings.simplefilter('ignore', AstropyWarning)
 
 # Python 3.11+ has tomllib in the stdlib. For 3.12 (used here) this is available.
 try:
@@ -24,6 +27,7 @@ except Exception as e:  # pragma: no cover
 # Core dependencies used to assemble a configuration
 from themis.core import themis_data_reduction as tdr
 from themis.core import cam_config as cc
+from astropy.io import fits
 
 class DataType:
     def __init__(self, name, file_ext):
@@ -347,10 +351,15 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
             name = f.name
             has_seq = (seq_str in name)
             has_suffix = (suffix in name) if suffix else (not any(suf in name for suf in known_suffixes))
+            # Also compute camera and data markers for filtering
+            has_cam = (cam_str in name) if cam_str else True
 
             if level_name == 'raw':
-                # Raw discovery: accept instrument-native naming as long as sequence and raw suffix are present
-                if has_seq and has_suffix:
+                # Raw discovery: accept instrument-native naming, but require that
+                # the filename matches the selected camera extension to avoid
+                # cross-camera mixups when sequences overlap.
+                # Conditions: correct sequence, correct level suffix, and camera tag.
+                if has_seq and has_suffix and has_cam:
                     matches.append(f)
             else:
                 # Only accept the new naming pattern: <line>_<data_type>_tNNN<level_ext>
@@ -419,5 +428,77 @@ def get_config(auto_discover_files: bool = True,
         for key in file_types:
             entry = cfg.dataset[key]
             entry['files'] = _build_file_set(cfg.directories, entry, cfg.data_types, cfg.reduction_levels, cfg.cam)
+        # Validate basic compatibility between files (easy to extend later)
+        validate_config(cfg)
 
     return cfg
+
+
+def validate_config(cfg: Config) -> None:
+    """Validate basic dataset compatibility at initialization.
+
+    Checks performed (only when relevant files exist):
+    - EXPTIME consistency across raw 'scan', 'dark', and 'flat'.
+    - For 'flat', OBS_MODE must be 'RFLAT'.
+
+    Raises ValueError with a clear message if a check fails.
+    """
+    def header_for(dtype: str, level: str = 'raw'):
+        fs = cfg.dataset[dtype]['files']
+        if not isinstance(fs, FileSet):
+            return None
+        p = fs.get(level)
+        if p and p.exists():
+            with fits.open(p, memmap=True) as hdul:
+                return hdul[0].header
+        return None
+
+    hdr_scan = header_for('scan', 'raw')
+    hdr_dark = header_for('dark', 'raw')
+    hdr_flat = header_for('flat', 'raw')
+
+    # Collect EXPTIME values from available headers
+    exptimes = {}
+    if hdr_scan is not None and 'EXPTIME' in hdr_scan:
+        exptimes['scan'] = float(hdr_scan['EXPTIME'])
+    if hdr_dark is not None and 'EXPTIME' in hdr_dark:
+        exptimes['dark'] = float(hdr_dark['EXPTIME'])
+    if hdr_flat is not None and 'EXPTIME' in hdr_flat:
+        exptimes['flat'] = float(hdr_flat['EXPTIME'])
+
+    # If we have at least two EXPTIME values, ensure they match
+    if len(exptimes) >= 2:
+        vals = list(exptimes.values())
+        if not all(abs(v - vals[0]) == 0 for v in vals[1:]):
+            details = ", ".join([f"{k}={v}" for k, v in exptimes.items()])
+            raise ValueError(
+                "Incompatible EXPTIME across raw files. "
+                f"Expected all equal, got: {details}."
+            )
+
+    # Check flat OBS_MODE
+    if hdr_flat is not None:
+        obs_mode = str(hdr_flat.get('OBS_MODE', '')).upper()
+        if obs_mode != 'RFLAT':
+            raise ValueError(
+                "Flat file OBS_MODE must be 'RFLAT'. "
+                f"Found OBS_MODE='{obs_mode}'."
+            )
+
+    # Check dark OBS_MODE
+    if hdr_dark is not None:
+        obs_mode = str(hdr_dark.get('OBS_MODE', '')).upper()
+        if obs_mode != 'RDARK':
+            raise ValueError(
+                "Dark file OBS_MODE must be 'RDARK'. "
+                f"Found OBS_MODE='{obs_mode}'."
+            )
+
+    # Check scan OBS_MODE
+    if hdr_scan is not None:
+        obs_mode = str(hdr_scan.get('OBS_MODE', '')).upper()
+        if obs_mode != 'SCAN':
+            raise ValueError(
+                "Scan file OBS_MODE must be 'SCAN'. "
+                f"Found OBS_MODE='{obs_mode}'."
+            )
