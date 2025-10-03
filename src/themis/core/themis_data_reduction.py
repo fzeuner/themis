@@ -121,7 +121,6 @@ class ReductionRegistry:
         )
 
 
-
 def reduce_raw(config):
     print('No processing for reduction level raw')
     return None
@@ -135,6 +134,7 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False, auto_reduce_d
     
     else:
       data, header = tio.read_any_file(config, data_type, verbose=False, status='raw')
+      data, bad_pixel_keywords = tt.clean_bad_pixels(data, header)
       if data_type == 'dark':
          
         upper = data.stack_all('upper') # should always return one extra dimension that we can "average"
@@ -163,33 +163,7 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False, auto_reduce_d
         upper = data.stack_all('upper') # should always return one extra dimension that we can "average"
         lower = data.stack_all('lower') # should always return one extra dimension that we can "average"
         
-        # Filter frames based on std deviation difference between upper and lower
-        n_total_frames = upper.shape[0]
-        std_threshold = 130
-        good_frame_indices = []
-        
-        for i in range(n_total_frames):
-            std_upper = upper[i].std()
-            std_lower = lower[i].std()
-            std_diff = abs(std_upper - std_lower)
-            
-            if std_diff <= std_threshold:
-                good_frame_indices.append(i)
-        
-        n_good_frames = len(good_frame_indices)
-        n_rejected_frames = n_total_frames - n_good_frames
-        
-        if n_rejected_frames > 0:
-            print(f"WARNING: {n_rejected_frames} out of {n_total_frames} frames rejected for flat averaging")
-            print(f"         (std difference between upper/lower > {std_threshold} counts)")
-        
-        if n_good_frames == 0:
-            print(f"ERROR: No frames passed the std difference filter (threshold={std_threshold})")
-            return None
-        
-        # Use only good frames for averaging
-        upper_filtered = upper[good_frame_indices]
-        lower_filtered = lower[good_frame_indices]
+        n_frames = upper.shape[0]
         
         # Ensure LV0 dark is available; optionally auto-reduce if missing
         try:
@@ -218,14 +192,14 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False, auto_reduce_d
         frame_name_str = f"{data_type}_l0_frame{0:04d}"
         single_frame = dct.Frame(frame_name_str)
         # Convert to float32 to match dark data type and avoid precision issues
-        upper_mean = upper_filtered.mean(axis=0).astype('float32')
-        lower_mean = lower_filtered.mean(axis=0).astype('float32')
+        upper_mean = upper.mean(axis=0).astype('float32')
+        lower_mean = lower.mean(axis=0).astype('float32')
         single_frame.set_half("upper", upper_mean - dark_frame[0]['upper'].data) 
         single_frame.set_half("lower", lower_mean - dark_frame[0]['lower'].data)  
         reduced_frames.add_frame(single_frame, 0)
         
         # Store number of averaged frames for later use
-        n_frames_averaged = n_good_frames
+        n_frames_averaged = n_frames
      
       else:
             print('Unknown data_type.')
@@ -239,6 +213,9 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False, auto_reduce_d
             extra_keywords = {}
             if 'n_frames_averaged' in locals():
                 extra_keywords['NFRAMAVG'] = (n_frames_averaged, 'Number of averaged raw frames')
+            
+            # Merge bad pixel keywords
+            extra_keywords.update(bad_pixel_keywords)
             
             out_path = tio.save_reduction(
                 config,
@@ -263,11 +240,13 @@ reduction_levels.add(ReductionLevel("raw", "fts", reduce_raw, {
 }))
 reduction_levels.add(ReductionLevel("l0", "_l0.fits", reduce_raw_to_l0, {
     "dark": ("Splitting original camera image into upper/lower frames. Flip x axis. "
+             "Clean bad pixels (interpolate isolated, reject frames with clustered bad pixels). "
              "Averaging raw frames."),
     "scan": ("Splitting original camera image into upper/lower frames. Flip x axis. "
+             "Clean bad pixels (interpolate isolated, reject frames with clustered bad pixels). "
              "Apply dark subtraction, flatfield correction, and shift alignment."),
     "flat": ("Splitting original camera image into upper/lower frames. Flip x axis. "
-             "Averaging raw frames (filtering: only include frames where std difference "
-             "between upper and lower is below 130 counts). Subtract l0 dark.")
+             "Clean bad pixels (interpolate isolated, reject frames with clustered bad pixels). "
+             "Averaging raw frames. Subtract l0 dark.")
 }))
 

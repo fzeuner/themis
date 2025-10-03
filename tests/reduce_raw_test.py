@@ -86,9 +86,10 @@ if __name__ == '__main__':
     # plt.hist(((data[0]['lower'].data-frame_l0[0]['upper'].data+data[0]['upper'].data-frame_l0[0]['lower'].data)*0.5).flatten(), bins=100, color='green', alpha=0.6, label='combined')
     
 #%% 
-    result = lv0.reduce(config, data_type='flat', return_reduced = True)
+    #result = lv0.reduce(config, data_type='flat', return_reduced = True)
     raw_frame, header = tio.read_any_file(config, 'flat', verbose=False, status='raw')
-    ax=plot_frame_statistics(raw_frame, stat='mean')
+    ax=plot_frame_statistics(raw_frame, stat='max')
+    ax=plot_frame_statistics(raw_frame, ax=ax,stat='min')
     #data_plot = np.array([result.get(0).get_half('upper').data,result.get(0).get_half('lower').data ])
     # viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
     #                   title='flat l0', 

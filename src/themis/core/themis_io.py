@@ -97,7 +97,7 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
     if out_path.exists() and not overwrite:
         raise FileExistsError(f"Output already exists: {out_path}. Pass overwrite=True to replace.")
     if out_path.exists() and overwrite:
-        warnings.warn(f"Overwriting existing file: {out_path}")
+        print(f"\033[91mWARNING\033[0m: Overwriting {out_path.name}")
 
     # Copy header, sanitize for primary, and add minimal provenance
     hdr = fits.Header(source_header)
@@ -190,7 +190,7 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     if not file_path or not file_path.exists():
         raise FileNotFoundError(f"File for data_type '{data_type}' at status '{status}' not found: {file_path}")
 
-    hdu = fits.open(file_path, memmap=True, do_not_scale_image_data=True)
+    hdu = fits.open(file_path, memmap=True, do_not_scale_image_data=True) # use original so you can identify bad pixels!
     
     header = hdu[0].header
     
@@ -301,3 +301,98 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     del data
     gc.collect()
     return collection, header
+
+
+# NON THEMIS DATA IO
+# GLOBAL VARIABLES
+
+directory_atlas = '/home/zeuner/data/atlas' # on x1
+
+def read_fts5(wl_start, wl_end): # wavelenght start and end in Angstroem
+
+     # -- fts data
+    file_fts5 = directory_atlas+'/fts5.sav'
+        
+    s =  readsav(file_fts5 , verbose=False,python_dict=True)
+
+    wavelength=s['w']      # wavelength (Å)
+    fts_i=s['b'] 	       # I/Ic
+    fts_v=s['vi'] 	       # Stokes V/Ic (unsmoothed, recommended)
+
+    s_idx =  np.argmin(abs(wavelength-wl_start))  # in Angstrom
+    e_idx = np.argmin(abs(wavelength-wl_end))     # in Angstrom
+
+    wavelength = wavelength[s_idx-1:e_idx]
+    fts_i = fts_i[s_idx-1:e_idx]
+    fts_v = fts_v[s_idx-1:e_idx]
+    
+    print("read_fts: Only working for start wavelength below 6906 and above 5253.8")
+    return(wavelength, fts_i, fts_v)
+
+def dummy_binning(data, binning=[1,1]):
+    kernel = np.ones((binning[0],binning[1]))/(binning[0]*binning[1])
+    data_dummy = 0.*data
+    for i in range(data.shape[2]):
+     conv_data = 1.*convolve2d(data[:,:,i], kernel, 'valid')
+     data_dummy[:conv_data.shape[0],:conv_data.shape[1],i] = conv_data
+    return(data_dummy)
+
+# INVERSION
+
+def readpro(filename):
+
+    """ 
+    Reads a line profile from a .per file
+    Call:
+    line_ind, wvlen, StkI, StkQ, StkU, StkV = st.readpro(filename)
+    """
+    
+    from numpy import array
+
+    f = open(filename, 'r')
+
+    line_ind = []
+    wvlen = []
+    StkI = []
+    StkQ = []
+    StkU = []
+    StkV = []
+    
+    for line in f:
+        data = line.split()
+        line_ind.append(float(data[0]))
+        wvlen.append(float(data[1]))
+        StkI.append(float(data[2]))
+        StkQ.append(float(data[3]))
+        StkU.append(float(data[4]))
+        StkV.append(float(data[5]))
+
+    f.close()
+
+    line_ind = array(line_ind)
+    wvlen = array(wvlen)
+    StkI = array(StkI)
+    StkQ = array(StkQ)
+    StkU = array(StkU)
+    StkV = array(StkV)
+
+    return(line_ind, wvlen, StkI, StkQ, StkU, StkV)
+
+
+
+def writepro(filename, line_ind, wvlen, StkI, StkQ, StkU, StkV):
+    """ 
+    Routine that writes the Stokes profiles into a SIR formatted Stokes file.
+    Call:
+    writepro(filename, line_ind, wvlen, StkI, StkQ, StkU, StkV)
+    """
+
+    f = open(filename, "w+")
+
+    for k in range(0, len(line_ind)):
+     
+         f.write('     {0}   {1:> .4f}  {2:> 8.6e} {3:> 8.6e} {4:> 8.6e} {5:> 8.6e} \n'.format(line_ind[k], wvlen[k], StkI[k], StkQ[k], StkU[k], StkV[k]))
+
+    f.close()
+
+    return()

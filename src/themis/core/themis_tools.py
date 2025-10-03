@@ -21,7 +21,7 @@ from scipy.signal import convolve2d
 from scipy.io import readsav
 from scipy.signal import medfilt
 from tqdm import tqdm
-import matplotlib.colors as mplcolor
+
 from scipy.interpolate import interp1d
 from scipy.signal import windows
 from scipy import ndimage
@@ -42,10 +42,6 @@ from themis.core import themis_data_reduction as tdr
 from themis.core import data_classes as dct
 
 
-
-# GLOBAL VARIABLES
-
-directory_atlas = '/home/zeuner/data/atlas' # on x1
 
 from themis.datasets import themis_datasets_2025 as dst
 from themis.core import cam_config as cc
@@ -94,6 +90,153 @@ def beam_exchange(data):
     out_data.method = 'beam exchange'
     return(out_data)
 
+
+
+def clean_bad_pixels(data, header):
+    """
+    Clean bad pixels in raw data frames.
+    
+    Identifies bad pixels as:
+    - Pixels with value == header['BZERO'] (saturated/maximum value)
+    - Pixels with negative values (< 0)
+    
+    Processing:
+    - If a bad pixel is isolated (no bad neighbors within radius 4), interpolate it.
+    - If any bad pixel has at least one neighboring bad pixel, reject the entire frame.
+    
+    Args:
+        data: FramesSet or CycleSet containing raw frames (unscaled FITS data)
+        header: FITS header containing BZERO keyword
+        
+    Returns:
+        tuple: (cleaned_data, additional_keywords)
+            - cleaned_data: Data with interpolated pixels and bad frames removed
+            - additional_keywords: dict with statistics for header
+    """
+    from scipy.ndimage import distance_transform_edt
+    from scipy.interpolate import griddata
+    
+    # Get bad pixel values from header
+    bzero = header.get('BZERO', None)
+    
+    if bzero is None:
+        # No bad pixel value defined, return data unchanged
+        return data, {}
+    
+    total_interpolated = 0
+    total_rejected = 0
+    frames_to_remove = []
+    
+    # Determine if we have FramesSet or CycleSet
+    if isinstance(data, dct.FramesSet):
+        frame_keys = list(data.keys())
+    elif isinstance(data, dct.CycleSet):
+        frame_keys = list(data.frames.keys())
+    else:
+        # Unknown type, return unchanged
+        return data, {}
+    
+    # Process each frame
+    for frame_key in frame_keys:
+        if isinstance(data, dct.FramesSet):
+            frame = data.get(frame_key)
+        else:
+            frame = data.frames[frame_key]
+        
+        frame_rejected = False
+        frame_interpolated = 0
+        
+        # Process each half (upper, lower)
+        for position in ['upper', 'lower']:
+            half = frame.get_half(position)
+            if half is None:
+                continue
+                
+            image = half.data
+            
+            # Identify bad pixels: pixels at bzero (saturation) or negative values
+            bad_mask = np.logical_or(image == bzero, image < 0)
+            
+            if not np.any(bad_mask):
+                # No bad pixels in this half
+                continue
+            
+            # Check for neighboring bad pixels using morphological dilation
+            # Create a structure element for radius 4 neighborhood
+            y, x = np.ogrid[-4:5, -4:5]
+            structure = (x**2 + y**2 <= 4**2)
+            
+            # Dilate the bad pixel mask
+            from scipy.ndimage import binary_dilation
+            dilated_mask = binary_dilation(bad_mask, structure=structure)
+            
+            # Find bad pixels that have neighboring bad pixels
+            # A pixel has a neighbor if (dilated_mask - original_mask) overlaps with original_mask
+            neighbor_mask = np.logical_and(dilated_mask, bad_mask)
+            # Check if any bad pixel touches another bad pixel
+            for i in range(bad_mask.shape[0]):
+                for j in range(bad_mask.shape[1]):
+                    if bad_mask[i, j]:
+                        # Check neighborhood (radius 4)
+                        y_min = max(0, i - 4)
+                        y_max = min(bad_mask.shape[0], i + 5)
+                        x_min = max(0, j - 4)
+                        x_max = min(bad_mask.shape[1], j + 5)
+                        
+                        neighborhood = bad_mask[y_min:y_max, x_min:x_max]
+                        # If there's more than one bad pixel in neighborhood, reject frame
+                        if np.sum(neighborhood) > 1:
+                            frame_rejected = True
+                            break
+                if frame_rejected:
+                    break
+            
+            if frame_rejected:
+                break
+            
+            # If not rejected, interpolate isolated bad pixels
+            if np.any(bad_mask):
+                # Get coordinates of good and bad pixels
+                good_mask = ~bad_mask
+                y_coords, x_coords = np.mgrid[0:image.shape[0], 0:image.shape[1]]
+                
+                good_points = np.array([y_coords[good_mask], x_coords[good_mask]]).T
+                good_values = image[good_mask]
+                bad_points = np.array([y_coords[bad_mask], x_coords[bad_mask]]).T
+                
+                # Interpolate bad pixels using nearest neighbor (fast and simple)
+                interpolated_values = griddata(good_points, good_values, bad_points, method='nearest')
+                
+                # Update the image
+                image[bad_mask] = interpolated_values
+                frame_interpolated += np.sum(bad_mask)
+        
+        if frame_rejected:
+            frames_to_remove.append(frame_key)
+            total_rejected += 1
+        else:
+            total_interpolated += frame_interpolated
+    
+    # Remove rejected frames
+    if isinstance(data, dct.FramesSet):
+        for frame_key in frames_to_remove:
+            del data.frames[frame_key]
+    else:  # CycleSet
+        for frame_key in frames_to_remove:
+            del data.frames[frame_key]
+    
+    # Prepare keywords for header
+    additional_keywords = {
+        'NBADPXIN': (total_interpolated, 'Number of bad pixels interpolated'),
+        'NBADFRM': (total_rejected, 'Number of frames rejected (bad pixels)')
+    }
+    
+    if total_rejected > 0:
+        print(f"\033[91mWARNING\033[0m: {total_rejected} frame(s) rejected due to clustered bad pixels")
+    if total_interpolated > 0:
+        print(f"INFO: {total_interpolated} isolated bad pixel(s) interpolated")
+    
+    return data, additional_keywords
 
 
 def z3denoise(image, method='poly_fit', rand=None, verbose=False):
@@ -168,38 +311,7 @@ def z3denoise(image, method='poly_fit', rand=None, verbose=False):
 
 
 
-def read_images_file(file_name,original=False, verbose=False):  # not needed really
-    
-    sif_sp = fits.open(file_name, memmap=True)
-    header=sif_sp[0].header
-    steps=int(header['NBSTEP'])+1
-    pol_states = int(len(header['POL_VAL'].split())/2) # by two because there is the retarder and polarizer given
-    
-    dummy=np.array(sif_sp[0].data)
-    if verbose:
-     print(dummy.shape)
-     print(header)
-    # xmin=float(header['WAVEMIN']) #nm
-    # xmax=float(header['WAVEMAX']) #nm
-    # xlam=10.*np.arange(xmin,xmax,(xmax-xmin)/data[0,:].shape[1]) # A
-    sif_sp.close()
-    
-    data = l1_data()
-    data.ui =  np.zeros((pol_states,steps,int(dummy.shape[0]/pol_states/steps), int(dummy.shape[1]/2), dummy.shape[2]))
-    data.li =  1.*data.ui
-    for i in range(pol_states):
-        
-     data_dummy = dummy[i::pol_states]
-     
-     for s in range(steps):
-         dummy_dummy = data_dummy[s::steps]
-         data.li[i,s,:] = dummy_dummy[:,0:int(dummy.shape[1]/2),:]
-         data.ui[i,s,:] = dummy_dummy[:,int(dummy.shape[1]/2):,:]
-    print('Read '+file_name)
-    if original:
-        return(dummy, header) # pol_states+scan pos, camera y, camera x (wvl)
-    else:
-      return(data, header)
+
   
 def get_pol_half_names(frame_name: str):
     """
@@ -376,47 +488,6 @@ def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, D
 
     return(xobs)
 
-def read_v_file(file_name,file_i_name,original=False, i_ct = 0, verbose=False):  # not needed really
-    
-    sif_sp = fits.open(file_name, memmap=True)
-    header=sif_sp[0].header
-    steps=int(header['NBSTEP'])+1
-    
-    dummy=np.array(sif_sp[0].data)
-    if verbose:
-     print(dummy.shape)
-     print(header)
-    # xmin=float(header['WAVEMIN']) #nm
-    # xmax=float(header['WAVEMAX']) #nm
-    # xlam=10.*np.arange(xmin,xmax,(xmax-xmin)/data[0,:].shape[1]) # A
-    sif_sp.close()
-    
-    data = v_data()
-    data.v =  np.zeros((steps,int(dummy.shape[0]/steps), int(dummy.shape[1]), dummy.shape[2]))
-    data.i =  0.*data.v
-    
-    sif_sp = fits.open(file_i_name, memmap=True)
-    # header=sif_sp[0].header
-    
-    dummy_i=np.array(sif_sp[0].data)
- 
-    sif_sp.close()
-
-    for s in range(steps):
-         dummy_dummy = dummy[s::steps]
-         data.v[s,:] = dummy_dummy[:,0:int(dummy.shape[1]),:]
-         dummy_dummy_i = dummy_i[s::steps]
-         data.i[s,:] = dummy_dummy_i[:,0:int(dummy_i.shape[1]),:]
-        
-    print('Read \n'+file_name + '\n and \n'+file_i_name)
-    print('------------------------------------\n')
-    
-    #data.v = data.v + i_ct*data.i
-
-    if original:
-        return(dummy, header) # pol_states+scan pos, camera y, camera x (wvl)
-    else:
-      return(data, header)
 
 
 def find_shift(reference, target):
@@ -429,119 +500,7 @@ def shift_image(image, y_shift, x_shift):
     return(shift(image, shift=(-y_shift, -x_shift), mode='constant', cval=0))
 
 
-def plot_power_spectrum(data, zoom=1): # data: y, x
 
-    print(r'Power spectrum')
-    image=1.*data
-    # create figure
-    intmeth = 'none' # imshow integration method
-    my_dpi, fig_size_single, fig_size, params=style_aa(zoom)
-    plt.style.use('default')
-    plt.rcParams.update(params)
-    nullfmt=NullFormatter()
-    
-    fig=plt.figure(num=32) 
-    fig.clf()
-    fig.set_size_inches([fig_size_single[0], 1.5*fig_size_single[1]],forward=True)
-
-    gs = gridspec.GridSpec(2,1, height_ratios=[0.38,1] )#width_ratios=[0.25,0.25,0.25,0.25] , height_ratios=[1,1,1,1] )
-    gs.update(top=0.96, bottom=0.1,left=0.13, right=0.99, wspace=0.05, hspace=0.26)
-         
-         
-    axs=fig.add_subplot(gs[1,0]) 
-    ax0=fig.add_subplot(gs[0,0]) 
-    
-    window_x=windows.hann(image.shape[1]) 
-    window_y=windows.hann(image.shape[0]) 
-    for x in range(image.shape[0]):
-        image[x,:]*=window_x
-    for y in range(image.shape[1]):
-        image[:,y]*=window_y
-        
-
-    fs = np.fft.fftn(image)
-    fs_abs=(np.abs(np.fft.fftshift(fs))**2)
-    # fs_sz=np.shape(fs_abs)
-    # axs[0].imshow(np.log(fs_abs/np.amax(fs_abs)), cmap='jet', interpolation=intmeth, aspect='auto')
-   
-    y,x = np.indices((fs_abs.shape)) # first determine radii of all pixels
-    center=[int(np.shape(fs_abs)[0]/2),int(np.shape(fs_abs)[1]/2)]
-    r = np.sqrt((x-center[1])**2+(y-center[0])**2)    
-
-    # radius of the image.
-    r_max = int(np.floor(np.max(r)))
-
-    # ring_brightness, radius = np.histogram(r, weights=fs_abs, bins=r_max*2)
-    # ring_size, radius_1 = np.histogram(r, bins=r_max*2)
-    # #plt.plot(radius[1:], ring_brightness/ring_size)
-    # liney,= axs[1].plot(radius[1:]/np.max(radius[1:])*1./(2.*dst.pixel[dst.line]), 100*ring_brightness/ring_brightness.max(), 
-    #                     color='black', marker='.', linestyle='None') #   
-    # axs[1].set_xlabel("1/arcsec")
-    # axs[1].set_ylim(0.0000001,0.1)
-    # axs[1].set_xlim(0.2,10.1)
-    # axs[1].set_ylabel('Power [a.u]')
-    # axs[1].set_yscale('log')
-    
-    image_2=1.*data
-    fs_ = np.zeros((image_2.shape[0],int(image_2.shape[1]/2)))
-    
-    freqs = (np.fft.fftfreq(image_2.shape[1])* 1./(dst.pixel[dst.line]))[:int(image_2.shape[1]/2)]
-
-    contrast=np.zeros(image_2.shape[0])
-    for i in range(image_2.shape[0]):
-        i_m=np.mean(image_2[i,:])
-      #  max_da=np.mean(data[0,i,550,np.argsort(data[0,i,550,:])][-100:-5])
-        
-        contrast[i]=100.*np.std(image_2[i,:])/i_m
-        
-    print(r'Mean rms contrast [%]: '+str(np.mean(contrast)))
-    ax0.plot(contrast, color='black')
-    ax0.set_ylabel(r'RMS contrast [%]', labelpad=0)
-    ax0.set_xlabel("Scan position", labelpad=-0.8)
-    ax0.axhline(y=contrast.mean(), color='black',
-               linestyle="dotted", alpha=0.8, linewidth=0.8*zoom)
-    for te in range(image_2.shape[0]):
-     # if contrast[te] > contrast.mean():  
-        image_2[te,:]*=window_x
-        fs=np.fft.fftn(image_2[te,:])
-        fs_abs=np.roll((np.abs(np.fft.fftshift(fs))**2)[int(image_2.shape[1]/2):],-int(image_2.shape[1]/2))
-        fs_[te,:]=fs_abs/fs_abs.max()
-    
-    fs_=np.mean(fs_, axis=0)
-    # use only non-zero parts    
-    fs_/=fs_.mean()
-    #idx_nonzero=np.where(fs > 10e-11)
-    
-   # freq_axis=(radius[1:]/np.max(radius[1:])*1./(2.*dst.pixel[dst.line]))[idx_nonzero]
-    freq_axis=freqs#[idx_nonzero]
-  
-    liney,= axs.plot(freq_axis,fs_,  color='black', marker='.', linestyle='None') #   
-    
-    n_filtered = 111 # needs to be odd!!!
-    medi_filtered = medfilt(fs_,n_filtered)
-    
-    
-    axs.plot(freq_axis[int((n_filtered+1)):-int((n_filtered+1))],
-                medi_filtered[int((n_filtered+1)):-int((n_filtered+1))],
-                        color='blue',linestyle='solid', linewidth=2*zoom ) #   
-    
-    # gradient=np.gradient(medi_filtered[int((n_filtered+1)):-int((n_filtered+1))])
-    # axs[2].plot((radius[1:]/np.max(radius[1:])*1./(2.*dst.pixel[dst.line]))[int((n_filtered+1)):-int((n_filtered+1))],
-    #             gradient,
-    #                     color='red',linestyle='solid' )
-    
-    axs.axvline(x=1/0.58, color='red',
-               linestyle="dashed", alpha=0.8, linewidth=0.8*zoom)
-    axs.axhline(y=2e-7, color='black',
-               linestyle="dashed", alpha=0.8, linewidth=0.8*zoom)
-    axs.set_ylabel('Power [a.u]', labelpad=-1)
-    axs.set_yscale('log')
-    axs.set_ylim(0.00000001,0.01)
-    axs.set_xlim(0.1,2.1)
-    axs.set_xlabel(r"arcsec$^{-1}$",labelpad=-1)
-    #fig.show()
-
-    return(fig, fs_)
 
 def run_pca(data, n_components):
     X = data
@@ -586,87 +545,8 @@ def run_pca_s(data, n_components): # data is already wvl,observations
     return(pca,transformed, inverted)
 
 
-def readpro(filename):
-
-    """ 
-    Reads a line profile from a .per file
-    Call:
-    line_ind, wvlen, StkI, StkQ, StkU, StkV = st.readpro(filename)
-    """
-    
-    from numpy import array
-
-    f = open(filename, 'r')
-
-    line_ind = []
-    wvlen = []
-    StkI = []
-    StkQ = []
-    StkU = []
-    StkV = []
-    
-    for line in f:
-        data = line.split()
-        line_ind.append(float(data[0]))
-        wvlen.append(float(data[1]))
-        StkI.append(float(data[2]))
-        StkQ.append(float(data[3]))
-        StkU.append(float(data[4]))
-        StkV.append(float(data[5]))
-
-    f.close()
-
-    line_ind = array(line_ind)
-    wvlen = array(wvlen)
-    StkI = array(StkI)
-    StkQ = array(StkQ)
-    StkU = array(StkU)
-    StkV = array(StkV)
-
-    return(line_ind, wvlen, StkI, StkQ, StkU, StkV)
 
 
-
-def writepro(filename, line_ind, wvlen, StkI, StkQ, StkU, StkV):
-    """ 
-    Routine that writes the Stokes profiles into a SIR formatted Stokes file.
-    Call:
-    writepro(filename, line_ind, wvlen, StkI, StkQ, StkU, StkV)
-    """
-
-    f = open(filename, "w+")
-
-    for k in range(0, len(line_ind)):
-     
-         f.write('     {0}   {1:> .4f}  {2:> 8.6e} {3:> 8.6e} {4:> 8.6e} {5:> 8.6e} \n'.format(line_ind[k], wvlen[k], StkI[k], StkQ[k], StkU[k], StkV[k]))
-
-    f.close()
-
-    return()
-
-def make_grid_file(file_dir,line_idx,xlam):
-    """
-    Create .grid file for SIR
-
-    Parameters
-    ----------
-    first : number of lines
-    second : line index based on the standart LINE file excluding blends
-    third : array with min wavelenght
-    fourth: array with wavelenght step
-    fifth: array with max wavelenght
-    """
-    file_grid=open(file_dir+'/wavelength.grid','w')
-    file_grid.write('IMPORTANT: a) All items must be separated by commas.\n')
-    file_grid.write('           b) The first six characters of the last line\n')
-    file_grid.write('              in the header (if any) must contain the symbol ---\n')
-    file_grid.write('\n')
-    file_grid.write('Line and blends indices   :   Initial lambda     Step     Final lambda\n')
-    file_grid.write('(in this order)                    (mA)          (mA)         (mA)\n')
-    file_grid.write('-----------------------------------------------------------------------\n')
-   
-    file_grid.write(str(line_idx)+'                      :       '+'{:>4.3f}'.format(xlam[0])+',      '+str(xlam[-1]-xlam[-2])+',        '+'{:>4.3f}'.format(xlam[-1])+'\n')
-    file_grid.close()
 
 
 def align_scans(data): # with continuum images
@@ -793,77 +673,10 @@ def binning(data, binning = [1,1,1,1]):
 
 
 
-def add_axis(fig,ax,data, wl,label, pixel, xvis='no', yvis='no',title=None):
-    
-   ax.cla()
-   intmeth = 'none' # imshow integration method
-   dmin,dmax=np.percentile(data.flatten(),(0.5,99.5))
-   mn=np.mean(data)
-   fct=np.mean(data)/mn
-   
-   image_sz=np.array(data.shape)
-   
-   extent=[0,image_sz[1]*pixel,0,image_sz[0]*pixel]
-
-   if wl.shape[0] == image_sz[0]:
-       extent[2]=wl[0]
-       extent[3]=wl[-1]
-   if title != None:
-       ax.set_title(title)
-   
-   im=ax.imshow(data, cmap='gray',origin='lower',\
-   interpolation=intmeth,clim=[fct*dmin,fct*dmax], 
-   extent=extent, aspect='auto')#
-       
-   #Plot color bar   
-   cb=fig.colorbar(im,ax=ax, orientation="vertical")
-   cb.ax.minorticks_on()
-   cb.set_label(label)
-   
-   if xvis == 'no':
-       ax.get_xaxis().set_visible(False)
-   else:
-       ax.get_xaxis().set_visible(True)
-       if xvis != 'yes':         
-           ax.set_xlabel(xvis)  
-   if yvis == 'no':
-       ax.get_yaxis().set_visible(False)
-   else:
-       ax.get_yaxis().set_visible(True)
-       if yvis != 'yes':         
-           ax.set_ylabel(yvis)  
-       
-   return(ax)
 
 
-def read_fts5(wl_start, wl_end): # wavelenght start and end in Angstroem
 
-     # -- fts data
-    file_fts5 = directory_atlas+'/fts5.sav'
-        
-    s =  readsav(file_fts5 , verbose=False,python_dict=True)
 
-    wavelength=s['w']      # wavelength (Å)
-    fts_i=s['b'] 	       # I/Ic
-    fts_v=s['vi'] 	       # Stokes V/Ic (unsmoothed, recommended)
-
-    s_idx =  np.argmin(abs(wavelength-wl_start))  # in Angstrom
-    e_idx = np.argmin(abs(wavelength-wl_end))     # in Angstrom
-
-    wavelength = wavelength[s_idx-1:e_idx]
-    fts_i = fts_i[s_idx-1:e_idx]
-    fts_v = fts_v[s_idx-1:e_idx]
-    
-    print("read_fts: Only working for start wavelength below 6906 and above 5253.8")
-    return(wavelength, fts_i, fts_v)
-
-def dummy_binning(data, binning=[1,1]):
-    kernel = np.ones((binning[0],binning[1]))/(binning[0]*binning[1])
-    data_dummy = 0.*data
-    for i in range(data.shape[2]):
-     conv_data = 1.*convolve2d(data[:,:,i], kernel, 'valid')
-     data_dummy[:conv_data.shape[0],:conv_data.shape[1],i] = conv_data
-    return(data_dummy)
     
 
 def check_continuum_noise(data): # stokes V in continuum only
@@ -918,255 +731,9 @@ def check_continuum_noise(data): # stokes V in continuum only
     ax.set_ylabel('noise [%]')
     ax.legend()
     return(0)
-def add_scan_axis(fig,ax,data, label, stokes =False, clim=[0,0], xvis='no', yvis='no', x_offset=0, title=None, total=False):
-    
-   if stokes:  
-    if total:
-        cdict = {'red':   ((0.0, 0.0, 0.0), (0.25, 1.0, 1.0), (0.75,1.0,1.0), (1.0,1.0,1.0)),
-                'green': ((0.0, 0.0, 0.0),  (0.25, 1.0, 1.0), (0.75,0.0,0.0), (1.0,1.0,1.0)),
-                'blue':  ((0.0, 1.0, 1.0),  (0.25, 0.0, 0.0), (0.75,0.0,0.0), (1.0,1.0,1.0))}
-    else:
-
-     cdict = {'red':  ((0.0, 0.0, 0.0), (0.25, 0.0, 0.0), (0.5, 1.0, 1.0), (0.75,1.0,1.0)  , (1.0,1.0,1.0)),
-             'green': ((0.0, 1.0, 1.0), (0.25, 0.0, 0.0), (0.5, 1.0, 1.0), (0.75,0.75,0.75), (1.0,0.0,1.0)),
-             'blue':  ((0.0, 0.0, 0.0), (0.25, 1.0, 1.0), (0.5, 1.0, 1.0), (0.75,0.0,0.0)  , (1.0,0.0,0.0))}
-
-    p_cmap = mplcolor.LinearSegmentedColormap('p_colormap',cdict,256)    
-    
-   else: 
-       p_cmap='gray'
-    
-   ax.cla()
-   intmeth = 'none' # imshow integration method
-   dmin,dmax=np.percentile(data.flatten(),(0.5,99.5))
-   mn=np.mean(data)
-   fct=np.mean(data)/mn
-   
-   image_sz=np.array(data.shape)
-   
-   extent=[x_offset*dst.pixel[dst.line],(x_offset+image_sz[1])*dst.pixel[dst.line],0,image_sz[0]*dst.slitwidth]
-
-   if title != None:
-       ax.set_title(title)
-   
-   clim_plot=[fct*dmin,fct*dmax]
-   if abs(clim[0] - clim[1]) > 10e-8:
-       clim_plot=clim
-   im=ax.imshow(data, cmap=p_cmap,origin='lower',\
-                    interpolation=intmeth,clim=clim_plot, 
-                    extent=extent, aspect='auto')#
-       
-   #Plot color bar   
-   cb=fig.colorbar(im,ax=ax, orientation="vertical")
-   cb.ax.minorticks_on()
-   cb.set_label(label)
-   
-   if xvis == 'no':
-       ax.get_xaxis().set_visible(False)
-   else:
-       ax.get_xaxis().set_visible(True)
-       if xvis != 'yes':         
-           ax.set_xlabel(xvis, labelpad=-0.8)  
-   if yvis == 'no':
-       ax.get_yaxis().set_visible(False)
-   else:
-       ax.get_yaxis().set_visible(True)
-       if yvis != 'yes':         
-           ax.set_ylabel(yvis, labelpad=-0.8)  
-       
-   return(ax)
-
-def add_axis_contour(fig, ax, data, data2, threshold, zoom, wl,label, pixel, xvis='no', yvis='no',title=None):
-    
-   ax.cla()
-   intmeth = 'none' # imshow integration method
-   dmin,dmax=np.percentile(data.flatten(),(3.,97.5))
-   mn=np.mean(data)
-   fct=np.mean(data)/mn
-
-   
-   image_sz=np.array(data.shape)
-   linewidth_contour=2.*zoom
-   alpha_value=0.7
-   
-   extent=[0,image_sz[1]*pixel,0,image_sz[0]*pixel]
-
-   if wl.shape[0] == image_sz[0]:
-       extent[2]=wl[0]
-       extent[3]=wl[-1]
-   if title != None:
-       ax.set_title(title)
-   
-   im=ax.imshow(data, cmap='gray',origin='lower',\
-   interpolation=intmeth,clim=[fct*dmin,fct*dmax], 
-   extent=extent, aspect='auto')#
-       
-   #Plot color bar   
-   cb=fig.colorbar(im,ax=ax, orientation="vertical")
-   cb.ax.minorticks_on()
-   cb.set_label(label)
-   
-   if xvis == 'no':
-       ax.get_xaxis().set_visible(False)
-   else:
-       ax.get_xaxis().set_visible(True)
-       if xvis != 'yes':         
-           ax.set_xlabel(xvis)  
-   if yvis == 'no':
-       ax.get_yaxis().set_visible(False)
-   else:
-       ax.get_yaxis().set_visible(True)
-       if yvis != 'yes':         
-           ax.set_ylabel(yvis)  
-            
-   
-   # for u, contour in enumerate(contours):
-   #      #ax.plot(contour[:,1],contour[:,0],linewidth=linewidth_contour, color='k', alpha=alpha_value)
-   #      ax.plot([0,2000],[0,2000],linewidth=linewidth_contour, color='k', alpha=alpha_value)
-   #      #mask=sm.grid_points_in_poly([subfield[1]-subfield[0],subfield[3]-subfield[2]], contour)
-   ax.contour(data2, threshold, colors='magenta', origin='lower', extent=extent, linewidths= linewidth_contour, alpha=alpha_value)
-   return(ax)
 
 
- 
 
-def plot_stokes_simple(data, wl, pixel=1,zoom=1, fnum=0, label_up = False, title=None, save_figure=[False,'None',__file__]):
-    
-    plt.close()
-    my_dpi, fig_size_single, fig_size, params=style_aa(zoom)
-    plt.style.use('default')
-    plt.rcParams.update(params)
-    nullfmt=NullFormatter()
-    
-    fig, axs = plt.subplots(4,constrained_layout=True, num=3)
-    fig.set_size_inches(fig_size,forward=True)
-    
-    if label_up:
-        stokes_str=[r'$I$',r'$Q$ [$I_c$]',r'$U$ [$I_c$]',r'$V$ [$I_c$]']
-    else:
-        stokes_str=[r'$I$',r'$Q/I$ [$\%$]',r'$U/I$ [$\%$]',r'$V/I$ [$\%$]']
-    titles=[title, None, None, None]
-    yvis=[r'Wavelength $[\mathrm{\AA}]$', r'Wavelength $[\mathrm{\AA}]$', r'Wavelength $[\mathrm{\AA}]$', r'Wavelength $[\mathrm{\AA}]$']
-    
-    if pixel == 1:
-     xvis=[r'no', r'no',r'no', r'pixel']
-    else:
-     xvis=[r'no', r'no',r'no', r'arcsec'] 
-     
-    
-    for i,s in enumerate(stokes_str):
-        ax=add_axis(fig,axs[i],data[i,:], wl,s, pixel,xvis=xvis[i], yvis=yvis[i], title=titles[i])
-        
-    fig.show()
-    
-    if save_figure[0]:
-        
-       fig.savefig(save_figure[1], 
-              dpi=my_dpi, metadata={'Software': save_figure[2]})
-    return(fig, axs)
-
-def plot_scan_images(data, wl_idx, zoom=2, fnum=0, binning= [1,1,1], clim=[0,0], vlim=[0,0], title=None, save_figure=[False,'None',__file__]):
-    # binning is in spatially in scan direction, spatially along slit, spectrally
-    
-    # print('plotted data is binned to' )
-    my_dpi, fig_size_single, fig_size, params=style_aa(zoom)
-    plt.style.use('default')
-    plt.rcParams.update(params)
-    nullfmt=NullFormatter()
-    
-    fig = plt.figure(num=fnum, layout="constrained")
-    fig.set_size_inches([fig_size_single[0],1.3*fig_size_single[1]],forward=True)
-    fig.clf()
-    
-    gs = gridspec.GridSpec(4,1, figure=fig)#width_ratios=[1,0.25,1,0.25])# , height_ratios=[1,1,1,1] )
-    gs.update(top=0.99, bottom=0.14,left=0.11, right=0.95, wspace=0.17, hspace=0.12)
-    
-    
-    stokes_str=[r'$I$',r'$Q/I$ [$\%$]',r'$U/I$ [$\%$]',r'$V/I$ [$\%$]']
-    titles=[title, None, None, None]
-    yvis=[r'arcsec', r'arcsec', r'arcsec', r'arcsec']
-    
-    xvis=[r'no', r'no',r'no', r'arcsec'] 
-    
-    data_plot= np.copy(data)
-    
-    # wavelength binning
-    shifts=[0,1,-1,2,-2,3,-3,4,-4,5,-5]
-    
-    if binning[2]>1:
-       data_plot=0.* np.copy(data)
-       for wv in range(binning[2]):
-          data_plot += np.roll(data, shifts[wv], axis=2) 
-       data_plot/=binning[2]
-    data_plot=data_plot[:,:,wl_idx,:]
-    kernel = np.ones((binning[0],binning[1]))/(binning[0]*binning[1])
-    
-    
-    for i,s in enumerate(stokes_str):
-        
-        axs = fig.add_subplot(gs[i, 0])
-        
-        if i > 0:
-            stokes=True
-        else:
-            stokes=False
-            
-        # spatial binning
-        if binning[0] > 1 or binning[1]> 1:
-               data_plot_dummy = convolve2d(data_plot[i,:], kernel, 'valid')
-        else:
-            data_plot_dummy = data_plot[i,:]
-        if i == 1 or i == 2:
-            clim_plot = clim
-        else:
-            clim_plot=[0,0]
-            if i == 3:
-                clim_plot=vlim
-        ax=add_scan_axis(fig,axs,data_plot_dummy,s, xvis=xvis[i], yvis=yvis[i],  clim=clim_plot,title=titles[i], stokes=stokes)
-        ax.set_yticks([0,0.5,1])
-    
-    fig.show()
-    
-    if save_figure[0]:
-        
-       fig.savefig(save_figure[1], 
-              dpi=my_dpi, metadata={'Software': save_figure[2]})
-       
-      # plot intensity spectrum with vertical line indicating the wavelength point plotted  
-       
-    fig2 = plt.figure(num=44,  layout="constrained")
-    fig2.set_size_inches(fig_size_single,forward=True)
-    fig2.clf()
-
-    gs2 = gridspec.GridSpec(1,1, figure=fig2 )#width_ratios=[1,0.25,1,0.25])# , height_ratios=[1,1,1,1] )
-    gs2.update(top=0.95, bottom=0.12,left=0.08, right=0.99, wspace=0.17, hspace=0.05)
-    
-    ax2 = fig2.add_subplot(gs2[0, 0]) # 
-    ax2.cla()
-    
-    intensity_spectrum = data[0,0,:,0]
-    ax2.plot(intensity_spectrum)
-    ax2.vlines(wl_idx, ymin=intensity_spectrum.min(), ymax=intensity_spectrum.max(), color='red', linewidth=2)
-    fig2.show() 
-    return(fig)
-
-def add_noise_to_profiles(file, noise): # gaussian noise
-    
-    line_ind, wvlen, StkI, StkQ, StkU, StkV = readpro(file)
-    noise_v = np.random.normal(0.0, noise, StkV.shape[0])
-    noise_q = np.random.normal(0.0, noise, StkQ.shape[0])
-    noise_u = np.random.normal(0.0, noise, StkU.shape[0])
-
-    print('max SNR Q: '+str(max(StkQ)/noise))
-    print('max SNR U: '+str(max(StkU)/noise))
-    print('max SNR V: '+str(max(StkV)/noise))
-    
-    filename_without_ext = os.path.splitext(os.path.basename(file))[0]
-    dirname, fname = os.path.split(file)
-    
-    writepro(dirname+'/'+filename_without_ext+'_n.per',line_ind, wvlen, StkI, StkQ+noise_q, StkU+noise_u, StkV+noise_v)
-        
-    return(0)
 
 class ff:
     # Class object to store folder and file names
@@ -1292,17 +859,7 @@ class init:
      return "\n".join(lines)
 
 
-def write_wht_file(xlam, directory):
-    file=open(directory+'profiles.wht','w')
-    for x in xlam:
-       file.write(str(1)+'   {:>4.3f}'.format(x)+'    {:>1.3f}'.format(1)+'   {:>1.3f}'.format(0)+'    {:>1.3f}'.format(0)+'   {:>1.3f}'.format(1)+'\n')
-   # correction_second_line = (dst.line_core[1]-dst.line_core[0])*dst.spectral_sampling
-   # for x in xlam:
-   #    file.write(str(2)+'   {:>4.3f}'.format(x+correction_second_line)+'    {:>1.3f}'.format(1)+'   {:>1.3f}'.format(0)+'    {:>1.3f}'.format(0)+'   {:>1.3f}'.format(1)+'\n')
 
-    file.close()
-    
-    print('.wht file written')
     
 def prep_data_for_pca(data):
     # prepare data for PCA - first dimension is wavelength << other dimension
@@ -1316,187 +873,5 @@ def prep_data_for_pca(data):
     data_prep-=mean
     return(data_prep, mean)
 
-def process_data_for_inversion(data,  scan=0, ff_p =ff,  
-                                             binning_x =  1, # scan pos, scan, x along slit, wavelength
-                                             pca = 0,  # define number of pca components
-                                             continuum = True,  # correct continuum: intensity/I_c, V - V_c
-                                             cut=True, 
-                                             test = False, save = True): #only one scan at a time
-    
 
-    if binning == 1:
-       print("process_dataset: Processing data \n"+ff_p.v_file)
-    else:
-       print("process_dataset: Processing data \n"+ff_p.v_file+' \n with binning '+ str(binning_x)+'scans')
-    print('----------------------')
-    
-    # figure out if it is a single scan
-    single_scan=False
-    if len(data.i.shape) == 3: 
-       single_scan = True
-       print('process_dataset: There is only one scan in the data. \n')
-    if not single_scan:   
-       # mask tellurics
-        for tel in range(2):
-         data.i[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -2*np.max(data.i)
-         data.v[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = 0.0 # 
-
-        
-        i_c = data.i[:,:,20:-20,dst.continuum[0]:dst.continuum[1]].mean(axis=3)
-        i_c = i_c.max() 
-        
-        if continuum:
-            data.i /= i_c
-            for i in range(data.v.shape[0]):
-               for m in range(data.v.shape[1]):
-                 for n in range(data.v.shape[2]):
-                     data.v[i,m,:,n] -= data.v[i,m,n,dst.continuum[0]:dst.continuum[1]].mean()
-        
-        if cut:
-               data.i = data.i[dst.yroi[0]:dst.yroi[1],:,dst.roi[0]:dst.roi[1],dst.sroi[0]:dst.sroi[1]]
-               data.v = data.v[dst.yroi[0]:dst.yroi[1],:,dst.roi[0]:dst.roi[1],dst.sroi[0]:dst.sroi[1]]
-
-               if continuum:
-                    data.i /= data.i.max()    
-                            
-        reduced_data = np.zeros((data.i.shape[3], 4, data.i.shape[0], data.i.shape[2] ) ) 
-        # stokes, wvl, x, y
-        xlam = 1000*(np.arange( data.i.shape[3]) - dst.line_core[0]+dst.sroi[0])*dst.spectral_sampling # to be used in the wavelength grid for SIR
-        
-        print('According to the parameters in themis_datasets:'+'\n'+\
-              'start wavelength [mA]: '+str(xlam[0]) +'\n' + \
-              'wl step [mA]: '+str(1000*dst.spectral_sampling)+'\n' + \
-               'end wavelength [mA]: '+str(xlam[-1]) +'\n'  )
-        # if wl_calibration:
-        #     wl_reference, ref_spectrum, _ = read_fts5(6299, 6305)
-        #     spectrum = data.i.mean(axis=(0,1,2))
-        #     spectrum/=spectrum.max()
-        #     xlam = z3ccspectrum(spectrum,  wl_reference, ref_spectrum, FACL=0.8, FACH=1.5, FACS=0.005, 
-        #                            CUT=[10,20], DERIV=None, CONT=1.01, SHOW=2)
-            
-        for i in tqdm(range(reduced_data.shape[0])):
-            for m in range(reduced_data.shape[2]):
-              reduced_data[i,0, m,:] = data.i[m,scan,:,i]
-              
-              reduced_data[i,3,m,:] = data.v[m,scan,:,i]
-              
-        if pca > 0:
-            data_line_1, mean_1=prep_data_for_pca(reduced_data[int(reduced_data.shape[0]/2):,3, :])
-            data_line_2, mean_2=prep_data_for_pca(reduced_data[:int(reduced_data.shape[0]/2),3, :])
-            
-            pca_line_1, transformed_line_1, inverted_line_1 = run_pca_s(data_line_1, pca)
-            pca_line_2, transformed_line_2, inverted_line_2 = run_pca_s(data_line_2, pca)
-            
-            X_pca_1 = pca_line_1.transform(data_line_1)
-            X_reconstructed_1 = pca_line_1.inverse_transform(X_pca_1) + mean_1
-            
-            X_pca_2 = pca_line_2.transform(data_line_2)
-            X_reconstructed_2 = pca_line_2.inverse_transform(X_pca_2) + mean_2
-
-            reduced_data[int(reduced_data.shape[0]/2):,3,:] = X_reconstructed_1.reshape((int(reduced_data.shape[0]/2),reduced_data.shape[2],reduced_data.shape[3]))
-            reduced_data[:int(reduced_data.shape[0]/2),3,:] = X_reconstructed_2.reshape((int(reduced_data.shape[0]/2),reduced_data.shape[2],reduced_data.shape[3]))
-  
-        if save:
-            
-            save_inv_input_data(reduced_data, xlam,ff_p, scan, overwrite = True)
-        
-    return(reduced_data, xlam, ff_p)    
-    
-
-def process_pixel_for_inversion(data,  x=0, y=0, scan=0, ff_p =ff,  
-                                             pca = 0,  # define number of pca components
-                                             continuum = True,  # correct continuum: intensity/I_c, V - V_c
-                                             cut=True, 
-                                             test = False, save = True, dir_= '', ext = ''): #only one scan at a time
-    
-
-    print("process_pixel: Processing data \n"+ff_p.v_file)
-
-    print('----------------------')
-    
-    
-    # figure out if it is a single scan
-    single_scan=False
-    if len(data.i.shape) == 3: 
-       single_scan = True
-       print('process_dataset: There is only one scan in the data. \n')
-    if not single_scan:   
-       # mask tellurics
-        for tel in range(2):
-         data.i[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = -2*np.max(data.i)
-         data.v[:,:,:,dst.tellurics[tel][0]:dst.tellurics[tel][1]] = 0.0 # 
-
-        
-        i_c = data.i[:,:,20:-20,dst.continuum[0]:dst.continuum[1]].mean(axis=3)
-        i_c = i_c.max()
-        
-        if continuum:
-            data.i /= i_c
-            for i in range(data.v.shape[0]):
-               for m in range(data.v.shape[1]):
-                 for n in range(data.v.shape[2]):
-                     data.v[i,m,:,n] -= data.v[i,m,n,dst.continuum[0]:dst.continuum[1]].mean()
-        
-        if cut:
-               data.i = data.i[:,:,dst.roi[0]:dst.roi[1],dst.sroi[0]:dst.sroi[1]]
-               data.v = data.v[:,:,dst.roi[0]:dst.roi[1],dst.sroi[0]:dst.sroi[1]]
-        
-
-        if continuum:
-                    data.i /= data.i.max()    
-                            
-        reduced_data = np.zeros((data.i.shape[3], 4, data.i.shape[0], data.i.shape[2] ) ) 
-        # stokes, wvl, x, y
-        xlam = 1000*(np.arange( data.i.shape[3]) - dst.line_core[0]+dst.sroi[0])*dst.spectral_sampling # to be used in the wavelength grid for SIR
-        
-        print('According to the parameters in themis_datasets:'+'\n'+\
-              'start wavelength [mA]: '+str(xlam[0]) +'\n' + \
-              'wl step [mA]: '+str(1000*dst.spectral_sampling)+'\n' + \
-               'end wavelength [mA]: '+str(xlam[-1]) +'\n'  )
-        # if wl_calibration:
-        #     wl_reference, ref_spectrum, _ = read_fts5(6299, 6305)
-        #     spectrum = data.i.mean(axis=(0,1,2))
-        #     spectrum/=spectrum.max()
-        #     xlam = z3ccspectrum(spectrum,  wl_reference, ref_spectrum, FACL=0.8, FACH=1.5, FACS=0.005, 
-        #                            CUT=[10,20], DERIV=None, CONT=1.01, SHOW=2)
-            
-        for i in range(reduced_data.shape[0]):
-            for m in range(reduced_data.shape[2]):
-              reduced_data[i,0, m,:] = data.i[m,scan,:,i]
-              
-              reduced_data[i,3,m,:] = data.v[m,scan,:,i]
-              
-        if pca > 0:
-            data_line_1, mean_1=prep_data_for_pca(reduced_data[int(reduced_data.shape[0]/2):,3, :])
-            data_line_2, mean_2=prep_data_for_pca(reduced_data[:int(reduced_data.shape[0]/2),3, :])
-            
-            pca_line_1, transformed_line_1, inverted_line_1 = run_pca_s(data_line_1, pca)
-            pca_line_2, transformed_line_2, inverted_line_2 = run_pca_s(data_line_2, pca)
-            
-            X_pca_1 = pca_line_1.transform(data_line_1)
-            X_reconstructed_1 = pca_line_1.inverse_transform(X_pca_1) + mean_1
-            
-            X_pca_2 = pca_line_2.transform(data_line_2)
-            X_reconstructed_2 = pca_line_2.inverse_transform(X_pca_2) + mean_2
-
-            reduced_data[int(reduced_data.shape[0]/2):,3,:] = X_reconstructed_1.reshape((int(reduced_data.shape[0]/2),reduced_data.shape[2],reduced_data.shape[3]))
-            reduced_data[:int(reduced_data.shape[0]/2),3,:] = X_reconstructed_2.reshape((int(reduced_data.shape[0]/2),reduced_data.shape[2],reduced_data.shape[3]))
-        
-        single_profile = reduced_data[:,:,x,y]
-        
-        if save:
-            
-            
-            file_name="profile_"+format(scan,'02')+'_'+format(x,'03')+'_'+format(y,'03')+ext+".per"
-            print('Save single pixel SIR input file:\n')
-            print(file_name)
-            print('Save wavelength.grid file\n')
-            
-            writepro(ff_p.inversion_dir+'/'+dir_+'/'+file_name,np.zeros(xlam.shape)+dst.line_idx,xlam,\
-                          single_profile[:,0], single_profile[:,1], single_profile[:,2], single_profile[:,3])  
-            make_grid_file(ff_p.inversion_dir+'/'+dir_,dst.line_idx,xlam)
-            print('----------------')
-            print('Important: you still need to add the blend line 2 if you would like to invert it in the wavelength.grid file!')
-            print('---------------------------------------')
-    return(single_profile, xlam, ff_p)    
     
