@@ -67,28 +67,28 @@ class Frame:
 
 class CycleSet:
     def __init__(self):
-        # frames keyed by (polarization_state, slit_position_index, map_index)
+        # frames keyed by (frame_state, slit_position_index, map_index)
         self.frames = {}
 
     def add_frame(self, frame: Frame, key_tuple: tuple):
         """
-        Adds a frame with a composite key (pol_state, slit_pos_idx, map_idx).
+        Adds a frame with a composite key (frame_state, slit_pos_idx, map_idx).
         """
         self.frames[key_tuple] = frame
 
-    def get_state_slit_map(self, pol_state: str, slit_pos_idx: int, map_idx: int):
+    def get_state_slit_map(self, frame_state: str, slit_pos_idx: int, map_idx: int):
         """
-        Retrieves a specific frame by its polarization state, slit position index, and map index.
+        Retrieves a specific frame by its frame state, slit position index, and map index.
         """
-        return self.frames.get((pol_state, slit_pos_idx, map_idx))
+        return self.frames.get((frame_state, slit_pos_idx, map_idx))
 
-    def get_state(self, pol_state: str):
+    def get_state(self, frame_state: str):
         """
-        Returns a new CycleSet containing only frames for the specified polarization state.
+        Returns a new CycleSet containing only frames for the specified frame state.
         """
         new_collection = CycleSet()
         for key, frame in self.frames.items():
-            if key[0] == pol_state:
+            if key[0] == frame_state:
                 new_collection.add_frame(frame, key)
         return new_collection
     
@@ -131,6 +131,76 @@ class CycleSet:
         if not arrays:
             raise ValueError("No frames available to stack for position='{}'".format(position))
         return np.stack(arrays, axis=axis)
+    
+    def get_data(self, frame_state: str, slit_pos_idx: int, map_idx: int, pol_state: str):
+        """
+        Directly retrieve data array for a specific frame half by its polarization state.
+        
+        Args:
+            frame_state: Frame state identifying the frame
+            slit_pos_idx: Slit position index
+            map_idx: Map index
+            pol_state: Polarization state of the half to retrieve
+            
+        Returns:
+            np.ndarray or None if not found
+        """
+        frame = self.get_state_slit_map(frame_state, slit_pos_idx, map_idx)
+        if frame is None:
+            return None
+        return frame.get_by_state(pol_state)
+    
+    def get_both_halves(self, frame_state: str, slit_pos_idx: int, map_idx: int):
+        """
+        Retrieve both upper and lower halves for a specific frame.
+        
+        Args:
+            frame_state: Frame state identifying the frame
+            slit_pos_idx: Slit position index
+            map_idx: Map index
+            
+        Returns:
+            dict with 'upper' and 'lower' keys containing FrameHalf objects, or None if frame not found
+        """
+        frame = self.get_state_slit_map(frame_state, slit_pos_idx, map_idx)
+        if frame is None:
+            return None
+        return {
+            'upper': frame.get_half('upper'),
+            'lower': frame.get_half('lower')
+        }
+    
+    def get_both_data(self, frame_state: str, slit_pos_idx: int, map_idx: int):
+        """
+        Retrieve both upper and lower data arrays for a specific frame.
+        
+        Args:
+            frame_state: Frame state identifying the frame
+            slit_pos_idx: Slit position index
+            map_idx: Map index
+            
+        Returns:
+            dict with 'upper' and 'lower' keys containing np.ndarray, or None if frame not found
+        """
+        halves = self.get_both_halves(frame_state, slit_pos_idx, map_idx)
+        if halves is None:
+            return None
+        return {
+            'upper': halves['upper'].data if halves['upper'] else None,
+            'lower': halves['lower'].data if halves['lower'] else None
+        }
+    
+    def items(self):
+        """Dict-like iteration over (key, frame) pairs."""
+        return self.frames.items()
+    
+    def keys(self):
+        """Dict-like access to frame keys."""
+        return self.frames.keys()
+    
+    def __getitem__(self, key):
+        """Dict-like access: cycleset[(frame_state, slit_idx, map_idx)]."""
+        return self.frames[key]
 
 class FramesSet:
     """

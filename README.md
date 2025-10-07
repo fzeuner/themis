@@ -15,7 +15,11 @@ Code for analyzing themis data
 Get https://github.com/fzeuner/spectator, then:
   pip install -e spectator
 
-On a fresh machine, repeat the above three steps to get started.
+Get https://gitlab.gwdg.de/hoelken/atlas-fit/-/tree/main?ref_type=heads, then:
+  git clone https://gitlab.gwdg.de/hoelken/atlas-fit.git
+  pip install -e atlas-fit
+
+On a fresh machine, repeat the above steps to get started.
 
 ## Configuration-driven datasets (2025)
 

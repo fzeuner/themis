@@ -8,6 +8,7 @@ date = "2025-07-07"
 # Sequences for scan/flat/dark
 sequence = 26
 flat_sequence = 25
+flat_center_sequence = 23
 dark_sequence = 1
 # Polarization states order (modify as needed) - only for scan data!
 states = ["pQ", "mQ", "pU", "mU", "pV", "mV"]

@@ -144,6 +144,59 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
         hdus.append(fits.ImageHDU(upper_avg, name='UPPER_FLAT'))
         hdus.append(fits.ImageHDU(lower_avg, name='LOWER_FLAT'))
 
+    elif data_type == 'flat_center' and level == 'l0':
+        # Expect FramesSet with index {0: averaged flat_center}
+        avg = frames.get(0)
+
+        if avg is None:
+            raise ValueError("Expected reduced flat_center frames to contain index 0 (averaged)")
+
+        upper_avg = avg.get_half('upper').data.astype('float32', copy=False)
+        lower_avg = avg.get_half('lower').data.astype('float32', copy=False)
+        hdus.append(fits.ImageHDU(upper_avg, name='UPPER_FLAT_CENTER'))
+        hdus.append(fits.ImageHDU(lower_avg, name='LOWER_FLAT_CENTER'))
+
+    elif data_type == 'scan' and level == 'l0':
+        # Expect CycleSet with keys (frame_state, slit_idx, map_idx)
+        # Save all frames as individual HDUs
+        if not isinstance(frames, dct.CycleSet):
+            raise ValueError("Expected scan l0 frames to be a CycleSet")
+        
+        # Sort keys for consistent ordering
+        sorted_keys = sorted(frames.keys())
+        
+        for idx, key in enumerate(sorted_keys):
+            frame = frames[key]
+            frame_state, slit_idx, map_idx = key
+            
+            upper_half = frame.get_half('upper')
+            lower_half = frame.get_half('lower')
+            
+            upper_data = upper_half.data.astype('float32', copy=False)
+            lower_data = lower_half.data.astype('float32', copy=False)
+            
+            # Create descriptive HDU names
+            upper_name = f'U_{frame_state}_S{slit_idx:02d}_M{map_idx:02d}'
+            lower_name = f'L_{frame_state}_S{slit_idx:02d}_M{map_idx:02d}'
+            
+            # Add HDUs with headers containing frame metadata
+            upper_hdr = fits.Header()
+            upper_hdr['FRMSTATE'] = (frame_state, 'Frame state (key identifier)')
+            upper_hdr['POLSTATE'] = (upper_half.pol_state if upper_half.pol_state else '', 'Polarization state of this half')
+            upper_hdr['SLITIDX'] = (slit_idx, 'Slit position index')
+            upper_hdr['MAPIDX'] = (map_idx, 'Map index')
+            upper_hdr['HALF'] = ('upper', 'Camera half')
+            
+            lower_hdr = fits.Header()
+            lower_hdr['FRMSTATE'] = (frame_state, 'Frame state (key identifier)')
+            lower_hdr['POLSTATE'] = (lower_half.pol_state if lower_half.pol_state else '', 'Polarization state of this half')
+            lower_hdr['SLITIDX'] = (slit_idx, 'Slit position index')
+            lower_hdr['MAPIDX'] = (map_idx, 'Map index')
+            lower_hdr['HALF'] = ('lower', 'Camera half')
+            
+            hdus.append(fits.ImageHDU(upper_data, header=upper_hdr, name=upper_name))
+            hdus.append(fits.ImageHDU(lower_data, header=lower_hdr, name=lower_name))
+
     else:
         # Placeholder for other data types/levels
         raise NotImplementedError(f"Saving not implemented for data_type='{data_type}', level='{level}'")
@@ -197,6 +250,18 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     num_slit_positions = header.get('NBSTEP', 0) + 1 if 'NBSTEP' in header else 1
     data = np.array(hdu[0].data)
     
+    # Correct for signed/unsigned integer overflow in flat data
+    if status == 'raw' and data_type in ('flat', 'flat_center'):
+        # If there are negative values larger than -32768 (i.e., closer to zero),
+        # shift them into the unsigned range by adding 2*32768+1 = 65537
+        if np.any(data < 0):
+            negative_mask = data < 0
+            if np.any(data[negative_mask] > -32768):
+                if verbose:
+                    print(f"Correcting signed/unsigned integer overflow in {data_type} data: adding 65537 to negative values")
+                data = data.astype('float32')  # Convert to float to handle the addition
+                data[negative_mask] = data[negative_mask] + 65537
+    
     collection = None
     
     if status == 'raw':  
@@ -238,7 +303,7 @@ def read_any_file(config, data_type, status='raw', verbose=False):
                         single_frame.set_half("lower", r2_data_flipped, lower_name)
                         collection.add_frame(single_frame, (pol_state, s_idx, map_idx))
 
-        elif data_type in ('flat', 'dark'):
+        elif data_type in ('flat', 'flat_center', 'dark'):
             # Generic frames (no states/slit/map semantics): use FramesSet keyed by frame_idx
             total_frames_in_file = data.shape[0]
             collection = dct.FramesSet()
@@ -282,6 +347,66 @@ def read_any_file(config, data_type, status='raw', verbose=False):
         single_frame.set_half("upper", upper_avg)
         single_frame.set_half("lower", lower_avg)
         collection.add_frame(single_frame, 0)
+
+    elif status == 'l0' and data_type == 'flat_center':
+        # Read reduced flat_center created by save_reduction
+        collection = dct.FramesSet()
+
+        # Find expected HDUs by name
+        hdu_names = {h.name.upper(): idx for idx, h in enumerate(hdu)}
+
+        # Averaged frames (required)
+        try:
+            upper_avg = np.array(hdu[hdu_names['UPPER_FLAT_CENTER']].data)
+            lower_avg = np.array(hdu[hdu_names['LOWER_FLAT_CENTER']].data)
+        except KeyError as e:
+            raise ValueError("Missing UPPER_FLAT_CENTER/LOWER_FLAT_CENTER HDUs in l0 flat_center file") from e
+
+        frame_name_str = f"{data_type}_l0_frame{0:04d}"
+        single_frame = dct.Frame(frame_name_str)
+        single_frame.set_half("upper", upper_avg)
+        single_frame.set_half("lower", lower_avg)
+        collection.add_frame(single_frame, 0)
+
+    elif status == 'l0' and data_type == 'scan':
+        # Read reduced scan created by save_reduction: reconstruct CycleSet from HDUs
+        collection = dct.CycleSet()
+        
+        # Build a dict to group upper/lower pairs by their key (frame_state, slit_idx, map_idx)
+        frames_dict = {}
+        
+        for h in hdu[1:]:  # Skip primary HDU
+            if h.header.get('HALF') is None:
+                continue  # Skip HDUs without HALF keyword
+                
+            frame_state = h.header['FRMSTATE']
+            pol_state = h.header.get('POLSTATE', None)
+            # Handle empty string as None
+            if pol_state == '':
+                pol_state = None
+            slit_idx = h.header['SLITIDX']
+            map_idx = h.header['MAPIDX']
+            half = h.header['HALF']
+            
+            key = (frame_state, slit_idx, map_idx)
+            
+            # Initialize frame if not exists
+            if key not in frames_dict:
+                frame_name_str = f"{frame_state}_slit{slit_idx:02d}_map{map_idx:02d}"
+                frames_dict[key] = {
+                    'frame': dct.Frame(frame_name_str)
+                }
+            
+            # Store the data with the actual pol_state from the header
+            data_array = np.array(h.data)
+            if half == 'upper':
+                frames_dict[key]['frame'].set_half("upper", data_array, pol_state)
+            elif half == 'lower':
+                frames_dict[key]['frame'].set_half("lower", data_array, pol_state)
+        
+        # Add all frames to collection
+        for key, frame_info in frames_dict.items():
+            collection.add_frame(frame_info['frame'], key)
 
     else:
         # Non-raw status fallback

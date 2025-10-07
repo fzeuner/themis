@@ -274,7 +274,7 @@ def plot_frame_overview(frame_set: Union[FramesSet, CycleSet],
     fig, axes = plt.subplots(2, 2, figsize=figsize)
     axes = axes.flatten()
     
-    plot_camera_means(frame_set, ax=axes[0], title='Mean Pixel Values')
+    plot_frame_statistics(frame_set, stat='mean', ax=axes[0], title='Mean pixel values')
     plot_frame_statistics(frame_set, stat='std', ax=axes[1], title='Standard Deviation')
     plot_frame_statistics(frame_set, stat='max', ax=axes[2], title='Max Pixel Values')
     plot_frame_difference(frame_set, stat='mean', ax=axes[3], title='Frame Position Difference (Mean)')

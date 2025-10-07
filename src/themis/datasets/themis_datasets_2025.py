@@ -7,8 +7,8 @@ Created on Fr Jul 4 11:52:55 2025
 
 Configuration file
 
-Files supported: scan, dark, flat
-Reduction levels supported: raw, l0
+Files supported: scan, dark, flat, flat_center
+Reduction levels supported: raw, l0, l1
 
 """
 from pathlib import Path
@@ -111,6 +111,7 @@ Example TOML structure:
     sequence = 26
     dark_sequence = 1
     flat_sequence = 25
+    flat_center_sequence = 23
     states = ["pQ", "mQ", "pU", "mU", "pV", "mV"]
 
     [paths]
@@ -122,7 +123,7 @@ Example TOML structure:
     slit_width = 0.33
 
 Notes:
-- file_types are fixed as ["scan", "dark", "flat"] to match the existing code.
+- file_types are fixed as ["scan", "dark", "flat", "flat_center"] to match the existing code.
 """
 
 # defaults (preserve behavior if no config file is supplied)
@@ -133,6 +134,7 @@ DEFAULTS = {
         "sequence": 26,
         "dark_sequence": 1,
         "flat_sequence": 25,
+        "flat_center_sequence": 23,
         "states": ["pQ", "mQ", "pU", "mU", "pV", "mV"],
     },
     "paths": {
@@ -144,13 +146,14 @@ DEFAULTS = {
     },
 }
 
-file_types = ['scan', 'dark', 'flat']
+file_types = ['scan', 'dark', 'flat', 'flat_center']
 
 # ++++++++++++++++++++++++++++++++++++++++++
 
 # Create data types
 dark = DataType(name=file_types[1], file_ext="_x3")
 flat = DataType(name=file_types[2], file_ext="_y3")
+flat_center = DataType(name=file_types[3], file_ext="_y3")
 scan = DataType(name=file_types[0], file_ext="_b3")
 
 class DirectoryPaths:
@@ -248,7 +251,7 @@ def _resolve_config_path(config_path_str: str) -> Optional[Path]:
     return None
 
 
-def _make_dataset_dict(line: str, sequence: int, flat_sequence: int, dark_sequence: int) -> dict:
+def _make_dataset_dict(line: str, sequence: int, flat_sequence: int, flat_center_sequence: int, dark_sequence: int) -> dict:
     return {
         'line': line,
         file_types[0]: {
@@ -259,6 +262,11 @@ def _make_dataset_dict(line: str, sequence: int, flat_sequence: int, dark_sequen
         file_types[2]: {
             'data_type': file_types[2],
             'sequence': flat_sequence,
+            'files': ''
+        },
+        file_types[3]: {
+            'data_type': file_types[3],
+            'sequence': flat_center_sequence,
             'files': ''
         },
         file_types[1]: {
@@ -273,6 +281,7 @@ def _make_dataset_dict(line: str, sequence: int, flat_sequence: int, dark_sequen
 data_types = DataTypeRegistry()
 data_types.add(dark)
 data_types.add(flat)
+data_types.add(flat_center)
 data_types.add(scan)
 
 
@@ -400,6 +409,7 @@ def get_config(auto_discover_files: bool = True,
     sequence = int(merged['dataset']['sequence'])
     dark_sequence = int(merged['dataset']['dark_sequence'])
     flat_sequence = int(merged['dataset']['flat_sequence'])
+    flat_center_sequence = int(merged['dataset']['flat_center_sequence'])
     states = list(merged['dataset']['states'])
 
     slit_width = float(merged['params']['slit_width'])
@@ -412,7 +422,9 @@ def get_config(auto_discover_files: bool = True,
                                  inversion=inversion, auto_create=auto_create_dirs)
 
     dataset = _make_dataset_dict(line=line, sequence=sequence,
-                                 flat_sequence=flat_sequence, dark_sequence=dark_sequence)
+                                 flat_sequence=flat_sequence, 
+                                 flat_center_sequence=flat_center_sequence,
+                                 dark_sequence=dark_sequence)
 
     cfg = Config(
         directories=directories,
@@ -438,13 +450,13 @@ def validate_config(cfg: Config) -> None:
     """Validate basic dataset compatibility at initialization.
 
     Checks performed (only when relevant files exist):
-    - EXPTIME consistency across raw 'scan', 'dark', and 'flat'.
-    - For 'flat', OBS_MODE must be 'RFLAT'.
+    - EXPTIME consistency across raw 'scan', 'dark', 'flat', and 'flat_center'.
+    - For 'flat' and 'flat_center', OBS_MODE must be 'RFLAT'.
 
     Raises ValueError with a clear message if a check fails.
     """
     def header_for(dtype: str, level: str = 'raw'):
-        fs = cfg.dataset[dtype]['files']
+        fs = cfg.dataset.get(dtype, {}).get('files')
         if not isinstance(fs, FileSet):
             return None
         p = fs.get(level)
@@ -456,6 +468,7 @@ def validate_config(cfg: Config) -> None:
     hdr_scan = header_for('scan', 'raw')
     hdr_dark = header_for('dark', 'raw')
     hdr_flat = header_for('flat', 'raw')
+    hdr_flat_center = header_for('flat_center', 'raw')
 
     # Collect EXPTIME values from available headers
     exptimes = {}
@@ -465,6 +478,8 @@ def validate_config(cfg: Config) -> None:
         exptimes['dark'] = float(hdr_dark['EXPTIME'])
     if hdr_flat is not None and 'EXPTIME' in hdr_flat:
         exptimes['flat'] = float(hdr_flat['EXPTIME'])
+    if hdr_flat_center is not None and 'EXPTIME' in hdr_flat_center:
+        exptimes['flat_center'] = float(hdr_flat_center['EXPTIME'])
 
     # If we have at least two EXPTIME values, ensure they match
     if len(exptimes) >= 2:
@@ -482,6 +497,15 @@ def validate_config(cfg: Config) -> None:
         if obs_mode != 'RFLAT':
             raise ValueError(
                 "Flat file OBS_MODE must be 'RFLAT'. "
+                f"Found OBS_MODE='{obs_mode}'."
+            )
+    
+    # Check flat_center OBS_MODE
+    if hdr_flat_center is not None:
+        obs_mode = str(hdr_flat_center.get('OBS_MODE', '')).upper()
+        if obs_mode != 'RFLAT':
+            raise ValueError(
+                "Flat_center file OBS_MODE must be 'RFLAT'. "
                 f"Found OBS_MODE='{obs_mode}'."
             )
 

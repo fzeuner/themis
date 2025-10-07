@@ -9,6 +9,11 @@ Camera configuration file for MTR 2 spectropolarimeter on THEMIS for one observi
 
 Campaign July 2025
 """
+from pathlib import Path
+
+def _project_root() -> Path:
+    """Get project root directory (three levels above this file)."""
+    return Path(__file__).resolve().parents[3]
 
 class ROI:
     def __init__(self, lower, upper):
@@ -41,13 +46,14 @@ class ROI:
 
 class Camera:
     def __init__(self, name='none', target='none', pixel_scale=1, file_ext='', wavelength='0', 
-                 roi=None, **kwargs):
+                 roi=None, atlas_fit_config=None, **kwargs):
         self.name = name
         self.target = target
         self.pixel_scale = pixel_scale
         self.file_ext = file_ext
         self.wavelength = wavelength
-        self.roi = roi  # roi of lower and upper image 
+        self.roi = roi  # roi of lower and upper image
+        self.atlas_fit_config = atlas_fit_config  # path to atlas-fit config file
         self.properties = kwargs  # Additional optional properties
         
         # Use default ROI if none provided
@@ -61,7 +67,8 @@ class Camera:
             self.roi = ROI(lower=tuple(map(tuple, r1)), upper=tuple(map(tuple, r2)))
 
     def __repr__(self):
-        return f"<Camera(name={self.name}, wavelength={self.wavelength}), file_ext={self.file_ext}, pixel_scale={self.pixel_scale})>"
+        atlas_config_str = f"atlas_fit_config={self.atlas_fit_config.name if self.atlas_fit_config else None}"
+        return f"<Camera(name={self.name}, wavelength={self.wavelength}, file_ext={self.file_ext}, pixel_scale={self.pixel_scale}, {atlas_config_str})>"
 
 class CameraRegistry:
     def __init__(self):
@@ -83,11 +90,14 @@ class CameraRegistry:
 
 
 cam1 = Camera(name="Zyla 5", target="sr", pixel_scale=0.065, file_ext='b0505', 
-              wavelength='4607', roi=ROI(lower=((50, 928), (350, 1600)), upper=((1112, 1990), (350, 1600))))
+              wavelength='4607', roi=ROI(lower=((50, 928), (350, 1600)), upper=((1112, 1990), (350, 1600))),
+              atlas_fit_config=_project_root() / "configs" / "atlas_fit_config_cam1.yml")
 cam2 = Camera(name="Zyla 6", target="ti", pixel_scale=0.065, file_ext='b0606', 
-              wavelength='4536', roi=ROI(lower=((50, 925), (250, 1750)), upper=((1122, 1997), (250, 1750))))
+              wavelength='4536', roi=ROI(lower=((50, 925), (250, 1750)), upper=((1122, 1997), (250, 1750))),
+              atlas_fit_config=None)  # TODO: Create atlas_fit_config_cam2.yml
 cam3 = Camera(name="iXon 2", target="fe", pixel_scale=0.235, file_ext='b0202', 
-              wavelength='6302', roi=ROI(lower=((8, 252), (113, 300)), upper=((254, 498), (113, 300))))
+              wavelength='6302', roi=ROI(lower=((8, 252), (113, 300)), upper=((254, 498), (113, 300))),
+              atlas_fit_config=None)  # TODO: Create atlas_fit_config_cam3.yml
 #ROI(lower=((8, 252), (113, 300)), upper=((254, 498), (113, 300))
 #ROI(lower=((0, -1), (0, -1)), upper=((0, -1), (0, -1))
 # Register them

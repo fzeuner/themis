@@ -98,3 +98,28 @@ if __name__ == '__main__':
     #                   title='flat raw', 
     #                   state_names=['upper', 'lower'])
     
+#%%
+
+    # raw_frame, header = tio.read_any_file(config, 'scan', verbose=False, status='raw')
+    # data_plot = np.array([
+    # raw_frame.get_data('mQ', 0, 0, 'mQ'),  # frame_state='mQ', pol_state='mQ'
+    # raw_frame.get_data('mQ', 0, 0, 'pQ'),   # frame_state='mQ', pol_state='pQ'
+    # raw_frame.get_data('pQ', 0, 0, 'mQ'),  # frame_state='pQ', pol_state='mQ'
+    # raw_frame.get_data('pQ', 0, 0, 'pQ')   # frame_state='pQ', pol_state='pQ'
+    # ])
+    # viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
+    #                    title='scan raw ', 
+    #                    state_names=['mQ,mQ', 'mQ,pQ','pQ,mQ', 'pQ,pQ'])
+    
+    #result = lv0.reduce(config, data_type='scan', return_reduced = False)
+    result, header = tio.read_any_file(config, 'scan', verbose=False, status='l0')
+    data_plot = np.array([
+    result.get_data('mQ', 0, 0, 'mQ'),  # frame_state='mQ', pol_state='mQ'
+    result.get_data('mQ', 0, 0, 'pQ'),   # frame_state='mQ', pol_state='pQ'
+    result.get_data('pQ', 0, 0, 'mQ'),  # frame_state='pQ', pol_state='mQ'
+    result.get_data('pQ', 0, 0, 'pQ')   # frame_state='pQ', pol_state='pQ'
+    ])
+    viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
+                       title='scan l0', 
+                       state_names=['mQ,mQ', 'mQ,pQ','pQ,mQ', 'pQ,pQ'])
+#%%    
