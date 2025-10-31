@@ -86,10 +86,12 @@ if __name__ == '__main__':
     # plt.hist(((data[0]['lower'].data-frame_l0[0]['upper'].data+data[0]['upper'].data-frame_l0[0]['lower'].data)*0.5).flatten(), bins=100, color='green', alpha=0.6, label='combined')
     
 #%% 
-    #result = lv0.reduce(config, data_type='flat', return_reduced = True)
+
     raw_frame, header = tio.read_any_file(config, 'flat', verbose=False, status='raw')
+    ax=plot_frame_statistics(raw_frame, stat='mean')
     ax=plot_frame_statistics(raw_frame, stat='max')
     ax=plot_frame_statistics(raw_frame, ax=ax,stat='min')
+    #result = lv0.reduce(config, data_type='flat', return_reduced = True)
     #data_plot = np.array([result.get(0).get_half('upper').data,result.get(0).get_half('lower').data ])
     # viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
     #                   title='flat l0', 
@@ -113,6 +115,7 @@ if __name__ == '__main__':
     
     #result = lv0.reduce(config, data_type='scan', return_reduced = False)
     result, header = tio.read_any_file(config, 'scan', verbose=False, status='l0')
+    print(header['HISTORY'])
     data_plot = np.array([
     result.get_data('mQ', 0, 0, 'mQ'),  # frame_state='mQ', pol_state='mQ'
     result.get_data('mQ', 0, 0, 'pQ'),   # frame_state='mQ', pol_state='pQ'

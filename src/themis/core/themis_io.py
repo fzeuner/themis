@@ -156,6 +156,36 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
         hdus.append(fits.ImageHDU(upper_avg, name='UPPER_FLAT_CENTER'))
         hdus.append(fits.ImageHDU(lower_avg, name='LOWER_FLAT_CENTER'))
 
+    elif data_type == 'flat_center' and level == 'l1':
+        # For flat_center l1, we mainly do wavelength calibration.
+        # Save the original data with auxiliary file information in header
+        avg = frames.get(0)
+
+        if avg is None:
+            raise ValueError("Expected reduced flat_center frames to contain index 0 (averaged)")
+
+        upper_avg = avg.get_half('upper').data.astype('float32', copy=False)
+        lower_avg = avg.get_half('lower').data.astype('float32', copy=False)
+        
+        # Create headers with auxiliary file information
+        upper_hdr = fits.Header()
+        lower_hdr = fits.Header()
+        
+        # Add auxiliary file information if provided in extra_keywords
+        if extra_keywords and 'AUXL1FILES' in extra_keywords:
+            aux_files_info = extra_keywords['AUXL1FILES'][0]
+            upper_hdr['AUXL1FILES'] = aux_files_info
+            lower_hdr['AUXL1FILES'] = aux_files_info
+        
+        # Add processing information
+        upper_hdr['PROCLEVEL'] = ('l1', 'Processing level')
+        upper_hdr['PROCTYPE'] = ('wavelength_calibration', 'Atlas-fit wavelength calibration')
+        lower_hdr['PROCLEVEL'] = ('l1', 'Processing level')
+        lower_hdr['PROCTYPE'] = ('wavelength_calibration', 'Atlas-fit wavelength calibration')
+        
+        hdus.append(fits.ImageHDU(upper_avg, header=upper_hdr, name='UPPER_FLAT_CENTER_L1'))
+        hdus.append(fits.ImageHDU(lower_avg, header=lower_hdr, name='LOWER_FLAT_CENTER_L1'))
+
     elif data_type == 'scan' and level == 'l0':
         # Expect CycleSet with keys (frame_state, slit_idx, map_idx)
         # Save all frames as individual HDUs

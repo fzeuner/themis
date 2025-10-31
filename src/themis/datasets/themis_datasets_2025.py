@@ -335,6 +335,78 @@ class Config:
     reduction_levels: tdr.ReductionRegistry
     slit_width: float
     polarization_states: list
+    config_file: Optional[str] = None
+
+    def __repr__(self):
+        """Human-readable representation of the configuration.
+        
+        Formats the configuration in a structured way with clear sections
+        for directories, dataset info, camera, data types, reduction levels,
+        and parameters.
+        """
+        lines = ["Config("]
+        lines.append("")
+        
+        # Show config file first
+        if self.config_file:
+            lines.append("  # -------------------- CONFIG FILE --------------------")
+            lines.append(f"  config_file: '{self.config_file}'")
+            lines.append("")
+        else:
+            lines.append("  # -------------------- CONFIG FILE --------------------")
+            lines.append("  config_file: None (using defaults)")
+            lines.append("")
+        
+        lines.append("  # -------------------- DIRECTORIES --------------------")
+        lines.append("  directories=")
+        dir_lines = str(self.directories).split('\n')
+        for dir_line in dir_lines:
+            lines.append(f"    {dir_line}")
+        lines.append("")
+        
+        lines.append("  # -------------------- DATASET --------------------")
+        lines.append("  dataset={")
+        lines.append(f"    'line': '{self.dataset['line']}',")
+        
+        # Show each data type with full file info
+        for data_type in ['scan', 'flat', 'flat_center', 'dark']:
+            if data_type in self.dataset:
+                entry = self.dataset[data_type]
+                lines.append(f"    '{data_type}': {{")
+                lines.append(f"      'data_type': '{entry['data_type']}',")
+                lines.append(f"      'sequence': {entry['sequence']},")
+                if hasattr(entry.get('files'), '__repr__'):
+                    file_repr = str(entry['files'])
+                    file_lines = file_repr.split('\n')
+                    lines.append(f"      'files': {file_lines[0]}")
+                    for file_line in file_lines[1:]:
+                        lines.append(f"                 {file_line}")
+                else:
+                    lines.append(f"      'files': {entry['files']}")
+                lines.append(f"    }},")
+        
+        lines.append("  },")
+        lines.append("")
+        
+        lines.append("  # -------------------- CAMERA --------------------")
+        lines.append(f"  cam={self.cam}")
+        lines.append("")
+        
+        lines.append("  # -------------------- DATA TYPES --------------------")
+        lines.append(f"  data_types={self.data_types}")
+        lines.append("")
+        
+        lines.append("  # -------------------- REDUCTION LEVELS --------------------")
+        lines.append(f"  reduction_levels={self.reduction_levels}")
+        lines.append("")
+        
+        lines.append("  # -------------------- PARAMETERS --------------------")
+        lines.append(f"  slit_width={self.slit_width},")
+        lines.append(f"  polarization_states={self.polarization_states}")
+        
+        lines.append("")
+        lines.append(")")
+        return "\n".join(lines)
 
 
 def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types: DataTypeRegistry,
@@ -395,10 +467,12 @@ def get_config(auto_discover_files: bool = True,
     """
     # Load user configuration if provided, else use defaults
     user_cfg = None
+    resolved_config_path = None
     if config_path:
         resolved = _resolve_config_path(config_path)
         if not resolved:
             raise FileNotFoundError(f"Config file not found: {config_path}")
+        resolved_config_path = str(resolved)
         user_cfg = _load_config_from_toml(resolved)
 
     merged = _merge_defaults(user_cfg)
@@ -434,6 +508,7 @@ def get_config(auto_discover_files: bool = True,
         reduction_levels=tdr.reduction_levels,
         slit_width=slit_width,
         polarization_states=states,
+        config_file=resolved_config_path,
     )
 
     if auto_discover_files:

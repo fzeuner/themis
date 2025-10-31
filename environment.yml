@@ -30,6 +30,7 @@ dependencies:
   - blas=1.0=mkl
   - bleach=6.2.0=py312h06a4308_0
   - blosc=1.21.6=hf7d4471_0
+  - bottleneck=1.4.2=py312ha883a20_0
   - brotli=1.0.9=h5eee18b_9
   - brotli-bin=1.0.9=h5eee18b_9
   - brotli-python=1.0.9=py312h6a678d5_9
@@ -39,7 +40,7 @@ dependencies:
   - c-ares=1.34.5=hef5626c_0
   - ca-certificates=2025.9.9=h06a4308_0
   - cairo=1.18.4=h44eff21_0
-  - certifi=2025.8.3=py312h06a4308_0
+  - certifi=2025.10.5=py312h06a4308_0
   - cffi=1.17.1=py312h1fdaa30_1
   - cfitsio=3.470=h5893167_7
   - chardet=5.2.0=py312h06a4308_0
@@ -176,6 +177,7 @@ dependencies:
   - mkl_fft=1.3.11=py312hacdc0fc_1
   - mkl_random=1.2.8=py312h2fd27a0_1
   - more-itertools=10.3.0=py312h06a4308_0
+  - mpl-point-clicker=0.4.1=pyhd8ed1ab_1
   - multidict=6.1.0=py312h5eee18b_0
   - mypy_extensions=1.0.0=py312h06a4308_0
   - mysql=8.4.0=h721767e_2
@@ -189,6 +191,7 @@ dependencies:
   - networkx=3.5=py312h06a4308_0
   - nspr=4.35=h6a678d5_0
   - nss=3.89.1=h6a678d5_0
+  - numexpr=2.11.0=py312h397f862_1
   - numpy=2.3.3=py312h3f4ed14_0
   - numpy-base=2.3.3=py312h6ab9638_0
   - numpydoc=1.9.0=py312h06a4308_0
@@ -196,6 +199,7 @@ dependencies:
   - openldap=2.6.10=h8e75217_0
   - openssl=3.5.1=h7b32b05_0
   - packaging=25.0=py312h06a4308_0
+  - pandas=2.3.3=py312h505adc9_0
   - pandoc=2.12=h06a4308_3
   - pandocfilters=1.5.1=py312h06a4308_0
   - parso=0.8.4=py312h06a4308_0
@@ -242,8 +246,10 @@ dependencies:
   - python-lsp-jsonrpc=1.1.2=pyhd3eb1b0_0
   - python-lsp-server=1.12.2=py312he3bba80_0
   - python-slugify=8.0.4=py312h06a4308_0
+  - python-tzdata=2025.2=pyhd3eb1b0_0
   - python_abi=3.12=1_cp312
   - pytoolconfig=1.2.6=py312h06a4308_0
+  - pytz=2025.2=py312h06a4308_0
   - pyuca=1.2=py312h06a4308_1
   - pywavelets=1.9.0=py312hb25bd0a_0
   - pyxdg=0.28=py312h06a4308_0
@@ -339,4 +345,5 @@ dependencies:
       - imreg-dft==2.0.1a0
       - qollib==0.1.3
       - spectroflat==2.1.0
+      - themis==0.1.0
 prefix: /home/franziskaz/miniconda3/envs/themis
