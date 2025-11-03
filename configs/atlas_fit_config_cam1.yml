@@ -9,19 +9,19 @@ input:
   # Path to the Input file to use. Must be fits format.
   corrected_frame: examples/test.fits.gz
   # The region of interest to extrac from the input frame, in typical python numpy format.
-  roi: "[25,10:]"
+  roi: "[50,:]"
   # Approx. lower wavelength boundary of the input [nm]
-  wl_start: 459.6
+  wl_start: 460.5
   # Approx. upper wavelength boundary of the input [nm]
-  wl_end: 461.0
+  wl_end: 461.1
   # The global stray-light level in the spectrograph in percent [%]
-  stray_light: 7
+  stray_light: 5
   # The window [px] for the gauss-fit to operate in around detected line cores
   line_window: 11
   # PSF Model to convolve the atlas with
   # model_psf: examples/modeled_spectral_psf_412nm.txt
   # The FWHM for the data at the central wl [nm]
-  fwhm: 0.0011 # 0.0036 # 0.00112
+  fwhm: 0.003 # 0.0036 # 0.00112
 
 fitting:
   # Use the highest quantile as a first order continuum correction
@@ -29,17 +29,17 @@ fitting:
   # Use a low frequency filter to determine pre-filter aberrations, etc.
   # lowpass_filter: False
   # Maximal dispersion degree to try
-  dispersion_max_degree: 7
+  dispersion_max_degree: 4
   # Minimal dispersion degree to try
-  dispersion_min_degree: 3
+  dispersion_min_degree: 1
   # Order of the lowpass-prefilter to apply. Use Null to deactivate
-  continuum_filter_order: 13
+  continuum_filter_order: 8
   # Spline degree for the continuum fit
   continuum_spline_degree: 5
   # Spline smoothing factor for the continuum fit
-  continuum_spline_smoothing: 0.35
+  continuum_spline_smoothing: 0.12
   # Number of anchor points to derive the continuum from
-  continuum_points: 195
+  continuum_points: 50
   # Max allowed stray light in fit
   max_stray_light: 20
   # Mask lines with changing intensity (i.e., tellurics)

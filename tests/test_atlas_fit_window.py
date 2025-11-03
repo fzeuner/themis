@@ -100,8 +100,7 @@ def test_atlas_fit_window():
     try:
         # Run atlas-fit prepare without capturing output to allow interactive window
         result = subprocess.run(
-            [str(prepare_script), str(temp_config_path)],
-            timeout=60  # 1 minute timeout for testing
+            [str(prepare_script), str(temp_config_path)]
         )
         
         if result.returncode == 0:
