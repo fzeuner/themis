@@ -289,6 +289,7 @@ data_types.add(scan)
 class FileSet:
     def __init__(self):
         self._files: Dict[str, Path] = {}
+        self.auxiliary: Dict[str, Path] = {}  # For storing auxiliary files (e.g., atlas lines)
 
     def add(self, level_name: str, file_path: Path):
         self._files[level_name] = file_path
@@ -323,6 +324,14 @@ class FileSet:
         for level, path in self._files.items():
             exists = "\u2713" if path.exists() else "\u2717"
             lines.append(f"  {level}: {path.name} {exists}")
+        
+        # Add auxiliary files if present
+        if self.auxiliary:
+            lines.append(f"  Auxiliary files ({len(self.auxiliary)}):")
+            for aux_key, aux_path in self.auxiliary.items():
+                exists = "\u2713" if aux_path.exists() else "\u2717"
+                lines.append(f"    {aux_key}: {aux_path.name} {exists}")
+        
         return "\n".join(lines)
 
 
@@ -410,7 +419,7 @@ class Config:
 
 
 def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types: DataTypeRegistry,
-                    reduction_levels: tdr.ReductionRegistry, cam) -> FileSet:
+                    reduction_levels: tdr.ReductionRegistry, cam, line: str) -> FileSet:
     file_set = FileSet()
     data_t = dataset_entry['data_type']
     seq = dataset_entry['sequence']
@@ -452,6 +461,26 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
         matches.sort(key=lambda x: (0 if '_fx' in x.name else 1, x.name))
         if matches:
             file_set.add(level_name, matches[0])
+
+    # Auto-discover auxiliary files (e.g., atlas lines files, offset maps)
+    # Pattern for atlas lines: {line}_{data_type}_t{seq:03d}_{frame}_atlas_lines.yaml
+    # Pattern for offset map: {line}_{data_type}_t{seq:03d}_offset_map.fits
+    if data_t in ['flat', 'flat_center']:
+        # Discover atlas lines files
+        for frame in ['upper', 'lower']:
+            # Build expected filename pattern
+            atlas_pattern = f"{line}_{data_t}_{seq_str}_{frame}_atlas_lines.yaml"
+            atlas_file = Path(directories.reduced) / atlas_pattern
+            
+            if atlas_file.exists():
+                file_set.auxiliary[f'atlas_lines_{frame}'] = atlas_file
+        
+        # Discover offset map file
+        offset_map_pattern = f"{line}_{data_t}_{seq_str}_offset_map.fits"
+        offset_map_file = Path(directories.reduced) / offset_map_pattern
+        
+        if offset_map_file.exists():
+            file_set.auxiliary['offset_map'] = offset_map_file
 
     return file_set
 
@@ -514,7 +543,7 @@ def get_config(auto_discover_files: bool = True,
     if auto_discover_files:
         for key in file_types:
             entry = cfg.dataset[key]
-            entry['files'] = _build_file_set(cfg.directories, entry, cfg.data_types, cfg.reduction_levels, cfg.cam)
+            entry['files'] = _build_file_set(cfg.directories, entry, cfg.data_types, cfg.reduction_levels, cfg.cam, cfg.dataset['line'])
         # Validate basic compatibility between files (easy to extend later)
         validate_config(cfg)
 

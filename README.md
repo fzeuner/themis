@@ -19,6 +19,11 @@ Get https://gitlab.gwdg.de/hoelken/atlas-fit/-/tree/main?ref_type=heads, then:
   git clone https://gitlab.gwdg.de/hoelken/atlas-fit.git
   pip install -e atlas-fit
 
+Get https://gitlab.gwdg.de/hoelken/spectroflat:
+  pip install spectroflat
+  --> Then, remove all pycache files in the spectroflat directory + remove replace np.infty with np.inf in the spectroflat source code smile_fit.py
+
+
 On a fresh machine, repeat the above steps to get started.
 
 ## Configuration-driven datasets (2025)

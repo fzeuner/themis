@@ -46,7 +46,7 @@ if __name__ == '__main__':
     
     result = lv1.reduce(config, data_type='flat_center', return_reduced = False)
     
-    
+   # data_plot = np.array([result.get(0).get_half('upper').data,result.get(0).get_half('lower').data ])
     
     
     

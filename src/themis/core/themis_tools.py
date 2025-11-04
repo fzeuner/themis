@@ -671,12 +671,6 @@ def binning(data, binning = [1,1,1,1]):
     
     return(data)
 
-
-
-
-
-
-
     
 
 def check_continuum_noise(data): # stokes V in continuum only
@@ -748,41 +742,12 @@ class ff:
    self.v_file= dst.directory + dst.data_files[dst.line]+dst.data_files['v_i']
    self.i_file= dst.directory + dst.data_files[dst.line]+dst.data_files['i']
    
-   
-class FileSet:
-    def __init__(self):
-        self._files = {}
 
-    def add(self, level_name, file_path):
-        self._files[level_name] = file_path
-
-    def get(self, level_name, default=None):
-        return self._files.get(level_name, default)
-
-    def __getitem__(self, level_name):
-        return self._files[level_name]
-
-    def __contains__(self, level_name):
-        return level_name in self._files
-
-    def items(self):
-        return self._files.items()
-
-    def keys(self):
-        return self._files.keys()
-
-    def values(self):
-        return self._files.values()
-
-    def __repr__(self):
-        lines = [f"<FileSet with {len(self._files)} entries>"]
-        for level, path in self._files.items():
-            exists = "✓" if path.exists() else "✗"
-            lines.append(f"  {level}: {path.name} {exists}")
-        return "\n".join(lines)
-   
-   
 class init:
+    """Legacy init class for backward compatibility with old display code.
+    
+    Note: For new code, use get_config() from themis.datasets.themis_datasets_2025 instead.
+    """
     def __init__(self):
         self.directories = dst.directories
         self.dataset = dst.dataset
@@ -791,44 +756,9 @@ class init:
         self.reduction_levels = tdr.reduction_levels
         self.slit_width = dst.slit_width
         self.polarization_states = dst.states
-
-        # Fill file sets for all dataset types
-        for key in dst.file_types:
-            entry = self.dataset[key]
-            entry['files'] = self.build_file_set(entry)
-
-    def build_file_set(self, entry):
-        file_set = FileSet()
-        data_t = entry['data_type']
-        seq = entry['sequence']
-        cam_str = self.cam.file_ext
-        data_str = self.data_types[data_t].file_ext
-        seq_str = f"t{seq:03d}"
-
-        for level_name, level_obj in self.reduction_levels.items():
-            suffix = level_obj.file_ext
-            directory = self.directories.get(level_name, self.directories['raw'])
-
-            known_suffixes = [lvl.file_ext for lvl in self.reduction_levels.values() if lvl.file_ext]
-            files = list(Path(directory).glob("*"))
-            matches = []
-
-            for f in files:
-                name = f.name
-                if cam_str in name and data_str in name and seq_str in name:
-                    if suffix == '':
-                        if not any(suf in name for suf in known_suffixes):
-                            matches.append(f)
-                    else:
-                        if suffix in name:
-                            matches.append(f)
-
-            # Prefer _fx if available
-            matches.sort(key=lambda x: (0 if '_fx' in x.name else 1, x.name))
-            if matches:
-                file_set.add(level_name, matches[0])
-
-        return file_set
+        
+        # Note: File discovery is now handled by get_config() in themis_datasets_2025.py
+        # This legacy class does not populate file sets
     
     def __repr__(self):
      lines = [

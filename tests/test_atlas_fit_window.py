@@ -93,31 +93,63 @@ def test_atlas_fit_window():
     print("Testing atlas-fit prepare window opening...")
     print(f"Script: {prepare_script}")
     print(f"Temp Config: {temp_config_path}")
-    print("\nNote: An interactive matplotlib window should open for line selection.")
-    print("If the window opens, close it after testing to continue.")
-    print("\nRunning atlas-fit prepare...")
+    print(f"Temp FITS file: {temp_fits_path}")
+    print(f"Frame shape: {upper_frame_data.shape}")
     
     try:
-        # Run atlas-fit prepare without capturing output to allow interactive window
-        result = subprocess.run(
-            [str(prepare_script), str(temp_config_path)]
-        )
+        print("\n" + "="*70)
+        print("DATA PREPARATION COMPLETE")
+        print("="*70)
+        print("\nPlease run the following command in an EXTERNAL terminal:")
+        print("\n" + "-"*70)
+        print(f"cd {config.directories.reduced}")
+        print(f"{prepare_script} {temp_config_path}")
+        print("-"*70)
         
-        if result.returncode == 0:
-            print("Atlas-fit prepare completed successfully!")
+        print("\nNote: An interactive matplotlib window should open for line selection.")
+        print("After you complete the atlas-fit process in the external terminal,")
+        print("return here and enter 'y' to continue with cleanup and verification.")
+        
+        # Wait for user confirmation
+        while True:
+            user_input = input("\nDid atlas-fit complete successfully? (y/n): ").strip().lower()
+            if user_input == 'y':
+                print("Proceeding with verification and cleanup...")
+                break
+            elif user_input == 'n':
+                print("Atlas-fit did not complete successfully.")
+                return False
+            else:
+                print("Please enter 'y' or 'n'")
+        
+        # Check if output files were created
+        lines_file = config.directories.reduced / 'atlas_fit_lines.yaml'
+        lines_file_test = config.directories.reduced / 'atlas_fit_lines_test.yaml'
+        
+        print("\nChecking for output files...")
+        print(f"Looking in: {config.directories.reduced}")
+        
+        # List all .yaml files in the directory
+        import glob
+        yaml_files = glob.glob(str(config.directories.reduced / '*.yaml'))
+        
+        if yaml_files:
+            print(f"Found .yaml files: {[Path(f).name for f in yaml_files]}")
+        else:
+            print("No .yaml files found in output directory")
+        
+        # Check expected file and rename it with _test suffix
+        if lines_file.exists():
+            # Rename the file to avoid confusion with production files
+            shutil.move(str(lines_file), str(lines_file_test))
+            print(f"\n✓ Atlas lines file created and renamed to: {lines_file_test.name}")
+            print("   (This file contains both the line information and dispersion solution)")
+            print("\nAtlas-fit prepare completed successfully!")
             return True
         else:
-            print(f"Atlas-fit prepare failed with return code: {result.returncode}")
-            if result.stderr:
-                print(f"STDERR: {result.stderr}")
+            print(f"\n✗ Atlas lines file not found: {lines_file}")
+            print("\nAtlas-fit prepare did not create the expected output file.")
             return False
-            
-    except subprocess.TimeoutExpired:
-        print("Atlas-fit prepare timed out after 60 seconds")
-        return False
-    except Exception as e:
-        print(f"Error running atlas-fit prepare: {e}")
-        return False
     
     finally:
         # Clean up temporary files
