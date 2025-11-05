@@ -430,20 +430,31 @@ def process_spectroflat(config, data_type):
     # Add frame to FramesSet
     reduced_frames.add_frame(l1_frame, frame_idx=0)
     
-    # Also save offset_map as separate FITS file for later use
+    # Also save offset_map and illumination_pattern as separate FITS files for later use
     line = config.dataset['line']
     seq = config.dataset[data_type]['sequence']
     seq_str = f"t{seq:03d}"
+    
+    # Save offset map
     offset_map_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_offset_map.fits'
     analyser.offset_map.dump(str(offset_map_path))
     print(f'  Offset map saved to: {offset_map_path}')
     
-    # Add offset map to auxiliary files
+    # Save illumination pattern (soft flat)
+    illumination_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_illumination_pattern.fits'
+    from astropy.io import fits
+    hdu = fits.PrimaryHDU(data=analyser.illumination_pattern)
+    hdu.header['COMMENT'] = 'Illumination pattern (soft flat) from spectroflat'
+    hdu.writeto(str(illumination_path), overwrite=True)
+    print(f'  Illumination pattern saved to: {illumination_path}')
+    
+    # Add to auxiliary files
     file_set = config.dataset[data_type]['files']
     if not hasattr(file_set, 'auxiliary'):
         file_set.auxiliary = {}
     file_set.auxiliary['offset_map'] = offset_map_path
-    print(f'  ✓ Added offset map to FileSet auxiliary entry')
+    file_set.auxiliary['illumination_pattern'] = illumination_path
+    print(f'  ✓ Added offset map and illumination pattern to FileSet auxiliary entry')
     
     return reduced_frames
 

@@ -462,9 +462,10 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
         if matches:
             file_set.add(level_name, matches[0])
 
-    # Auto-discover auxiliary files (e.g., atlas lines files, offset maps)
+    # Auto-discover auxiliary files (e.g., atlas lines files, offset maps, illumination patterns)
     # Pattern for atlas lines: {line}_{data_type}_t{seq:03d}_{frame}_atlas_lines.yaml
     # Pattern for offset map: {line}_{data_type}_t{seq:03d}_offset_map.fits
+    # Pattern for illumination pattern: {line}_{data_type}_t{seq:03d}_illumination_pattern.fits
     if data_t in ['flat', 'flat_center']:
         # Discover atlas lines files
         for frame in ['upper', 'lower']:
@@ -481,6 +482,13 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
         
         if offset_map_file.exists():
             file_set.auxiliary['offset_map'] = offset_map_file
+        
+        # Discover illumination pattern file
+        illumination_pattern = f"{line}_{data_t}_{seq_str}_illumination_pattern.fits"
+        illumination_file = Path(directories.reduced) / illumination_pattern
+        
+        if illumination_file.exists():
+            file_set.auxiliary['illumination_pattern'] = illumination_file
 
     return file_set
 

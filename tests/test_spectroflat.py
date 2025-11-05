@@ -195,6 +195,7 @@ def test_spectroflat_with_more_states():
         print(f"   ✓ Success with 4 states! Report saved to: {report_dir}")
         print(f"   dust_flat shape: {analyser.dust_flat.shape}")
         plt.imshow(analyser.dust_flat[0], vmin=0.97, vmax=1.03)
+        plt.imshow(analyser.illumination_pattern[0])
         
     except Exception as e:
         print(f"   ✗ Error even with 4 states:")
