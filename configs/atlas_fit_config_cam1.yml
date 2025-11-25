@@ -57,3 +57,4 @@ atlas:
   # fwhm: 0
   # The window [px] for the gauss-fit to operate in around detected line cores
   line_window: 16
+  

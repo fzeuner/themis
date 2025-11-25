@@ -483,12 +483,26 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
         if offset_map_file.exists():
             file_set.auxiliary['offset_map'] = offset_map_file
         
+        # Discover outdated offset map file (backup before wavelength calibration)
+        offset_map_outdated_pattern = f"{line}_{data_t}_{seq_str}_offset_map_outdated.fits"
+        offset_map_outdated_file = Path(directories.reduced) / offset_map_outdated_pattern
+        
+        if offset_map_outdated_file.exists():
+            file_set.auxiliary['offset_map_outdated'] = offset_map_outdated_file
+        
         # Discover illumination pattern file
         illumination_pattern = f"{line}_{data_t}_{seq_str}_illumination_pattern.fits"
         illumination_file = Path(directories.reduced) / illumination_pattern
         
         if illumination_file.exists():
             file_set.auxiliary['illumination_pattern'] = illumination_file
+        
+        # Discover outdated illumination pattern file (backup before wavelength calibration)
+        illumination_outdated_pattern = f"{line}_{data_t}_{seq_str}_illumination_pattern_outdated.fits"
+        illumination_outdated_file = Path(directories.reduced) / illumination_outdated_pattern
+        
+        if illumination_outdated_file.exists():
+            file_set.auxiliary['illumination_pattern_outdated'] = illumination_outdated_file
 
     return file_set
 

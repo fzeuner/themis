@@ -41,14 +41,14 @@ if __name__ == '__main__':
     
     lv1 = tdr.reduction_levels["l1"]
     #print(lv1.get_description(data_type='flat'))
-    
+    #%%
     #data, header = tio.read_any_file(config, 'flat_center', verbose=False, status='l0')
     
     result = lv1.reduce(config, data_type='flat_center', return_reduced = False)
     
    # data_plot = np.array([result.get(0).get_half('upper').data,result.get(0).get_half('lower').data ])
     
-    
+
     
     
     

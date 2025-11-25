@@ -357,6 +357,38 @@ def process_spectroflat(config, data_type):
     
     print(f'Processing spectroflat for {data_type}...')
     
+    # Clean up outdated files if they exist (re-running spectroflat from scratch)
+    outdated_offset = config.dataset[data_type]['files'].auxiliary.get('offset_map_outdated')
+    outdated_illumination = config.dataset[data_type]['files'].auxiliary.get('illumination_pattern_outdated')
+    
+    if outdated_offset or outdated_illumination:
+        print(f'  Found outdated files from previous amend run. Cleaning up...')
+        
+        # Remove outdated files
+        if outdated_offset and outdated_offset.exists():
+            outdated_offset.unlink()
+            print(f'    ✓ Removed: {outdated_offset.name}')
+            del config.dataset[data_type]['files'].auxiliary['offset_map_outdated']
+        
+        if outdated_illumination and outdated_illumination.exists():
+            outdated_illumination.unlink()
+            print(f'    ✓ Removed: {outdated_illumination.name}')
+            del config.dataset[data_type]['files'].auxiliary['illumination_pattern_outdated']
+        
+        # Remove current offset_map and illumination_pattern (amended versions)
+        current_offset = config.dataset[data_type]['files'].auxiliary.get('offset_map')
+        current_illumination = config.dataset[data_type]['files'].auxiliary.get('illumination_pattern')
+        
+        if current_offset and current_offset.exists():
+            current_offset.unlink()
+            print(f'    ✓ Removed: {current_offset.name}')
+        
+        if current_illumination and current_illumination.exists():
+            current_illumination.unlink()
+            print(f'    ✓ Removed: {current_illumination.name}')
+        
+        print(f'  Spectroflat will generate fresh offset_map and illumination_pattern files.')
+    
     # Read the L0 data
     data, header = tio.read_any_file(config, data_type, verbose=False, status='l0')
     
@@ -509,86 +541,271 @@ def amend_spectroflat_with_atlas_lines(config, data_type, atlas_lines_files):
     
     print(f'  Using offset map: {offset_map_file.name}')
     
+    # Check if outdated files exist (re-running amend step)
+    # These are auto-discovered by _build_file_set in themis_datasets_2025.py
+    outdated_offset = config.dataset[data_type]['files'].auxiliary.get('offset_map_outdated')
+    outdated_illumination = config.dataset[data_type]['files'].auxiliary.get('illumination_pattern_outdated')
+    illumination_pattern_file = config.dataset[data_type]['files'].auxiliary.get('illumination_pattern')
+    
+    if outdated_offset or outdated_illumination:
+        print(f'\n{"="*70}')
+        print(f'WAVELENGTH-CALIBRATED FILES ALREADY EXIST')
+        print(f'{"="*70}')
+        print(f'The offset map and illumination pattern have already been amended')
+        print(f'with wavelength calibration from atlas lines.')
+        print(f'\nCurrent auxiliary files:')
+        print(f'  offset_map: {offset_map_file.name} (wavelength calibrated)')
+        if illumination_pattern_file:
+            print(f'  illumination_pattern: {illumination_pattern_file.name} (wavelength calibrated)')
+        print(f'\nOriginal spectroflat outputs (backed up):')
+        if outdated_offset:
+            print(f'  offset_map_outdated: {outdated_offset.name}')
+        if outdated_illumination:
+            print(f'  illumination_pattern_outdated: {outdated_illumination.name}')
+        
+        # Ask user if they want to re-run
+        print(f'\n{"="*70}')
+        while True:
+            user_choice = input(f'Re-run amend_spectroflat with new atlas lines? [y/n]: ').strip().lower()
+            if user_choice in ['y', 'n']:
+                break
+            else:
+                print('Please enter "y" to re-run or "n" to skip')
+        
+        if user_choice == 'n':
+            print(f'Skipping amend step. Using existing wavelength-calibrated files.')
+            return l1_file
+        
+        # User chose to re-run: restore original spectroflat outputs
+        print(f'\n  Restoring original spectroflat outputs for re-amending...')
+        
+        # Delete current wavelength-calibrated offset_map
+        if offset_map_file and offset_map_file.exists():
+            offset_map_file.unlink()
+            print(f'    ✓ Deleted wavelength-calibrated: {offset_map_file.name}')
+        
+        # Move offset_map_outdated → offset_map
+        if outdated_offset and outdated_offset.exists():
+            outdated_offset.rename(offset_map_file)
+            del config.dataset[data_type]['files'].auxiliary['offset_map_outdated']
+            print(f'    ✓ Restored original offset map: {offset_map_file.name}')
+        
+        # Delete current wavelength-calibrated illumination_pattern
+        if illumination_pattern_file and illumination_pattern_file.exists():
+            illumination_pattern_file.unlink()
+            print(f'    ✓ Deleted wavelength-calibrated: {illumination_pattern_file.name}')
+        
+        # Move illumination_pattern_outdated → illumination_pattern
+        if outdated_illumination and outdated_illumination.exists():
+            outdated_illumination.rename(illumination_pattern_file)
+            del config.dataset[data_type]['files'].auxiliary['illumination_pattern_outdated']
+            print(f'    ✓ Restored original illumination pattern: {illumination_pattern_file.name}')
+        
+        print(f'  Now proceeding with fresh amend step on original spectroflat outputs.\n')
+    
+    # Create temporary stacked FITS file for amend_spectroflat (like the test does)
+    # amend_spectroflat needs a simple 4D array [state, spatial, wavelength]
+    import numpy as np
+    from astropy.io import fits
+    
+    print(f'  Creating temporary stacked FITS file for amend_spectroflat...')
+    
+    # Read L0 data (same as test - we need the original data, not the L1 which has spectroflat corrections)
+    l0_data, l0_header = tio.read_any_file(config, data_type, verbose=False, status='l0')
+    
+    if len(l0_data) == 0:
+        print(f'Error: No frames found in L0 data')
+        return None
+    
+    # Extract upper and lower frames
+    upper_frame_data = l0_data[0]['upper'].data
+    lower_frame_data = l0_data[0]['lower'].data
+    
+    # Stack as 4 states to match illumination_pattern from spectroflat
+    stacked_data = np.stack([upper_frame_data, lower_frame_data, lower_frame_data, lower_frame_data], axis=0)
+    
+    # Create temporary FITS file
+    temp_fits_path = config.directories.reduced / f'temp_{data_type}_stacked_for_amend.fits'
+    hdu = fits.PrimaryHDU(data=stacked_data)
+    hdu.writeto(temp_fits_path, overwrite=True)
+    
+    print(f'  ✓ Created temporary FITS: {temp_fits_path.name}')
+    print(f'    Shape: {stacked_data.shape} [state=4, spatial, wavelength]')
+    
+    # Check illumination pattern file exists (already retrieved earlier)
+    if not illumination_pattern_file or not illumination_pattern_file.exists():
+        print(f'Warning: Illumination pattern file not found in auxiliary files.')
+        illumination_pattern_file = None
+    
     # Read the original config as text to preserve formatting and comments
     with open(config_path, 'r') as f:
         original_config_text = f.read()
     
-    # Update the offset_map path in config
-    # Look for offset_map: None or offset_map: path and replace it
-    modified_config_text = re.sub(
-        r'offset_map:\s*(None|.*)',
-        f'offset_map: {offset_map_file}',
-        original_config_text
+    temp_config_text = original_config_text
+    
+    # Update corrected_frame to point to the temporary stacked FITS
+    temp_config_text = re.sub(
+        r'corrected_frame:\s*(.+)',
+        f'corrected_frame: {temp_fits_path}',
+        temp_config_text
     )
     
-    # If no offset_map line found, add it after input section
-    if 'offset_map:' not in modified_config_text:
-        # Find the input section and add offset_map there
-        input_section = re.search(r'input:\s*\n((?:\s+.*\n)*)', modified_config_text)
-        if input_section:
-            input_end = input_section.end(1)
-            # Insert offset_map line
-            modified_config_text = (
-                modified_config_text[:input_end] + 
-                f'  offset_map: {offset_map_file}\n' + 
-                modified_config_text[input_end:]
-            )
+    # Update ROI to include state dimension for 3D array: [s, spatial, wavelength]
+    # The 's' placeholder gets replaced with state numbers by amend_spectroflat
+    temp_config_text = re.sub(
+        r'roi:\s*"?\[([^\]]+)\]"?',
+        r'roi: "[s, \1]"',
+        temp_config_text
+    )
     
-    # Write the updated config
-    with open(config_path, 'w') as f:
-        f.write(modified_config_text)
+    # Add or update mod_states parameter (spectroflat uses 4 states)
+    if 'mod_states:' in temp_config_text:
+        temp_config_text = re.sub(
+            r'mod_states:\s*\d+',
+            'mod_states: 4',
+            temp_config_text
+        )
+    else:
+        # Add after corrected_frame
+        temp_config_text = re.sub(
+            r'(corrected_frame:\s*.+)',
+            r'\1\n  mod_states: 4',
+            temp_config_text
+        )
     
-    print(f'  Updated config with offset map path')
+    # Add offset_map (same simple approach as test)
+    temp_config_text = re.sub(
+        r'(mod_states:\s*\d+)',
+        rf'\1\n  offset_map: {offset_map_file}',
+        temp_config_text
+    )
     
-    # For each frame, run amend_spectroflat with the corresponding atlas lines file
-    for frame_name in ['upper', 'lower']:
-        if frame_name not in atlas_lines_files:
-            print(f'Warning: No atlas lines file for {frame_name} frame')
-            continue
-        
-        lines_file = atlas_lines_files[frame_name]
-        
-        print(f'\nProcessing {frame_name.upper()} frame...')
-        print(f'  Config: {config_path}')
-        print(f'  Lines file: {lines_file.name}')
-        
-        # Find amend_spectroflat script
-        project_root = Path(__file__).resolve().parents[3]
-        amend_script = project_root / 'atlas-fit' / 'bin' / 'amend_spectroflat'
-        
-        if not amend_script.exists():
-            print(f'Error: amend_spectroflat script not found: {amend_script}')
-            print('  This script should be available in the atlas-fit repository')
+    # Add soft_flat after offset_map
+    if illumination_pattern_file:
+        temp_config_text = re.sub(
+            r'(offset_map:\s*.+)',
+            rf'\1\n  soft_flat: {illumination_pattern_file}',
+            temp_config_text
+        )
+    
+    # Create temporary config file (don't modify original)
+    project_root = Path(__file__).resolve().parents[3]
+    temp_config_path = project_root / 'configs' / f'temp_amend_{data_type}_config.yml'
+    with open(temp_config_path, 'w') as f:
+        f.write(temp_config_text)
+    
+    print(f'  ✓ Created temporary config: {temp_config_path}')
+    print(f'    Original config file remains unchanged.')
+    
+    # Run amend_spectroflat once with upper atlas lines (state 0)
+    # The rest is calculated relatively
+    if 'upper' not in atlas_lines_files:
+        print(f'Error: No atlas lines file for upper frame')
+        # Clean up temp files
+        if temp_config_path.exists():
+            temp_config_path.unlink()
+        if temp_fits_path.exists():
+            temp_fits_path.unlink()
+        return None
+    
+    upper_lines_file = atlas_lines_files['upper']
+    
+    print(f'\nRunning amend_spectroflat with UPPER frame atlas lines (state 0)...')
+    print(f'  Config: {temp_config_path.name}')
+    print(f'  Lines file: {upper_lines_file.name}')
+    print(f'  Note: Lower frame (state 1) corrections are computed relatively')
+    
+    # Find amend_spectroflat script
+    amend_script = project_root / 'atlas-fit' / 'bin' / 'amend_spectroflat'
+    
+    if not amend_script.exists():
+        print(f'Error: amend_spectroflat script not found: {amend_script}')
+        print('  This script should be available in the atlas-fit repository')
+        # Clean up temp files
+        if temp_config_path.exists():
+            temp_config_path.unlink()
+        if temp_fits_path.exists():
+            temp_fits_path.unlink()
+        return None
+    
+    # Display command to run in external terminal
+    print(f'\nPlease run the following command in an EXTERNAL terminal:')
+    print(f'{"-"*70}')
+    print(f'cd {config.directories.reduced}')
+    print(f'{amend_script} {temp_config_path} {upper_lines_file}')
+    print(f'{"-"*70}')
+    print('\nThis will update the offset map with wavelength calibration.')
+    print('Both upper and lower frame corrections will be computed.')
+    
+    # Wait for user confirmation
+    while True:
+        user_input = input(f'\nDid amend_spectroflat complete successfully? (y/n): ').strip().lower()
+        if user_input == 'y':
+            print(f'✓ Spectroflat amendment completed successfully')
+            break
+        elif user_input == 'n':
+            print(f'✗ Skipping spectroflat amendment')
+            # Clean up temp files
+            if temp_config_path.exists():
+                temp_config_path.unlink()
+            if temp_fits_path.exists():
+                temp_fits_path.unlink()
             return None
-        
-        # Display command to run in external terminal
-        print(f'\nPlease run the following command in an EXTERNAL terminal:')
-        print(f'{"-"*70}')
-        print(f'cd {config.directories.reduced}')
-        print(f'{amend_script} {config_path} {lines_file}')
-        print(f'{"-"*70}')
-        print('\nThis will update the offset map with wavelength calibration.')
-        print('The L1 FITS file will be automatically updated.')
-        
-        # Wait for user confirmation
-        while True:
-            user_input = input(f'\nDid amend_spectroflat complete successfully for {frame_name} frame? (y/n): ').strip().lower()
-            if user_input == 'y':
-                print(f'✓ {frame_name.upper()} frame amended successfully')
-                break
-            elif user_input == 'n':
-                print(f'✗ Skipping {frame_name} frame')
-                break
-            else:
-                print('Please enter "y" or "n"')
+        else:
+            print('Please enter "y" or "n"')
     
-    # Restore original config (remove offset_map path)
-    with open(config_path, 'w') as f:
-        f.write(original_config_text)
+    # Process amended files: rename and update auxiliary file tracking
+    print(f'\n  Processing amended spectroflat outputs...')
+    
+    reduced_dir = config.directories.reduced
+    
+    # Handle amended_soft_flat.fits -> rename to illumination_pattern pattern
+    amended_soft_flat = reduced_dir / 'amended_soft_flat.fits'
+    if amended_soft_flat.exists():
+        # Backup old illumination_pattern as _outdated (original spectroflat output)
+        if illumination_pattern_file and illumination_pattern_file.exists():
+            outdated_illumination = illumination_pattern_file.parent / f'{illumination_pattern_file.stem}_outdated{illumination_pattern_file.suffix}'
+            # The outdated file should not exist at this point (we restored it earlier if it did)
+            illumination_pattern_file.rename(outdated_illumination)
+            config.dataset[data_type]['files'].auxiliary['illumination_pattern_outdated'] = outdated_illumination
+            print(f'    ✓ Backed up original illumination pattern: {outdated_illumination.name}')
+        
+        # Rename amended_soft_flat to illumination_pattern filename
+        new_illumination = illumination_pattern_file  # Use original filename
+        amended_soft_flat.rename(new_illumination)
+        config.dataset[data_type]['files'].auxiliary['illumination_pattern'] = new_illumination
+        print(f'    ✓ Updated illumination pattern (wavelength calibrated): {new_illumination.name}')
+    else:
+        print(f'    Warning: amended_soft_flat.fits not found')
+    
+    # Handle wl_calibrated_offsets.fits -> rename to offset_map pattern
+    wl_calibrated_offsets = reduced_dir / 'wl_calibrated_offsets.fits'
+    if wl_calibrated_offsets.exists():
+        # Backup old offset_map as _outdated (original spectroflat output)
+        if offset_map_file and offset_map_file.exists():
+            outdated_offset = offset_map_file.parent / f'{offset_map_file.stem}_outdated{offset_map_file.suffix}'
+            # The outdated file should not exist at this point (we restored it earlier if it did)
+            offset_map_file.rename(outdated_offset)
+            config.dataset[data_type]['files'].auxiliary['offset_map_outdated'] = outdated_offset
+            print(f'    ✓ Backed up original offset map: {outdated_offset.name}')
+        
+        # Rename wl_calibrated_offsets to offset_map filename
+        new_offset_map = offset_map_file  # Use original filename
+        wl_calibrated_offsets.rename(new_offset_map)
+        config.dataset[data_type]['files'].auxiliary['offset_map'] = new_offset_map
+        print(f'    ✓ Updated offset map (wavelength calibrated): {new_offset_map.name}')
+    else:
+        print(f'    Warning: wl_calibrated_offsets.fits not found')
+    
+    # Clean up temporary files
+    if temp_config_path.exists():
+        temp_config_path.unlink()
+    if temp_fits_path.exists():
+        temp_fits_path.unlink()
+    print(f'\n✓ Cleaned up temporary files')
     
     print(f'\n✓ Spectroflat amendment complete for {data_type}')
     print(f'  L1 file: {l1_file}')
-    print(f'  Restored original config file')
     
     return l1_file
 
