@@ -9,6 +9,13 @@ import textwrap
 from themis.core import themis_tools as tt
 from themis.core import data_classes as dct
 from themis.core import themis_io as tio
+from spectroflat import Analyser, Config as SpectroflatConfig, OffsetMap, SmileConfig, SensorFlatConfig
+from qollib.strings import parse_shape
+import numpy as np
+from pathlib import Path
+import shutil
+import re
+from astropy.io import fits
 
 class ReductionLevel:
     def __init__(self, name, file_ext, func, per_type_meta=None):
@@ -154,10 +161,6 @@ def process_wavelength_calibration_with_atlas_fit(config, data_type):
     dict
         Dictionary with 'upper' and 'lower' keys mapping to Path objects of atlas lines files
     """
-    import shutil
-    import re
-    from pathlib import Path
-    from astropy.io import fits
     
     print(f'Performing wavelength calibration on {data_type} using atlas-fit...')
     
@@ -334,9 +337,8 @@ def process_spectroflat(config, data_type):
     """
     Process spectroflat for flat_center or flat data.
     
-    This function extracts upper and lower frames, runs spectroflat on both together
-    (spectroflat needs at least two "states"), and returns the dust_flat and offset_map
-    in an L1 FramesSet structure.
+    Processes upper and lower frames separately with spectroflat.
+    Each frame is run independently (no loop) to avoid any state carryover issues.
     
     Parameters
     ----------
@@ -350,10 +352,6 @@ def process_spectroflat(config, data_type):
     FramesSet
         L1 reduced frames containing dust_flat (upper/lower) with offset_map in metadata
     """
-    from spectroflat import Analyser, Config as SpectroflatConfig, SmileConfig, SensorFlatConfig
-    from qollib.strings import parse_shape
-    import numpy as np
-    from pathlib import Path
     
     print(f'Processing spectroflat for {data_type}...')
     
@@ -389,29 +387,95 @@ def process_spectroflat(config, data_type):
         
         print(f'  Spectroflat will generate fresh offset_map and illumination_pattern files.')
     
-    # Read the L0 data
+    # Read L0 data
     data, header = tio.read_any_file(config, data_type, verbose=False, status='l0')
     
-    # L0 data has one frame (index 0) with upper and lower halves
-    if len(data) == 0:
-        print(f'Error: No frames found in {data_type} L0 data')
-        return None
+    upper_2d = data[0]['upper'].data
+    lower_2d = data[0]['lower'].data
     
-    # Extract upper and lower as 2D arrays [spatial, wavelength]
-    upper_2d = data[0]['upper'].data  # shape: (spatial, wavelength)
-    lower_2d = data[0]['lower'].data  # shape: (spatial, wavelength)
+    # Process upper frame - explicit call (not in loop)
+    upper_results = _process_single_frame_spectroflat(upper_2d, 'upper', config, data_type)
     
-    # Spectroflat needs input as [state, spatial, wavelength]
-    # Stack upper and lower as two "states"
-    dirty_flat = np.stack([upper_2d, lower_2d, lower_2d, lower_2d], axis=0)  # shape: (4, spatial, wavelength)
+    # Process lower frame - explicit call (not in loop)
+    lower_results = _process_single_frame_spectroflat(lower_2d, 'lower', config, data_type)
     
-    print(f'  Input shape for spectroflat: {dirty_flat.shape} [state, spatial, wavelength]')
+    # Create L1 FramesSet with dust_flats from both frames
+    reduced_frames = dct.FramesSet()
     
-    # Define ROI (avoiding edges)
-    roi = parse_shape(f'[2:{dirty_flat.shape[1]-2},2:{dirty_flat.shape[2]-2}]')
+    frame_name_str = f"{data_type}_l1_frame{0:04d}"
+    l1_frame = dct.Frame(frame_name_str)
+    l1_frame.set_half("upper", upper_results['dust_flat'].astype('float32'))
+    l1_frame.set_half("lower", lower_results['dust_flat'].astype('float32'))
+    
+    reduced_frames.add_frame(l1_frame, frame_idx=0)
+    
+    # Save offset maps and illumination patterns for both frames
+    line = config.dataset['line']
+    seq_str = config.dataset[data_type]['sequence']
+    
+    file_set = config.dataset[data_type]['files']
+    if not hasattr(file_set, 'auxiliary'):
+        file_set.auxiliary = {}
+    
+    for frame_name, results in [('upper', upper_results), ('lower', lower_results)]:
+        # Save offset map
+        offset_map_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_offset_map_{frame_name}.fits'
+        offset_obj = OffsetMap(
+            results['offset_map'][np.newaxis, :, :],  # Add state dimension
+            results['analyser'].offset_map.header.copy()
+        )
+        offset_obj.dump(str(offset_map_path))
+        print(f'  ✓ {frame_name.capitalize()} offset map: {offset_map_path.name}')
+        
+        # Save illumination pattern
+        illumination_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_illumination_pattern_{frame_name}.fits'
+        hdu = fits.PrimaryHDU(data=results['illumination_pattern'][np.newaxis, :, :])  # Add state dimension
+        hdu.header['COMMENT'] = f'Illumination pattern from spectroflat - {frame_name} frame'
+        hdu.header['FRAME'] = frame_name
+        hdu.writeto(str(illumination_path), overwrite=True)
+        print(f'  ✓ {frame_name.capitalize()} illumination pattern: {illumination_path.name}')
+        
+        # Add to auxiliary files
+        file_set.auxiliary[f'offset_map_{frame_name}'] = offset_map_path
+        file_set.auxiliary[f'illumination_pattern_{frame_name}'] = illumination_path
+    
+    print(f'  ✓ Spectroflat processing complete for both frames')
+    
+    return reduced_frames
+
+
+def _process_single_frame_spectroflat(frame_2d, frame_name, config, data_type):
+    """
+    Helper function to process a single frame (upper or lower) with spectroflat.
+    
+    Parameters
+    ----------
+    frame_2d : ndarray
+        2D array of frame data (spatial, wavelength)
+    frame_name : str
+        'upper' or 'lower'
+    config : Config
+        Configuration object
+    data_type : str
+        Type of data being processed
+        
+    Returns
+    -------
+    dict
+        Dictionary with keys: 'dust_flat', 'offset_map', 'illumination_pattern', 'analyser'
+    """
+    
+    print(f"  Processing {frame_name.upper()} frame...")
+    
+    # Create 4 states by duplicating the frame
+    dirty_flat = np.stack([frame_2d, frame_2d, frame_2d, frame_2d], axis=0)
+    print(f"    Input shape: {dirty_flat.shape} [state, spatial, wavelength]")
+    
+    # Define ROI
+    roi = parse_shape(f'[20:{dirty_flat.shape[1]-20},20:{dirty_flat.shape[2]-20}]')
     
     # Configure spectroflat
-    sf_config = SpectroflatConfig(roi=roi, iterations=2)
+    sf_config = SpectroflatConfig(roi=roi, iterations=1)
     sf_config.sensor_flat = SensorFlatConfig(
         spacial_degree=4,
         sigma_mask=4.5,
@@ -429,66 +493,29 @@ def process_spectroflat(config, data_type):
         smooth=True,
         emission_spectrum=False,
         state_aware=False,
-        align_states=True,
+        align_states=False,
         smile_deg=3,
         rotation_correction=0,
         detrend=False,
         roi=roi
     )
     
-    # Run spectroflat analysis with report
-    report_dir = Path(config.directories.figures) / 'spectroflat_report'
+    # Create report directory
+    report_dir = Path(config.directories.figures) / 'spectroflat_report' / frame_name
     report_dir.mkdir(exist_ok=True, parents=True)
-    print('  Running spectroflat analysis...')
-    analyser = Analyser(dirty_flat, sf_config, report_dir)
+    
+    # Run spectroflat
+    analyser = Analyser(dirty_flat, sf_config, str(report_dir))
     analyser.run()
+    print(f"    ✓ {frame_name.capitalize()} analysis complete")
     
-    print(f'  Spectroflat analysis complete.')
-    
-    # Create L1 FramesSet with dust_flat
-    reduced_frames = dct.FramesSet()
-    
-    # The analyser.dust_flat has shape [state, spatial, wavelength]
-    # Extract upper (state 0) and lower (state 1)
-    dust_flat_upper = analyser.dust_flat[0]  # shape: (spatial, wavelength)
-    dust_flat_lower = analyser.dust_flat[1]  # shape: (spatial, wavelength)
-    
-    # Create a single L1 frame with upper and lower halves
-    frame_name_str = f"{data_type}_l1_frame{0:04d}"
-    l1_frame = dct.Frame(frame_name_str)
-    l1_frame.set_half("upper", dust_flat_upper.astype('float32'))
-    l1_frame.set_half("lower", dust_flat_lower.astype('float32'))
-    
-    # Add frame to FramesSet
-    reduced_frames.add_frame(l1_frame, frame_idx=0)
-    
-    # Also save offset_map and illumination_pattern as separate FITS files for later use
-    line = config.dataset['line']
-    seq = config.dataset[data_type]['sequence']
-    seq_str = f"t{seq:03d}"
-    
-    # Save offset map
-    offset_map_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_offset_map.fits'
-    analyser.offset_map.dump(str(offset_map_path))
-    print(f'  Offset map saved to: {offset_map_path}')
-    
-    # Save illumination pattern (soft flat)
-    illumination_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_illumination_pattern.fits'
-    from astropy.io import fits
-    hdu = fits.PrimaryHDU(data=analyser.illumination_pattern)
-    hdu.header['COMMENT'] = 'Illumination pattern (soft flat) from spectroflat'
-    hdu.writeto(str(illumination_path), overwrite=True)
-    print(f'  Illumination pattern saved to: {illumination_path}')
-    
-    # Add to auxiliary files
-    file_set = config.dataset[data_type]['files']
-    if not hasattr(file_set, 'auxiliary'):
-        file_set.auxiliary = {}
-    file_set.auxiliary['offset_map'] = offset_map_path
-    file_set.auxiliary['illumination_pattern'] = illumination_path
-    print(f'  ✓ Added offset map and illumination pattern to FileSet auxiliary entry')
-    
-    return reduced_frames
+    # Extract results (state 0 since all 4 states are identical)
+    return {
+        'dust_flat': analyser.dust_flat[0],
+        'offset_map': analyser.offset_map.get_map()[0],
+        'illumination_pattern': analyser.illumination_pattern[0],
+        'analyser': analyser
+    }
 
 
 def amend_spectroflat_with_atlas_lines(config, data_type, atlas_lines_files):

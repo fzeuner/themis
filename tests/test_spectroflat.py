@@ -21,6 +21,9 @@ from qollib.strings import parse_shape
 
 import matplotlib.pyplot as plt
 
+# Import the helper function from the reduction pipeline
+from themis.core.themis_data_reduction import _process_single_frame_spectroflat
+
 def test_spectroflat_with_report():
     """Test spectroflat with report generation enabled."""
     print("="*70)
@@ -81,7 +84,7 @@ def test_spectroflat_with_report():
         smooth=True,
         emission_spectrum=False,
         state_aware=False,
-        align_states=True,
+        align_states=False,
         smile_deg=3,
         rotation_correction=0,
         detrend=True,
@@ -150,11 +153,11 @@ def test_spectroflat_with_more_states():
     lower_2d = data[0]['lower'].data
     
     # Create 4 states by duplicating upper and lower
-    dirty_flat = np.stack([upper_2d, lower_2d, upper_2d, lower_2d], axis=0)
+    dirty_flat = np.stack([lower_2d, lower_2d, lower_2d, lower_2d], axis=0)
     print(f"\n2. Stacked input shape: {dirty_flat.shape} [state, spatial, wavelength]")
     
     # Define ROI
-    roi = parse_shape(f'[100:{dirty_flat.shape[1]-100},100:{dirty_flat.shape[2]-100}]')
+    roi = parse_shape(f'[2:{dirty_flat.shape[1]-2},2:{dirty_flat.shape[2]-2}]')
     
     # Configure spectroflat (minimal config for testing)
     sf_config = SpectroflatConfig(roi=roi, iterations=1)
@@ -175,7 +178,7 @@ def test_spectroflat_with_more_states():
         smooth=True,
         emission_spectrum=False,
         state_aware=False,
-        align_states=True,
+        align_states=False,
         smile_deg=3,
         rotation_correction=0,
         detrend=False,
@@ -200,7 +203,46 @@ def test_spectroflat_with_more_states():
     except Exception as e:
         print(f"   ✗ Error even with 4 states:")
         print(f"     {type(e).__name__}: {e}")
-
+        
+def test_processing():
+    """Test the _process_single_frame_spectroflat helper function."""
+    print("\n" + "="*70)
+    print("Testing _process_single_frame_spectroflat helper function")
+    print("="*70)
+    
+    # Load configuration
+    config = get_config(
+        config_path='configs/sample_dataset_sr_2025-07-07.toml',
+        auto_discover_files=True,
+        auto_create_dirs=False
+    )
+    
+    data_type = 'flat_center'
+    
+    # Read L0 data
+    print(f"\n1. Loading {data_type} L0 data...")
+    data, header = tio.read_any_file(config, data_type, verbose=False, status='l0')
+    
+    upper_2d = data[0]['upper'].data
+    lower_2d = data[0]['lower'].data
+    
+    print(f"\n2. Testing LOWER frame processing...")
+    lower_result = _process_single_frame_spectroflat(lower_2d, 'lower', config, data_type)
+    print(f"   ✓ Lower frame processed successfully")
+    print(f"   dust_flat shape: {lower_result['dust_flat'].shape}")
+    print(f"   offset_map shape: {lower_result['offset_map'].shape}")
+    print(f"   illumination_pattern shape: {lower_result['illumination_pattern'].shape}")
+    
+    print(f"\n3. Testing UPPER frame processing...")
+    upper_result = _process_single_frame_spectroflat(upper_2d, 'upper', config, data_type)
+    print(f"   ✓ Upper frame processed successfully")
+    print(f"   dust_flat shape: {upper_result['dust_flat'].shape}")
+    print(f"   offset_map shape: {upper_result['offset_map'].shape}")
+    print(f"   illumination_pattern shape: {upper_result['illumination_pattern'].shape}")
+    
+    print(f"\n✓ Both frames processed successfully!")
+    return upper_result, lower_result
+   
 
 if __name__ == '__main__':
     print("\n" + "="*70)
@@ -212,9 +254,10 @@ if __name__ == '__main__':
    # analyser = test_spectroflat_with_report()
     
     # Test 2: With 4 states (diagnostic only)
-    print("\n[TEST 2: 4 states with report - diagnostic]")
-    test_spectroflat_with_more_states()
+   # print("\n[TEST 2: 4 states with report - diagnostic]")
+   # test_spectroflat_with_more_states()
     
+    test_processing()  # I found out that if the boundaries are not good, errors that are very cryptic!
     print("\n" + "="*70)
     print("TEST COMPLETE")
 
