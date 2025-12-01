@@ -464,45 +464,52 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
 
     # Auto-discover auxiliary files (e.g., atlas lines files, offset maps, illumination patterns)
     # Pattern for atlas lines: {line}_{data_type}_t{seq:03d}_{frame}_atlas_lines.yaml
-    # Pattern for offset map: {line}_{data_type}_t{seq:03d}_offset_map.fits
-    # Pattern for illumination pattern: {line}_{data_type}_t{seq:03d}_illumination_pattern.fits
+    # Pattern for offset map: {line}_{data_type}_t{seq:03d}_offset_map_{frame}.fits
+    # Pattern for illumination pattern: {line}_{data_type}_t{seq:03d}_illumination_pattern_{frame}.fits
     if data_t in ['flat', 'flat_center']:
-        # Discover atlas lines files
+        # Discover files for both upper and lower frames
         for frame in ['upper', 'lower']:
-            # Build expected filename pattern
+            # Discover atlas lines files
             atlas_pattern = f"{line}_{data_t}_{seq_str}_{frame}_atlas_lines.yaml"
             atlas_file = Path(directories.reduced) / atlas_pattern
             
             if atlas_file.exists():
                 file_set.auxiliary[f'atlas_lines_{frame}'] = atlas_file
-        
-        # Discover offset map file
-        offset_map_pattern = f"{line}_{data_t}_{seq_str}_offset_map.fits"
-        offset_map_file = Path(directories.reduced) / offset_map_pattern
-        
-        if offset_map_file.exists():
-            file_set.auxiliary['offset_map'] = offset_map_file
-        
-        # Discover outdated offset map file (backup before wavelength calibration)
-        offset_map_outdated_pattern = f"{line}_{data_t}_{seq_str}_offset_map_outdated.fits"
-        offset_map_outdated_file = Path(directories.reduced) / offset_map_outdated_pattern
-        
-        if offset_map_outdated_file.exists():
-            file_set.auxiliary['offset_map_outdated'] = offset_map_outdated_file
-        
-        # Discover illumination pattern file
-        illumination_pattern = f"{line}_{data_t}_{seq_str}_illumination_pattern.fits"
-        illumination_file = Path(directories.reduced) / illumination_pattern
-        
-        if illumination_file.exists():
-            file_set.auxiliary['illumination_pattern'] = illumination_file
-        
-        # Discover outdated illumination pattern file (backup before wavelength calibration)
-        illumination_outdated_pattern = f"{line}_{data_t}_{seq_str}_illumination_pattern_outdated.fits"
-        illumination_outdated_file = Path(directories.reduced) / illumination_outdated_pattern
-        
-        if illumination_outdated_file.exists():
-            file_set.auxiliary['illumination_pattern_outdated'] = illumination_outdated_file
+            
+            # Discover offset map file (per frame)
+            offset_map_pattern = f"{line}_{data_t}_{seq_str}_offset_map_{frame}.fits"
+            offset_map_file = Path(directories.reduced) / offset_map_pattern
+            
+            if offset_map_file.exists():
+                file_set.auxiliary[f'offset_map_{frame}'] = offset_map_file
+            
+            # Discover outdated offset map file (backup before wavelength calibration)
+            offset_map_outdated_pattern = f"{line}_{data_t}_{seq_str}_offset_map_{frame}_outdated.fits"
+            offset_map_outdated_file = Path(directories.reduced) / offset_map_outdated_pattern
+            
+            if offset_map_outdated_file.exists():
+                file_set.auxiliary[f'offset_map_{frame}_outdated'] = offset_map_outdated_file
+            
+            # Discover illumination pattern file (per frame)
+            illumination_pattern = f"{line}_{data_t}_{seq_str}_illumination_pattern_{frame}.fits"
+            illumination_file = Path(directories.reduced) / illumination_pattern
+            
+            if illumination_file.exists():
+                file_set.auxiliary[f'illumination_pattern_{frame}'] = illumination_file
+            
+            # Discover outdated illumination pattern file (backup before wavelength calibration)
+            illumination_outdated_pattern = f"{line}_{data_t}_{seq_str}_illumination_pattern_{frame}_outdated.fits"
+            illumination_outdated_file = Path(directories.reduced) / illumination_outdated_pattern
+            
+            if illumination_outdated_file.exists():
+                file_set.auxiliary[f'illumination_pattern_{frame}_outdated'] = illumination_outdated_file
+            
+            # Discover dust flat file (per frame)
+            dust_flat_pattern = f"{line}_{data_t}_{seq_str}_dust_flat_{frame}.fits"
+            dust_flat_file = Path(directories.reduced) / dust_flat_pattern
+            
+            if dust_flat_file.exists():
+                file_set.auxiliary[f'dust_flat_{frame}'] = dust_flat_file
 
     return file_set
 
