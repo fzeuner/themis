@@ -21,6 +21,8 @@ from themis.datasets.themis_datasets_2025 import get_config
 from themis.core import themis_io as tio
 from spectroflat.smile import SmileInterpolator, OffsetMap
 from spectroflat.utils.processing import MP
+import themis.core.themis_tools as tt
+from spectator.controllers.app_controller import display_data # from spectator
 
 #%%
 def apply_desmiling_spectroflat(image, offset_map_array):
@@ -96,67 +98,6 @@ def apply_corrections(frame_data, dust_flat, offset_map, illumination_pattern, f
     print(f"    ✓ Applied illumination pattern")
     
     return corrected
-
-
-def compute_frame_shift(reference, target):
-    """
-    Compute the shift between two frames using cross-correlation.
-    
-    Parameters
-    ----------
-    reference : ndarray
-        Reference frame (upper)
-    target : ndarray
-        Target frame to align (lower)
-        
-    Returns
-    -------
-    shift_y : float
-        Vertical shift (spatial)
-    shift_x : float
-        Horizontal shift (spectral)
-    """
-    print("\n  Computing frame shift using cross-correlation...")
-    
-    # Normalize both frames
-    ref_norm = (reference - np.mean(reference)) / np.std(reference)
-    tgt_norm = (target - np.mean(target)) / np.std(target)
-    
-    # Compute 2D cross-correlation
-    correlation = correlate2d(ref_norm, tgt_norm, mode='same')
-    
-    # Find peak
-    peak_y, peak_x = np.unravel_index(np.argmax(correlation), correlation.shape)
-    
-    # Convert to shift (relative to center)
-    center_y, center_x = np.array(correlation.shape) // 2
-    shift_y = peak_y - center_y
-    shift_x = peak_x - center_x
-    
-    print(f"    Detected shift: ({shift_y:.2f}, {shift_x:.2f}) pixels (spatial, spectral)")
-    
-    return shift_y, shift_x
-
-
-def apply_shift(frame, shift_y, shift_x):
-    """
-    Apply sub-pixel shift to frame.
-    
-    Parameters
-    ----------
-    frame : ndarray
-        Frame to shift
-    shift_y : float
-        Vertical shift
-    shift_x : float
-        Horizontal shift
-        
-    Returns
-    -------
-    shifted : ndarray
-        Shifted frame
-    """
-    return scipy_shift(frame, [shift_y, shift_x], order=3, mode='nearest')
 
 
 def plot_results(corrected_upper, corrected_lower, shifted_lower, shift_y, shift_x, config):
@@ -287,6 +228,8 @@ if __name__ == "__main__":
     upper_data = l0_data[0]['upper'].data
     lower_data = l0_data[0]['lower'].data
     
+    upper_data = upper_data/np.max(upper_data)
+    lower_data = lower_data/np.max(lower_data)
     # Load dust flats from auxiliary files
     
     with fits.open(config.dataset[data_type]['files'].auxiliary.get('dust_flat_upper')) as hdu:
@@ -365,21 +308,52 @@ if __name__ == "__main__":
     print("\n3. Applying illumination patterns...")
     corrected_upper = upper_desmiled / illum_upper[0]  # state 0
     corrected_lower = lower_desmiled / illum_lower[0]  # state 0
+    
     print(f"   ✓ Upper fully corrected: {corrected_upper.shape}")
     print(f"   ✓ Lower fully corrected: {corrected_lower.shape}")
-    
+
     # Step 4: Calculate shift
-    np.roll(lower_data, 1,axis=0)   #NEED AMYBE TO BE REFINED LATER
-    # print("\n4. Calculating shift between frames...")
-    # shift_y, shift_x = compute_frame_shift(corrected_upper, corrected_lower)
+    lower_corrected_shifted = np.roll(corrected_lower, 1,axis=0)   #NEED AMYBE TO BE REFINED LATER
+    lower_corrected_shifted = np.roll(lower_corrected_shifted, -8, axis=1)
     
+    # print("\n4. Calculating shift between frames...")
+    
+    shift_y, shift_x = tt.find_shift(corrected_upper[50:-50,50:-50], corrected_lower[50:-50,50:-50]) #reference, target
+    better_shifted_lower = tt.shift_image( corrected_lower, shift_y, shift_x)
+    
+    #%%
+    
+    u_sp = corrected_upper[10:-10, 200:-200]#/illum_upper[0][10:-10, 200:-200]
+    l_sp = corrected_lower[10:-10, 200:-200]#/illum_lower[0][10:-10, 200:-200]
+    
+    u_sp/=u_sp.max()
+    l_sp/=l_sp.max()
+    plt.plot(100*(u_sp[50,:]-u_sp[500,:]))
+    plt.plot(100*(l_sp[50,:]-l_sp[500,:]))
+    
+    data_plot = np.array([(100*(corrected_upper-np.roll(corrected_upper, 50, axis=0)))[100:-100,100:-100],
+                          (100*(corrected_lower-np.roll(corrected_lower, 50, axis=0)))[100:-100,100:-100]])
+    viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
+                       title='scan l0', 
+                       state_names=['upper-shifted','lower-shifted' ])
+    
+    
+    #%%
     # # Apply shift to lower frame
     # shifted_lower = apply_shift(corrected_lower, shift_y, shift_x)
     # print(f"   ✓ Applied shift to lower frame")
     
     # # Step 5: Display results
-    # print("\n5. Plotting results...")
-    # plot_results(corrected_upper, corrected_lower, shifted_lower, shift_y, shift_x, config)
+   # print("\n5. Plotting results...")
+    data_plot = np.array([
+    upper_data-lower_data,   
+    corrected_upper-corrected_lower,
+    corrected_upper-lower_corrected_shifted ,
+    corrected_upper-better_shifted_lower
+    ])
+    viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
+                       title='scan l0', 
+                       state_names=['l0 upper-lower','corrected upper-lower','lower_corrected_shifted', 'better shifted lower' ])
     
     # print("\n" + "="*70)
     # print("Frame alignment test complete!")

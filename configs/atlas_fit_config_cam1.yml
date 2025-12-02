@@ -39,7 +39,7 @@ fitting:
   # Spline smoothing factor for the continuum fit
   continuum_spline_smoothing: 0.12
   # Number of anchor points to derive the continuum from
-  continuum_points: 50
+  continuum_points: 70
   # Max allowed stray light in fit
   max_stray_light: 20
   # Mask lines with changing intensity (i.e., tellurics)

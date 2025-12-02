@@ -492,7 +492,7 @@ def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, D
 
 def find_shift(reference, target):
     # Use phase cross-correlation to find shifts
-    shifts, _, _ = phase_cross_correlation(reference, target)
+    shifts, _, _ = phase_cross_correlation(reference, target, upsample_factor=20)
     return(shifts[0], shifts[1])
 
 def shift_image(image, y_shift, x_shift):
