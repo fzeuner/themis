@@ -172,7 +172,7 @@ def _process_single_frame_spectroflat(frame_2d, frame_name, config, data_type):
     roi = parse_shape(f'[20:{dirty_flat.shape[1]-20},20:{dirty_flat.shape[2]-20}]')
     
     # Configure spectroflat
-    sf_config = SpectroflatConfig(roi=roi, iterations=1)
+    sf_config = SpectroflatConfig(roi=roi, iterations=2) # iterations 2 is considered enough
     sf_config.sensor_flat = SensorFlatConfig(
         spacial_degree=4,
         sigma_mask=4.5,
@@ -506,12 +506,16 @@ def _process_single_frame_atlas_fit(config, data_type, frame_name):
     
     print(f'  ✓ Created temporary config: {temp_config_path.name}')
     
+    # The prepare script outputs to 'atlas_fit_lines.yaml' in the working directory
+    temp_output_file = config.directories.reduced / 'atlas_fit_lines.yaml'
+    
     # Display command to run
     print(f'\n  Please run the following command in an EXTERNAL terminal:')
     print(f'  {"-"*68}')
     print(f'  cd {config.directories.reduced}')
-    print(f'  {prepare_script} {temp_config_path} {lines_file}')
+    print(f'  {prepare_script} {temp_config_path}')
     print(f'  {"-"*68}')
+    print(f'  Note: Output will be saved as atlas_fit_lines.yaml and renamed automatically.')
     
     # Wait for user confirmation
     while True:
@@ -526,6 +530,9 @@ def _process_single_frame_atlas_fit(config, data_type, frame_name):
                 temp_config_path.unlink()
             if temp_frame_path.exists():
                 temp_frame_path.unlink()
+            # Clean up any generated atlas_fit_lines.yaml
+            if temp_output_file.exists():
+                temp_output_file.unlink()
             return None
         else:
             print('  Please enter "y" or "n"')
@@ -535,6 +542,17 @@ def _process_single_frame_atlas_fit(config, data_type, frame_name):
         temp_config_path.unlink()
     if temp_frame_path.exists():
         temp_frame_path.unlink()
+    
+    # Rename the output file to the correct name
+    if temp_output_file.exists():
+        # Delete old file if it exists (shouldn't, but just in case)
+        if lines_file.exists():
+            lines_file.unlink()
+        temp_output_file.rename(lines_file)
+        print(f'  ✓ Renamed atlas_fit_lines.yaml → {lines_file.name}')
+    else:
+        print(f'  Error: Output file not found: {temp_output_file}')
+        return None
     
     # Verify output file exists
     if not lines_file.exists():
@@ -839,6 +857,10 @@ def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_da
                     print(f'  ✓ Using existing atlas lines file')
                     atlas_lines_files[frame_name] = atlas_lines_file
                     skip_atlas_fit = True
+                else:
+                    # User wants to re-run: delete the old file
+                    print(f'  Deleting old atlas lines file: {atlas_lines_file.name}')
+                    atlas_lines_file.unlink()
             
             if not skip_atlas_fit:
                 # Run atlas-fit for this frame
