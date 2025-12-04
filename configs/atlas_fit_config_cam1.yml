@@ -15,13 +15,15 @@ input:
   # Approx. upper wavelength boundary of the input [nm]
   wl_end: 461.1
   # The global stray-light level in the spectrograph in percent [%]
-  stray_light: 5
+  stray_light: 2.96
+  # Stray-light in percent [%] for lower frame (used by themis pipeline, ignored by atlas-fit)
+  stray_light_lower: 4.38
   # The window [px] for the gauss-fit to operate in around detected line cores
   line_window: 11
   # PSF Model to convolve the atlas with
   # model_psf: examples/modeled_spectral_psf_412nm.txt
   # The FWHM for the data at the central wl [nm]
-  fwhm: 0.003 # 0.0036 # 0.00112
+  fwhm: 0.00332 
 
 fitting:
   # Use the highest quantile as a first order continuum correction

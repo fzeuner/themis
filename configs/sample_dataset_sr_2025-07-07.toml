@@ -24,7 +24,13 @@ base = "/home/franziskaz/data/themis"
 # [arcsec] slit width
 slit_width = 0.33
 
-
+[continuum]
+# Wavelength points [nm] for continuum fitting (at least 3 points)
+# These should be placed in continuum regions (no spectral lines)
+#460.665, 
+continuum_wavelengths = [460.717, 460.791,460.842]
+# Spline degree for continuum interpolation (1=linear, 3=cubic)
+spline_degree = 2
 
 #from themis.datasets import themis_datasets_2025 as ds
 

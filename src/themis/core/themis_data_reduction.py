@@ -493,6 +493,33 @@ def _process_single_frame_atlas_fit(config, data_type, frame_name):
         original_config_text
     )
     
+    # For lower frame: use stray_light_lower if available
+    if frame_name == 'lower':
+        stray_light_lower_match = re.search(r'stray_light_lower:\s*([\d.]+)', modified_config_text)
+        if stray_light_lower_match:
+            stray_light_lower_value = stray_light_lower_match.group(1)
+            # Replace stray_light value with stray_light_lower value
+            modified_config_text = re.sub(
+                r'stray_light:\s*[\d.]+',
+                f'stray_light: {stray_light_lower_value}',
+                modified_config_text
+            )
+            print(f'  ✓ Using stray_light_lower: {stray_light_lower_value}% for lower frame')
+    
+    # Remove stray_light_lower entry (atlas-fit doesn't recognize it)
+    modified_config_text = re.sub(
+        r'^\s*#.*stray.light.*lower.*\n',  # Remove comment line
+        '',
+        modified_config_text,
+        flags=re.MULTILINE | re.IGNORECASE
+    )
+    modified_config_text = re.sub(
+        r'^\s*stray_light_lower:\s*[\d.]+\s*\n',  # Remove the actual entry
+        '',
+        modified_config_text,
+        flags=re.MULTILINE
+    )
+    
     # Determine output filename
     line = config.dataset['line']
     seq = config.dataset[data_type]['sequence']
@@ -516,6 +543,15 @@ def _process_single_frame_atlas_fit(config, data_type, frame_name):
     print(f'  {prepare_script} {temp_config_path}')
     print(f'  {"-"*68}')
     print(f'  Note: Output will be saved as atlas_fit_lines.yaml and renamed automatically.')
+    if frame_name == 'upper':
+        print(f'\n  IMPORTANT: After atlas-fit completes, note the fitted stray-light value')
+        print(f'  and FWHM displayed in the output (e.g., "stray-light: X.XX %") and update')
+        print(f'  "stray_light" and "fwhm" in the config file before running amend_spectroflat:')
+        print(f'  {project_root / "configs" / "atlas_fit_config_cam1.yml"}')
+    elif frame_name == 'lower':
+        print(f'\n  IMPORTANT: After atlas-fit completes, note the fitted stray-light value')
+        print(f'  and update "stray_light_lower" in the config file (FWHM is shared):')
+        print(f'  {project_root / "configs" / "atlas_fit_config_cam1.yml"}')
     
     # Wait for user confirmation
     while True:
@@ -708,6 +744,32 @@ def _process_single_frame_amend(config, data_type, frame_name, atlas_lines_path)
     
     if illum_pattern_path and illum_pattern_path.exists():
         temp_config_text = re.sub(r'(offset_map:\s*.+)', rf'\1\n  soft_flat: {illum_pattern_path}', temp_config_text)
+    
+    # For lower frame: use stray_light_lower if available
+    if frame_name == 'lower':
+        stray_light_lower_match = re.search(r'stray_light_lower:\s*([\d.]+)', temp_config_text)
+        if stray_light_lower_match:
+            stray_light_lower_value = stray_light_lower_match.group(1)
+            temp_config_text = re.sub(
+                r'stray_light:\s*[\d.]+',
+                f'stray_light: {stray_light_lower_value}',
+                temp_config_text
+            )
+            print(f'  ✓ Using stray_light_lower: {stray_light_lower_value}% for lower frame')
+    
+    # Remove stray_light_lower entry (atlas-fit doesn't recognize it)
+    temp_config_text = re.sub(
+        r'^\s*#.*stray.light.*lower.*\n',  # Remove comment line
+        '',
+        temp_config_text,
+        flags=re.MULTILINE | re.IGNORECASE
+    )
+    temp_config_text = re.sub(
+        r'^\s*stray_light_lower:\s*[\d.]+\s*\n',  # Remove the actual entry
+        '',
+        temp_config_text,
+        flags=re.MULTILINE
+    )
     
     project_root = Path(__file__).resolve().parents[3]
     temp_config_path = project_root / 'configs' / f'temp_amend_{data_type}_{frame_name}_config.yml'

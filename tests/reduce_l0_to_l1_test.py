@@ -20,7 +20,6 @@ from spectator.controllers.app_controller import display_data # from spectator
 
 import matplotlib.pyplot as plt
 import numpy as np
-import imreg_dft as ird
 import gc
 
 #%%
