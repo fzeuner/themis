@@ -90,7 +90,7 @@ class CameraRegistry:
 
 
 cam1 = Camera(name="Zyla 5", target="sr", pixel_scale=0.065, file_ext='b0505', 
-              wavelength='4607', roi=ROI(lower=((50, 928), (350, 1600)), upper=((1112, 1990), (350, 1600))),
+              wavelength='4607', roi=ROI(lower=((60, 928), (350, 1600)), upper=((1122, 1990), (342, 1592))),
               atlas_fit_config=_project_root() / "configs" / "atlas_fit_config_cam1.yml")
 cam2 = Camera(name="Zyla 6", target="ti", pixel_scale=0.065, file_ext='b0606', 
               wavelength='4536', roi=ROI(lower=((50, 925), (250, 1750)), upper=((1122, 1997), (250, 1750))),

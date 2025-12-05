@@ -470,8 +470,7 @@ if __name__ == "__main__":
     upper_data = l0_data[0]['upper'].data
     lower_data = l0_data[0]['lower'].data
     
-    upper_scan = l0_scan['mQ',0,0]['upper'].data
-    lower_scan = l0_scan['mQ',0,0]['lower'].data
+
     
    
     # Load dust flats from auxiliary files
@@ -481,6 +480,9 @@ if __name__ == "__main__":
     with fits.open(config.dataset[data_type]['files'].auxiliary.get('dust_flat_lower')) as hdu:
         dust_flat_lower = hdu[0].data
     print(f"   ✓ Loaded dust flats from auxiliary files")
+    
+    upper_scan = l0_scan['pQ',0,0]['upper'].data/dust_flat_upper
+    lower_scan = l0_scan['pQ',0,0]['lower'].data/dust_flat_lower
     
     # Load offset maps (both outdated and amended)
     offset_map_upper_outdated_file = config.dataset[data_type]['files'].auxiliary.get('offset_map_upper_outdated')
@@ -603,9 +605,12 @@ if __name__ == "__main__":
     corrected_upper_norm = (corrected_upper / np.mean(corrected_upper)) [margin:-margin, margin:-margin]
     corrected_lower_norm = (corrected_lower / np.mean(corrected_lower)) [margin:-margin, margin:-margin]
 
-    upper_scan_norm = ((upper_scan_desmiled/np.mean(upper_scan_desmiled))/dust_flat_upper)[margin:-margin, margin:-margin]
-    lower_scan_norm = ((lower_scan_desmiled/np.mean(lower_scan_desmiled))/dust_flat_lower)[margin:-margin, margin:-margin]
- 
+    upper_scan_norm = (upper_scan_desmiled/np.mean(upper_scan_desmiled))[margin:-margin, margin:-margin]
+    lower_scan_norm = (lower_scan_desmiled/np.mean(lower_scan_desmiled))[margin:-margin, margin:-margin]
+    
+    upper_scan_nondesmiled_norm = (upper_scan/np.mean(upper_scan))[margin:-margin, margin:-margin]
+    lower_scan_nondesmiled_norm = (lower_scan/np.mean(lower_scan))[margin:-margin, margin:-margin]
+    
     # Step 5a: Determine initial large shift in spectral direction (axis 1)
     # by cross-correlating averaged spectra over central 400 spatial pixels
     print("   Finding initial spectral shift from averaged spectra...")
@@ -627,14 +632,15 @@ if __name__ == "__main__":
     # Pre-shift lower images by initial spectral shift
     from scipy.ndimage import shift as scipy_shift
     lower_scan_norm_preshifted = scipy_shift(lower_scan_norm, (0, initial_shift_x), order=3, mode='constant')
+    
     lower_data_norm_preshifted = scipy_shift(lower_data_norm, (0, initial_shift_x), order=3, mode='constant')
     corrected_lower_norm_preshifted = scipy_shift(corrected_lower_norm, (0, initial_shift_x), order=3, mode='constant')
     
     # Use imreg_dft to find residual transformation (on pre-shifted data)
     print("   Finding residual transformation with imreg_dft...")
     result = ird.similarity(
-        upper_scan_norm, 
-        lower_scan_norm_preshifted,
+        upper_scan_nondesmiled_norm, 
+        lower_scan_nondesmiled_norm, # preshifted for better results
         numiter=5,
         constraints={
         'tx': (-1,1),      # x translation bounds
@@ -650,7 +656,7 @@ if __name__ == "__main__":
     scale = result['scale']  # Scale factor
     
     # Total shift = initial + residual
-    total_tvec = (tvec[0], tvec[1] + initial_shift_x)
+    total_tvec = (tvec[0]+2.7, tvec[1] + initial_shift_x)
     print(f"   ✓ Residual shift: ({tvec[0]:.3f}, {tvec[1]:.3f}) px")
     print(f"   ✓ Total transformation:")
     print(f"     Translation: ({total_tvec[0]:.3f}, {total_tvec[1]:.3f}) px (y, x)")
@@ -665,6 +671,10 @@ if __name__ == "__main__":
     
     # Apply the SAME transformation to normalized corrected_lower_scan
     corrected_lower_norm_scan_aligned = ird.transform_img(lower_scan_norm, tvec=total_tvec, angle=angle, scale=scale)
+    
+    
+    total_tvec = (1.4,  -8)
+    lower_scan_nondesmiled_aligned = ird.transform_img(lower_scan_nondesmiled_norm,tvec=total_tvec, angle=0, scale=1)
     print(f"   ✓ Applied transformation to both L0 and corrected lower frames")
   #%%  
     # Step 6: Continuum correction
@@ -697,12 +707,23 @@ if __name__ == "__main__":
         total_tvec, angle, scale, config, margin=0
     )
     
-    # plot_alignment_diff(
-    #     upper_data_norm, lower_data_norm_aligned,
-    #     upper_scan_norm, corrected_lower_norm_scan_aligned,
-    #     total_tvec, angle, scale, config, margin=0
-    # )
+    t=plot_alignment_diff(
+        upper_scan_nondesmiled_norm, lower_scan_nondesmiled_aligned,
+        upper_scan_norm, corrected_lower_norm_scan_aligned,
+        total_tvec, angle, scale, config, margin=0
+    )
     
     print("\n" + "="*70)
     print("Frame alignment test complete!")
     print("="*70)
+    
+    
+#%%
+
+    total_tvec = (1,  -8)
+    lower_scan_nondesmiled_aligned = ird.transform_img(lower_scan_nondesmiled_norm,tvec=total_tvec, angle=-0.09, scale=1)
+    t=plot_alignment_diff(
+        upper_scan_nondesmiled_norm, lower_scan_nondesmiled_aligned,
+        upper_scan_norm, corrected_lower_norm_scan_aligned,
+        total_tvec, angle, scale, config, margin=0
+    )

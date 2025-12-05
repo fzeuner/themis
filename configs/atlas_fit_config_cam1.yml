@@ -31,7 +31,7 @@ fitting:
   # Use a low frequency filter to determine pre-filter aberrations, etc.
   # lowpass_filter: False
   # Maximal dispersion degree to try
-  dispersion_max_degree: 4
+  dispersion_max_degree: 2
   # Minimal dispersion degree to try
   dispersion_min_degree: 1
   # Order of the lowpass-prefilter to apply. Use Null to deactivate

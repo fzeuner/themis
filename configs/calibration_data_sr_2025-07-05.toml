@@ -1,0 +1,47 @@
+# Example THEMIS dataset configuration (TOML)
+
+[dataset]
+# Spectral line key used to select camera config from themis.core.cam_config.cam
+line = "sr"
+# Observation date (used in directory structure)
+date = "2025-07-05"
+# Sequences for scan/flat/dark
+sequence = 55
+flat_sequence = 58
+flat_center_sequence = 26
+dark_sequence = 1
+# Polarization states order (modify as needed) - only for scan data!
+states = ["pQ"]
+
+[paths]
+# Base directory for rdata/pdata/inversion
+base = "/home/franziskaz/data/themis"
+# Optional overrides (uncomment to use)
+# figures = "/home/<user>/figures/themis/"
+# inversion = "/home/<user>/data/themis/inversion"
+
+[params]
+# [arcsec] slit width
+slit_width = 0.33
+
+[continuum]
+# Wavelength points [nm] for continuum fitting (at least 3 points)
+# These should be placed in continuum regions (no spectral lines)
+#460.665, 
+continuum_wavelengths = [460.717, 460.791,460.842]
+# Spline degree for continuum interpolation (1=linear, 3=cubic)
+spline_degree = 2
+
+#from themis.datasets import themis_datasets_2025 as ds
+
+#cfg = ds.get_config(
+#    config_path="configs/my_run.toml",  # omit to use defaults
+#    auto_discover_files=True,           # pre-fill matching files per level
+#    auto_create_dirs=False              # create directories if missing
+#)
+
+# Access populated values
+#print(cfg.directories)     # DirectoryPaths instance
+#print(cfg.dataset)         # dict with scan/flat/dark and sequences
+#print(cfg.slit_width)      # float
+#print(cfg.polarization_states)  # list
