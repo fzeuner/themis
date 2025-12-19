@@ -154,8 +154,8 @@ def process_flat(config, data_type='flat_center', flat_index=0, processing=None)
     upper_dust = upper_raw / dust_flat_upper
     lower_dust = lower_raw / dust_flat_lower
 
-    upper_final = upper_dust if processing.get('final_use_dust_flat', True) else upper_raw
-    lower_final = lower_dust if processing.get('final_use_dust_flat', True) else lower_raw
+    upper_final = 1*upper_dust if processing.get('final_use_dust_flat', True) else upper_raw
+    lower_final = 1*lower_dust if processing.get('final_use_dust_flat', True) else lower_raw
 
     desmile_mode = processing.get('final_desmile')
     if desmile_mode:
@@ -532,3 +532,85 @@ if __name__ == "__main__":
     print(np.std(test_mu))
     #lt.imshow(test_pu-0.998*_apply_alignment(test_mu, [-0.1,0.4], 0, 1))
     plt.imshow( gaussian_filter(test_pu,sigma)-gaussian_filter(0.99*_apply_alignment(test_mu, [0.1,0.3], -0.1, 1),sigma), vmin=-100, vmax=100)
+    
+    
+    
+#%%
+
+#steigung bestimmen 
+
+def grad(image):
+
+    x_left = np.argmax(image[150,50:400])
+    y_left = image[150,50:400][x_left]
+    x_left +=50
+
+    x = np.arange(0,image.shape[1])
+
+    x_right = np.argmax(image[150,500:-50])
+    y_right = image[150,500:-50][x_right]
+    x_right+=500
+
+    m =( y_right-y_left)/(x_right-x_left) #1.338#(
+    b = -m*x_left + y_left
+    y = m*x+b
+    print(m)
+    
+    return(y)
+
+def grad2(image):
+
+    x_left = np.argmax(image[150,50:400])
+    y_left = image[150,50:400][x_left]
+    x_left +=50
+
+    x = np.arange(0,image.shape[1])
+
+    x_right = np.argmax(image[150,500:-50])
+    y_right = image[150,500:-50][x_right]
+    x_right+=500
+
+    m =( y_right-y_left)/(x_right-x_left) #1.338#(
+    b = -m*x_left + y_left
+    y = m*x+b
+    y2 = -m*x+y[0]
+    print(m)
+    
+    return(y2)
+
+
+linear_upper = grad(flat_res['upper_final'])
+linear_lower = grad(flat_res['lower_final'])
+
+
+#%%
+plt.plot(flat_res['lower_final'][150,:]/linear_lower , color='orange')
+
+plt.plot(np.roll(flat_res['upper_final'][150,:]/linear_upper,8) , color='blue')
+#%%
+
+
+plt.plot(0.5*(flat_res['lower_final'][150,:]+grad2(flat_res['lower_final'])) , color='orange')
+
+plt.plot(0.5*np.roll(flat_res['upper_final'][150,:]+grad2(flat_res['upper_final']),8) , color='blue')
+
+plt.plot(0.5*np.roll(flat_res['upper_final'][150,:]+grad2(flat_res['upper_final']),8)-
+         0.5*(flat_res['lower_final'][150,:]+grad2(flat_res['lower_final']))+grad2(flat_res['upper_final']),8),color='red')
+
+
+#%%
+plt.plot(np.roll(scan_res_p['upper_final'][150,:]/linear_upper,0) , color='blue')
+plt.plot(scan_res_p['lower_final'][150,:]/linear_lower, color='orange')
+
+
+plt.plot(np.roll(scan_res_m['upper_final'][550,:]/linear_upper,0) , color='cyan')
+plt.plot(scan_res_m['lower_final'][550,:]/linear_lower, color='green')
+
+#%%
+plt.plot(linear_lower, color='orange')
+plt.plot(grad2(flat_res['lower_final']), color='orange', linestyle='--')
+plt.plot(linear_upper, color='blue')
+plt.plot(grad2(flat_res['upper_final']), color='blue', linestyle='--')
+
+plt.plot(np.roll(flat_res['upper_final'][150,:],0) , color='blue')
+plt.plot(np.roll(flat_res['lower_final'][150,:],0) , color='orange')
