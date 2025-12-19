@@ -323,7 +323,7 @@ def plot_alignment_diff(data, corrected,
     #     vmax_corr = np.percentile(np.abs(diff_corrected), 99)
     
     ax = axes[1]
-    im = ax.imshow(diff_corrected, aspect='auto', cmap='RdBu_r', vmin=-0.5, vmax=0.5)
+    im = ax.imshow(diff_corrected, aspect='auto', cmap='RdBu_r', vmin=-0.03, vmax=0.03)
     ax.set_title('Corrected: Upper - Lower')
     ax.set_xlabel('Spectral [px]')
     ax.set_ylabel('Spatial [px]')
@@ -361,31 +361,46 @@ if __name__ == "__main__":
     data_type = 'flat_center'
 
     processing_flat = {
-        'final_use_dust_flat': False,
-        'final_desmile': False,
+        'final_use_dust_flat': True,
+        'final_desmile': True,
         'final_align_lower_to_upper': False,
+        "alignment": {
+            "transform": {
+         "tvec": (0, 0),   # (y, x) pixels
+         "angle": 0.,        # degrees
+         "scale": 1.0,}}
     }
     processing_scan = {
         'final_use_dust_flat': True,
         'final_desmile': False,
-        'final_align_lower_to_upper': False,
-        # "alignment": {
-        #     "transform": {
-        #  "tvec": (2.7, -8.0),   # (y, x) pixels
-        #  "angle": -0.09,        # degrees
-        #  "scale": 1.0,}}
+        'final_align_lower_to_upper': True,
+        "alignment": {
+            "transform": {
+         "tvec": (2.7, -8.0),   # (y, x) pixels
+         "angle": 0.,        # degrees
+         "scale": 1.0,}}
     }
 
     print("\n0. Processing flat...")
     flat_res = process_flat(config, data_type=data_type, flat_index=0, processing=processing_flat)
+    
+    x_min_upper = np.argmin(flat_res['upper_final'][150,500:620]) 
+    x_min_lower = np.argmin(flat_res['lower_final'][150,500:620]) 
+    
+    x_shift = x_min_upper - x_min_lower
+    
+    flat_shifted = _apply_alignment(flat_res['lower_final'], [0,x_shift],0, 1) 
 
     print("\n0. Processing scan...")
-    scan_res_p = process_scan(config, aux_data_type=data_type, pol_state='pQ', slit_idx=0, map_idx=0, processing=processing_scan)
+    scan_res_p = process_scan(config, aux_data_type=data_type, pol_state='pU', slit_idx=0, map_idx=0, processing=processing_scan)
     
-    scan_res_m = process_scan(config, aux_data_type=data_type, pol_state='mQ', slit_idx=0, map_idx=0, processing=processing_scan)
+    scan_res_m = process_scan(config, aux_data_type=data_type, pol_state='mU', slit_idx=0, map_idx=0, processing=processing_scan)
     
-    I = 0.5*(scan_res_p['upper_final']+scan_res_m['upper_final'])#+scan_res_p['lower_final']+scan_res_m['lower_final'])
-    Q = 100*(scan_res_p['upper_final']-scan_res_m['upper_final'])/I#*scan_res_m['lower_final']/scan_res_p['lower_final']-1)
+    
+    
+    I = 0.25*(scan_res_p['upper_final']+scan_res_m['upper_final']+scan_res_p['lower_final']+scan_res_m['lower_final'])
+    Q = 100*(scan_res_p['upper_final']/scan_res_m['upper_final']*
+             scan_res_m['lower_final']/scan_res_p['lower_final']-1)
 #%%
     # Step 5: Calculate alignment using imreg_dft on L0 data
     # print("\n5. Calculating alignment transformation using L0 data...")
@@ -473,23 +488,23 @@ if __name__ == "__main__":
   #%%  
     # Step 6: Plot differences
     print("\n6. Plotting alignment results...")
-    # flat_plot=plot_alignment_diff(
-    #     flat_res['upper_dust']-flat_res['lower_dust'],
-    #     flat_res['upper_final']-flat_res['lower_final'],
-    #     flat_res['tvec'], flat_res['angle'],flat_res['scale'], config, margin=0, title_suffix=flat_res['title_suffix'], processing=processing_flat
+    flat_plot=plot_alignment_diff(
+        flat_res['upper_dust']-flat_res['lower_dust'],
+        flat_res['upper_final']/np.max(flat_res['upper_final'][50:-50,50:-50])-flat_shifted/np.max(flat_shifted[50:-50,50:-50]),
+        flat_res['tvec'], flat_res['angle'],flat_res['scale'], config, margin=0, title_suffix=flat_res['title_suffix'], processing=processing_flat
+    )
+    
+    # scan_plot=plot_alignment_diff(
+    #     scan_res_p['upper_dust']- scan_res_m['upper_dust'],
+    #     scan_res_p['upper_final']-scan_res_m['upper_final'],
+    #     scan_res_p['tvec'], scan_res_p['angle'],scan_res_p['scale'], config, margin=0, title_suffix=scan_res_p['title_suffix'], processing=processing_scan
     # )
     
-    scan_plot=plot_alignment_diff(
-        scan_res_p['upper_dust']- scan_res_m['upper_dust'],
-        scan_res_p['upper_final']-scan_res_m['upper_final'],
-        scan_res_p['tvec'], scan_res_p['angle'],scan_res_p['scale'], config, margin=0, title_suffix=scan_res_p['title_suffix'], processing=processing_scan
-    )
-    
-    scan_plot_i=plot_alignment_diff(
-        I,
-        Q,
-        scan_res_p['tvec'], scan_res_p['angle'],scan_res_p['scale'], config, margin=0, title_suffix=scan_res_p['title_suffix'], processing=processing_scan
-    )
+    # scan_plot_i=plot_alignment_diff(
+    #     I,
+    #     Q,
+    #     scan_res_p['tvec'], scan_res_p['angle'],scan_res_p['scale'], config, margin=0, title_suffix=scan_res_p['title_suffix'], processing=processing_scan
+    # )
     
     print("\n" + "="*70)
     print("Frame alignment test complete!")
