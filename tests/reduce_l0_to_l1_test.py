@@ -44,13 +44,37 @@ if __name__ == '__main__':
     #data, header = tio.read_any_file(config, 'flat_center', verbose=False, status='l0')
     
     result = lv1.reduce(config, data_type='flat_center', return_reduced = False)
+    result = lv1.reduce(config, data_type='flat', return_reduced = False)
     
    # data_plot = np.array([result.get(0).get_half('upper').data,result.get(0).get_half('lower').data ])
     
+#%%
+    data, header = tio.read_any_file(config, 'flat_center', verbose=False, status='l1')
+    dust, _ = tio.read_any_file(config, 'flat_center', verbose=False, status='dust')
+    
+    data_plot = np.array([data.get(0).get_half('upper').data,data.get(0).get_half('lower').data,
+                          dust.get(0).get_half('upper').data,dust.get(0).get_half('lower').data])
+    
+    viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
+                       title='flat center l1', 
+                       state_names=['upper dust corrected', 'lower dust corrected',
+                                    'dust upper', 'dust lower'])
+    
+#%%
+# test flat center on flat
 
+    data, header = tio.read_any_file(config, 'flat', verbose=False, status='l0')
+    dust, _ = tio.read_any_file(config, 'flat_center', verbose=False, status='dust')
+    l1, header = tio.read_any_file(config, 'flat', verbose=False, status='l1')
     
+    data_plot = np.array([data.get(0).get_half('upper').data/dust.get(0).get_half('upper').data,
+                          data.get(0).get_half('lower').data/dust.get(0).get_half('lower').data,
+                          l1.get(0).get_half('upper').data, l1.get(0).get_half('lower').data])
     
-    
+    viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
+                       title='flat center l1', 
+                       state_names=['upper different dust corrected', 'lower different dust corrected',
+                                    'self dust corrected upper', 'self dust corrected lower'])
     
     
     

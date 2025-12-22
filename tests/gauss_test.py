@@ -79,7 +79,7 @@ def main():
     axes[1, 1].axhline(y=0, color='k', linestyle='-', alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('gaussian_addition_difference.png', dpi=300, bbox_inches='tight')
+    #plt.savefig('gaussian_addition_difference.png', dpi=300, bbox_inches='tight')
     print("Plot saved as 'gaussian_addition_difference.png'")
 
 

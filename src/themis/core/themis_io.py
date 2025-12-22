@@ -120,77 +120,36 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
     # Write data_type + level specific HDUs
     hdus = [fits.PrimaryHDU(header=hdr)]
 
-    if data_type == 'dark' and level == 'l0':
-        # Expect FramesSet with indices {0: averaged, 1: denoised}
+    # Unified handling for simple two-half frames (dark/flat/flat_center)
+    if level == 'l0' and data_type in ('dark', 'flat', 'flat_center'):
+        # Expect FramesSet with index {0: averaged frame}
         avg = frames.get(0)
 
         if avg is None:
-            raise ValueError("Expected reduced dark frames to contain index 0 (averaged)")
+            raise ValueError("Expected reduced frames to contain index 0 (averaged)")
 
-        upper_avg = avg.get_half('upper').data.astype('float32', copy=False)
-        lower_avg = avg.get_half('lower').data.astype('float32', copy=False)
-        hdus.append(fits.ImageHDU(upper_avg, name='UPPER_AVG'))
-        hdus.append(fits.ImageHDU(lower_avg, name='LOWER_AVG'))
+        upper = avg.get_half('upper').data.astype('float32', copy=False)
+        lower = avg.get_half('lower').data.astype('float32', copy=False)
+        hdus.append(fits.ImageHDU(upper, name='UPPER_L0'))
+        hdus.append(fits.ImageHDU(lower, name='LOWER_L0'))
 
-    elif data_type == 'flat' and level == 'l0':
-        # Expect FramesSet with index {0: averaged flat}
+    elif level == 'l1' and data_type in ('flat', 'flat_center'):
+        # L1 products for flats: dust-corrected (or wavelength-calibrated) upper/lower frames
         avg = frames.get(0)
 
         if avg is None:
-            raise ValueError("Expected reduced flat frames to contain index 0 (averaged)")
+            raise ValueError("Expected l1 frames to contain index 0")
 
-        upper_avg = avg.get_half('upper').data.astype('float32', copy=False)
-        lower_avg = avg.get_half('lower').data.astype('float32', copy=False)
-        hdus.append(fits.ImageHDU(upper_avg, name='UPPER_FLAT'))
-        hdus.append(fits.ImageHDU(lower_avg, name='LOWER_FLAT'))
+        upper = avg.get_half('upper').data.astype('float32', copy=False)
+        lower = avg.get_half('lower').data.astype('float32', copy=False)
+        hdus.append(fits.ImageHDU(upper, name='UPPER_L1'))
+        hdus.append(fits.ImageHDU(lower, name='LOWER_L1'))
 
-    elif data_type == 'flat_center' and level == 'l0':
-        # Expect FramesSet with index {0: averaged flat_center}
-        avg = frames.get(0)
-
-        if avg is None:
-            raise ValueError("Expected reduced flat_center frames to contain index 0 (averaged)")
-
-        upper_avg = avg.get_half('upper').data.astype('float32', copy=False)
-        lower_avg = avg.get_half('lower').data.astype('float32', copy=False)
-        hdus.append(fits.ImageHDU(upper_avg, name='UPPER_FLAT_CENTER'))
-        hdus.append(fits.ImageHDU(lower_avg, name='LOWER_FLAT_CENTER'))
-
-    elif data_type == 'flat_center' and level == 'l1':
-        # For flat_center l1, we mainly do wavelength calibration.
-        # Save the original data with auxiliary file information in header
-        avg = frames.get(0)
-
-        if avg is None:
-            raise ValueError("Expected reduced flat_center frames to contain index 0 (averaged)")
-
-        upper_avg = avg.get_half('upper').data.astype('float32', copy=False)
-        lower_avg = avg.get_half('lower').data.astype('float32', copy=False)
-        
-        # Create headers with auxiliary file information
-        upper_hdr = fits.Header()
-        lower_hdr = fits.Header()
-        
-        # Add auxiliary file information if provided in extra_keywords
-        if extra_keywords and 'AUXL1FILES' in extra_keywords:
-            aux_files_info = extra_keywords['AUXL1FILES'][0]
-            upper_hdr['AUXL1FILES'] = aux_files_info
-            lower_hdr['AUXL1FILES'] = aux_files_info
-        
-        # Add processing information
-        upper_hdr['PROCLEVEL'] = ('l1', 'Processing level')
-        upper_hdr['PROCTYPE'] = ('wavelength_calibration', 'Atlas-fit wavelength calibration')
-        lower_hdr['PROCLEVEL'] = ('l1', 'Processing level')
-        lower_hdr['PROCTYPE'] = ('wavelength_calibration', 'Atlas-fit wavelength calibration')
-        
-        hdus.append(fits.ImageHDU(upper_avg, header=upper_hdr, name='UPPER_FLAT_CENTER_L1'))
-        hdus.append(fits.ImageHDU(lower_avg, header=lower_hdr, name='LOWER_FLAT_CENTER_L1'))
-
-    elif data_type == 'scan' and level == 'l0':
+    elif data_type == 'scan' and level in ('l0', 'l1'):
         # Expect CycleSet with keys (frame_state, slit_idx, map_idx)
-        # Save all frames as individual HDUs
+        # Save all frames as individual HDUs; l0 and l1 share the same layout
         if not isinstance(frames, dct.CycleSet):
-            raise ValueError("Expected scan l0 frames to be a CycleSet")
+            raise ValueError("Expected scan frames to be a CycleSet")
         
         # Sort keys for consistent ordering
         sorted_keys = sorted(frames.keys())
@@ -269,7 +228,12 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     """
     gc.collect()
     
-    file_path = config.dataset[data_type]['files'].get(status)
+    # For status='dust' we use the L1 file only to obtain a header; data
+    # themselves come from auxiliary dust_flat_* files.
+    if status == 'dust' and data_type in ('flat', 'flat_center'):
+        file_path = config.dataset[data_type]['files'].get('l1')
+    else:
+        file_path = config.dataset[data_type]['files'].get(status)
     if not file_path or not file_path.exists():
         raise FileNotFoundError(f"File for data_type '{data_type}' at status '{status}' not found: {file_path}")
 
@@ -279,6 +243,47 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     
     num_slit_positions = header.get('NBSTEP', 0) + 1 if 'NBSTEP' in header else 1
     data = np.array(hdu[0].data)
+    
+    # Special handling: return dust flats stored as auxiliary files.
+    # Interface: status='dust' for flat / flat_center.
+    if status == 'dust' and data_type in ('flat', 'flat_center'):
+        # Build a FramesSet with a single frame containing upper/lower dust flats
+        files_aux = getattr(config.dataset[data_type]['files'], 'auxiliary', None)
+        if files_aux is None:
+            hdu.close()
+            raise FileNotFoundError(f"No auxiliary files found for data_type '{data_type}' (expected dust_flat_upper/lower).")
+
+        dust_files = {}
+        for half in ['upper', 'lower']:
+            key = f'dust_flat_{half}'
+            path = files_aux.get(key)
+            if path is None or not path.exists():
+                hdu.close()
+                raise FileNotFoundError(f"Auxiliary dust flat file missing for {half}: key='{key}', path='{path}'")
+            dust_files[half] = path
+
+        collection = dct.FramesSet()
+        frame_name_str = f"{data_type}_dust_frame{0:04d}"
+        frame = dct.Frame(frame_name_str)
+
+        # Read dust flats for both halves
+        for half in ['upper', 'lower']:
+            with fits.open(dust_files[half]) as dh:
+                dust_data = np.array(dh[0].data)
+            frame.set_half(half, dust_data.astype('float32'))
+
+        collection.add_frame(frame, 0)
+
+        if verbose:
+            print(f"Reading L1 dust flats for data_type '{data_type}' from auxiliary files")
+            print(collection)
+            print("Header (from main L1 file):")
+            print(header)
+
+        hdu.close()
+        del data
+        gc.collect()
+        return collection, header
     
     # Correct for signed/unsigned integer overflow in flat data
     if status == 'raw' and data_type in ('flat', 'flat_center'):
@@ -358,48 +363,46 @@ def read_any_file(config, data_type, status='raw', verbose=False):
             single_frame = dct.Frame(f"{data_type}_full")
             single_frame.set_half("full_data", np.array(hdu[0].data))
             collection.add_frame(single_frame, 0)
-    elif status == 'l0' and data_type == 'dark':
-        # Read reduced dark created by save_reduction: primary header only, image HDUs for data
+    elif status == 'l0' and data_type in ('dark', 'flat', 'flat_center'):
+        # Read reduced L0 dark/flat/flat_center created by save_reduction
         collection = dct.FramesSet()
 
         # Find expected HDUs by name
         hdu_names = {h.name.upper(): idx for idx, h in enumerate(hdu)}
 
-        # Averaged frames (required)
         try:
-            upper_avg = np.array(hdu[hdu_names['UPPER_AVG']].data)
-            lower_avg = np.array(hdu[hdu_names['LOWER_AVG']].data)
+            upper = np.array(hdu[hdu_names['UPPER_L0']].data)
+            lower = np.array(hdu[hdu_names['LOWER_L0']].data)
         except KeyError as e:
-            raise ValueError("Missing UPPER_AVG/LOWER_AVG HDUs in l0 dark file") from e
+            raise ValueError("Missing UPPER_L0/LOWER_L0 HDUs in l0 file") from e
 
         frame_name_str = f"{data_type}_l0_frame{0:04d}"
         single_frame = dct.Frame(frame_name_str)
-        single_frame.set_half("upper", upper_avg)
-        single_frame.set_half("lower", lower_avg)
+        single_frame.set_half("upper", upper)
+        single_frame.set_half("lower", lower)
         collection.add_frame(single_frame, 0)
 
-    elif status == 'l0' and data_type == 'flat_center':
-        # Read reduced flat_center created by save_reduction
+    elif status == 'l1' and data_type in ('flat', 'flat_center'):
+        # Read reduced L1 flat/flat_center created by save_reduction
         collection = dct.FramesSet()
 
         # Find expected HDUs by name
         hdu_names = {h.name.upper(): idx for idx, h in enumerate(hdu)}
 
-        # Averaged frames (required)
         try:
-            upper_avg = np.array(hdu[hdu_names['UPPER_FLAT_CENTER']].data)
-            lower_avg = np.array(hdu[hdu_names['LOWER_FLAT_CENTER']].data)
+            upper = np.array(hdu[hdu_names['UPPER_L1']].data)
+            lower = np.array(hdu[hdu_names['LOWER_L1']].data)
         except KeyError as e:
-            raise ValueError("Missing UPPER_FLAT_CENTER/LOWER_FLAT_CENTER HDUs in l0 flat_center file") from e
+            raise ValueError("Missing UPPER_L1/LOWER_L1 HDUs in l1 flat file") from e
 
-        frame_name_str = f"{data_type}_l0_frame{0:04d}"
+        frame_name_str = f"{data_type}_l1_frame{0:04d}"
         single_frame = dct.Frame(frame_name_str)
-        single_frame.set_half("upper", upper_avg)
-        single_frame.set_half("lower", lower_avg)
+        single_frame.set_half("upper", upper)
+        single_frame.set_half("lower", lower)
         collection.add_frame(single_frame, 0)
 
-    elif status == 'l0' and data_type == 'scan':
-        # Read reduced scan created by save_reduction: reconstruct CycleSet from HDUs
+    elif status in ('l0', 'l1') and data_type == 'scan':
+        # Read reduced scan created by save_reduction (l0 or l1): reconstruct CycleSet from HDUs
         collection = dct.CycleSet()
         
         # Build a dict to group upper/lower pairs by their key (frame_state, slit_idx, map_idx)
