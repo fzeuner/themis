@@ -18,8 +18,7 @@ from themis.ui.style_themis import style_aa
 from matplotlib.ticker import (NullFormatter)
 
 from scipy.signal import convolve2d
-from scipy.io import readsav
-from scipy.signal import medfilt
+
 from tqdm import tqdm
 
 from scipy.interpolate import interp1d
@@ -37,10 +36,11 @@ import gc
 import warnings
 
 from pathlib import Path
-import imreg_dft as ird# pip install git+https://github.com/matejak/imreg_dft.git
+
 from themis.core import themis_data_reduction as tdr
 from themis.core import data_classes as dct
-
+#from scipy.ndimage import distance_transform_edt
+from scipy.interpolate import griddata
 
 
 from themis.datasets import themis_datasets_2025 as dst
@@ -113,8 +113,7 @@ def clean_bad_pixels(data, header):
             - cleaned_data: Data with interpolated pixels and bad frames removed
             - additional_keywords: dict with statistics for header
     """
-    from scipy.ndimage import distance_transform_edt
-    from scipy.interpolate import griddata
+
     
     # Get bad pixel values from header
     bzero = header.get('BZERO', None)
