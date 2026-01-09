@@ -145,9 +145,21 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
         hdus.append(fits.ImageHDU(upper, name='UPPER_L1'))
         hdus.append(fits.ImageHDU(lower, name='LOWER_L1'))
 
-    elif data_type == 'scan' and level in ('l0', 'l1'):
+    elif level == 'l2' and data_type in ('flat', 'flat_center'):
+        # L2 products for flats: y-shift corrected upper/lower frames
+        avg = frames.get(0)
+
+        if avg is None:
+            raise ValueError("Expected l2 frames to contain index 0")
+
+        upper = avg.get_half('upper').data.astype('float32', copy=False)
+        lower = avg.get_half('lower').data.astype('float32', copy=False)
+        hdus.append(fits.ImageHDU(upper, name='UPPER_L2'))
+        hdus.append(fits.ImageHDU(lower, name='LOWER_L2'))
+
+    elif data_type == 'scan' and level in ('l0', 'l1', 'l2'):
         # Expect CycleSet with keys (frame_state, slit_idx, map_idx)
-        # Save all frames as individual HDUs; l0 and l1 share the same layout
+        # Save all frames as individual HDUs; l0, l1, and l2 share the same layout
         if not isinstance(frames, dct.CycleSet):
             raise ValueError("Expected scan frames to be a CycleSet")
         
@@ -200,9 +212,13 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
 
     if verbose:
         print(f"Saved {data_type} at level '{level}' to: {out_path}")
-        print("HDUList content:")
-        for h in hdus:
-            print(f"  - {h.name if hasattr(h, 'name') else 'PRIMARY'}: shape={getattr(h, 'data', None).shape if hasattr(h, 'data') and h.data is not None else None}")
+        if data_type == 'scan':
+            # For scan data, avoid printing a very long HDU list; just summarize.
+            print(f"HDUList contains {len(hdus)} HDUs (scan frames suppressed for brevity)")
+        else:
+            print("HDUList content:")
+            for h in hdus:
+                print(f"  - {h.name if hasattr(h, 'name') else 'PRIMARY'}: shape={getattr(h, 'data', None).shape if hasattr(h, 'data') and h.data is not None else None}")
 
     del hdus
     gc.collect()
@@ -382,26 +398,28 @@ def read_any_file(config, data_type, status='raw', verbose=False):
         single_frame.set_half("lower", lower)
         collection.add_frame(single_frame, 0)
 
-    elif status == 'l1' and data_type in ('flat', 'flat_center'):
-        # Read reduced L1 flat/flat_center created by save_reduction
+    elif status in ('l1', 'l2') and data_type in ('flat', 'flat_center'):
+        # Read reduced L1/L2 flat/flat_center created by save_reduction
+        # L1: dust-corrected, L2: y-shift corrected
         collection = dct.FramesSet()
 
-        # Find expected HDUs by name
+        # Find expected HDUs by name (UPPER_L1/LOWER_L1 or UPPER_L2/LOWER_L2)
         hdu_names = {h.name.upper(): idx for idx, h in enumerate(hdu)}
+        level_suffix = status.upper()  # 'L1' or 'L2'
 
         try:
-            upper = np.array(hdu[hdu_names['UPPER_L1']].data)
-            lower = np.array(hdu[hdu_names['LOWER_L1']].data)
+            upper = np.array(hdu[hdu_names[f'UPPER_{level_suffix}']].data)
+            lower = np.array(hdu[hdu_names[f'LOWER_{level_suffix}']].data)
         except KeyError as e:
-            raise ValueError("Missing UPPER_L1/LOWER_L1 HDUs in l1 flat file") from e
+            raise ValueError(f"Missing UPPER_{level_suffix}/LOWER_{level_suffix} HDUs in {status} flat file") from e
 
-        frame_name_str = f"{data_type}_l1_frame{0:04d}"
+        frame_name_str = f"{data_type}_{status}_frame{0:04d}"
         single_frame = dct.Frame(frame_name_str)
         single_frame.set_half("upper", upper)
         single_frame.set_half("lower", lower)
         collection.add_frame(single_frame, 0)
 
-    elif status in ('l0', 'l1') and data_type == 'scan':
+    elif status in ('l0', 'l1', 'l2') and data_type == 'scan':
         # Read reduced scan created by save_reduction (l0 or l1): reconstruct CycleSet from HDUs
         collection = dct.CycleSet()
         

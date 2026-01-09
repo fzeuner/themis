@@ -17,12 +17,13 @@ states = ["pQ", "mQ", "pU", "mU", "pV", "mV"]
 # Base directory for rdata/pdata/inversion
 base = "/home/franziskaz/data/themis"
 # Optional overrides (uncomment to use)
-# figures = "/home/<user>/figures/themis/"
+figures = "/home/franziskaz/figures/themis/"
 # inversion = "/home/<user>/data/themis/inversion"
 
 [params]
 # [arcsec] slit width
 slit_width = 0.33
+yshift_calibration_date = "2025-07-05"
 
 [continuum]
 # Wavelength points [nm] for continuum fitting (at least 3 points)

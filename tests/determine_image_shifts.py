@@ -8,7 +8,8 @@ Created on Fri Dec  5 10:46:34 2025
 
 #!/usr/bin/env python3
 """
-Determine image transformation between upper and lower image.
+Determine image transformation in y direction between upper and lower image
+using the target data.
 
 """
 
@@ -36,141 +37,6 @@ from themis.core import themis_data_reduction as tdr
 
 #%%
 
-def plot_alignment_diff(upper_data, lower_data_aligned, 
-                        tvec, angle, scale, config, margin=50):
-    """
-    Plot differences between upper and aligned lower frames.
-    
-    Parameters
-    ----------
-    upper_data : ndarray
-        L0 upper frame
-    lower_data_aligned : ndarray
-        L0 lower frame after alignment
-    corrected_upper : ndarray
-        Corrected upper frame
-    corrected_lower_aligned : ndarray
-        Corrected lower frame after alignment
-    tvec : tuple
-        Translation vector (y, x)
-    angle : float
-        Rotation angle in degrees
-    scale : float
-        Scale factor
-    config : Config
-        Configuration object
-    margin : int
-        Margin for percentile calculation
-    
-    Returns
-    -------
-    fig : Figure
-        Matplotlib figure
-    """
-    from datetime import datetime
-    
-    fig, axes = plt.subplots(1, 1, figsize=(16, 6))
-    fig.suptitle(f'Upper vs Lower Frame Alignment\nTranslation: ({tvec[0]:.2f}, {tvec[1]:.2f}) px, Rotation: {angle:.3f}°, Scale: {scale:.5f}', 
-                 fontsize=14, fontweight='bold')
-    
-    # Left: L0 difference (upper - aligned lower)
-    diff_l0 = upper_data - lower_data_aligned
-    if margin > 0:
-        vmax_l0 = np.percentile(np.abs(diff_l0[margin:-margin, margin:-margin]), 99)
-    else:
-        vmax_l0 = np.percentile(np.abs(diff_l0), 99)
-    
-    ax = axes[0]
-    im = ax.imshow(diff_l0, aspect='auto', cmap='RdBu_r', vmin=-vmax_l0, vmax=vmax_l0)
-    ax.set_title('L0: Upper - Aligned Lower')
-    ax.set_xlabel('Spectral [px]')
-    ax.set_ylabel('Spatial [px]')
-    plt.colorbar(im, ax=ax, label='Difference')
-    
-
-    plt.tight_layout()
-    
-    # Save figure
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    figures_dir = Path(config.directories.figures)
-    figures_dir.mkdir(exist_ok=True, parents=True)
-    #output_plot = figures_dir / f'frame_alignment_diff_{timestamp}.png'
-    #plt.savefig(output_plot, dpi=150, bbox_inches='tight')
-    #print(f"\n✓ Saved alignment difference plot: {output_plot}")
-    
-    plt.show()
-    
-    return fig
-
-
-
-def convolve_slices_with_gaussian(image, sigmas, slice_axis=1,
-                                  mode='reflect', cval=0.0):
-    """Convolve each slice of a 2D image with a 1D Gaussian.
-
-    Parameters
-    ----------
-    image : 2D ndarray
-        Input image.
-    sigmas : 1D array-like
-        Gaussian sigma for each slice along `slice_axis`.
-        Length must equal ``image.shape[slice_axis]``.
-    slice_axis : int, {0,1}
-        Axis that indexes slices. Convolution is performed along the
-        *perpendicular* axis, i.e. along axis 1 if ``slice_axis == 0``
-        and along axis 0 if ``slice_axis == 1``.
-    mode, cval :
-        Passed through to ``scipy.ndimage.gaussian_filter1d``.
-
-    Returns
-    -------
-    convolved : 2D ndarray (float)
-        Image where each slice has been convolved with a Gaussian of
-        the corresponding sigma. If a sigma is non-finite or <= 0, the
-        original slice is copied unchanged.
-    """
-
-    img = np.asarray(image, dtype=float)
-    if img.ndim != 2:
-        raise ValueError("image must be 2D")
-
-    sigmas = np.asarray(sigmas, dtype=float)
-    if sigmas.ndim != 1:
-        raise ValueError("sigmas must be 1D (one value per slice)")
-
-    if slice_axis not in (0, 1):
-        raise ValueError("slice_axis must be 0 or 1")
-
-    n_slices = img.shape[slice_axis]
-    if sigmas.size != n_slices:
-        raise ValueError(
-            f"sigmas length {sigmas.size} does not match number of slices {n_slices}"
-        )
-
-    out = np.empty_like(img, dtype=float)
-
-    if slice_axis == 0:
-        # Slices are rows; convolve along columns (axis=1)
-        for i in range(n_slices):
-            s = sigmas[i]
-            row = img[i, :]
-            if not np.isfinite(s) or s <= 0:
-                out[i, :] = row
-            else:
-                out[i, :] = gaussian_filter1d(row, sigma=s, axis=-1,
-                                              mode=mode, cval=cval)
-    else:
-        # Slices are columns; convolve along rows (axis=0)
-        for j in range(n_slices):
-            s = sigmas[j]
-            col = img[:, j]
-            if not np.isfinite(s) or s <= 0:
-                out[:, j] = col
-            else:
-                out[:, j] = gaussian_filter1d(col, sigma=s, axis=0,
-                                              mode=mode, cval=cval)
-
-    return out
 
 
 
@@ -579,9 +445,9 @@ def reduce_all(config):
 #%%
 
 
-"""Main test function."""
+"""Main function."""
 print("="*70)
-print("Calibration data: determine image shifts, rotation, scale")
+print("Calibration data: determine image y shifts")
 print("="*70)
 
 # Load configuration
@@ -598,28 +464,7 @@ pQ_scan = scan.get_state('pQ')
 upper_scan = pQ_scan.stack_all('upper')
 lower_scan = pQ_scan.stack_all('lower')
     
-    #%%
-# perfect_psf = np.zeros( (25,25) )
-# perfect_psf[12, 12] = 1
-# psf = gaussian_filter(perfect_psf, sigma=2.5)
-# psf/= psf.sum()
-# number_of_iterations = 10
-# deconvolved = richardson_lucy(
-#     upper_scan[0],
-#     psf,
-#     num_iter=number_of_iterations,  # <-- correct name
-#     clip=False,
-# )
-# deconvolved_s= deconvolved*upper_scan[0].mean() / deconvolved.mean()
-# fig, (centers_upper, fwhm, center_coeffs_upper, sigma_coeffs_upper) = plot_gaussian_slice_fits(
-# deconvolved_s,
-# axis=1,        # slices along y, fit along x
-# fit_min=498,
-# fit_max=532,initial_sigma=5, initial_width=10.0,
-#                       initial_amplitude=-8000,
-#                       initial_center=515, initial_offset=8700
-# )
-# plt.show()
+   
     
     
     #%%
@@ -669,82 +514,189 @@ files_fc.auxiliary['yshift_upper'] = shifts_upper_path
 print(f"Saved y-shift auxiliary files for flat_center: {shifts_lower_path.name}, {shifts_upper_path.name}")
 
     #%%
-refocused_lower = convolve_slices_with_gaussian(lower_scan[0], np.sqrt(3.5**2-sigma_lower**2), slice_axis=1,
-                                      mode='reflect', cval=0.0)
-fig, (centers_lower2, fwhm2, center_lower2, sigma_lower2) = plot_gaussian_slice_fits(
-refocused_lower,
-axis=1,        # slices along y, fit along x
-fit_min=498,
-fit_max=532,initial_sigma=5, initial_width=10.0,
-                      initial_amplitude=-8000,
-                      initial_center=515, initial_offset=8700
-)
-plt.show()
     
+    
+    
+    
+    
+    
+    
+ #%%
+     
+    
+#OLD STUFF   
 
-    
-  #  #%%
-refocused_upper = convolve_slices_with_gaussian(upper_scan[0], np.sqrt(3.5**2-sigma_upper**2), slice_axis=1,
-                                      mode='reflect', cval=0.0)
-fig, (centers_upper2, fwhm2, center_upper2, sigma_upper2) = plot_gaussian_slice_fits(
-refocused_upper,
-axis=1,        # slices along y, fit along x
-fit_min=498,
-fit_max=532,initial_sigma=5, initial_width=10.0,
-                      initial_amplitude=-8000,
-                      initial_center=515, initial_offset=8700
-)
-plt.show()
-    
-    #%%
-plt.plot(sigma_lower2, label='convolved sigmas lower')   
-plt.plot(sigma_lower, label='original sigmas lower')
-plt.plot(sigma_upper2, label='convolved sigmas upper')   
-plt.plot(sigma_upper, label='original sigmas upper')  
-plt.legend() 
-    
-#%%
-        # Crop edges to avoid border effects
-margin = 50
-upper_scan_norm = (upper_scan[0] / np.mean(upper_scan[0]))[margin:-margin, margin:-margin]
-lower_scan_norm = (lower_scan[0] / np.mean(lower_scan[0]))[margin:-margin, margin:-margin]
 
-shift_xy, _, _ = phase_cross_correlation(upper_scan_norm, lower_scan_norm, upsample_factor=10) # means 0.1 pixel
 
-shifted_fft = fourier_shift(np.fft.fftn(lower_scan_norm), shift_xy)
-lower_scan_aligned = np.fft.ifftn(shifted_fft).real
+# def convolve_slices_with_gaussian(image, sigmas, slice_axis=1,
+#                                   mode='reflect', cval=0.0):
+#     """Convolve each slice of a 2D image with a 1D Gaussian.
 
-#fig = ird.imreg.imshow(upper_scan_norm, lower_scan_norm, result['timg'], cmap ='plasma_r')
-plt.imshow(upper_scan_norm- lower_scan_aligned)
-#%%
-data_plot = np.array([upper_scan[0],lower_scan[0] ])
-viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
-                   title='target scan', 
-                  state_names=['upper', 'lower'])
-    
-#%%
+#     Parameters
+#     ----------
+#     image : 2D ndarray
+#         Input image.
+#     sigmas : 1D array-like
+#         Gaussian sigma for each slice along `slice_axis`.
+#         Length must equal ``image.shape[slice_axis]``.
+#     slice_axis : int, {0,1}
+#         Axis that indexes slices. Convolution is performed along the
+#         *perpendicular* axis, i.e. along axis 1 if ``slice_axis == 0``
+#         and along axis 0 if ``slice_axis == 1``.
+#     mode, cval :
+#         Passed through to ``scipy.ndimage.gaussian_filter1d``.
 
-    
-# result = ird.similarity(
-#     upper_scan_norm, 
-#     lower_scan_norm, # preshifted for better results
-#     numiter=5,
-#     constraints={
-#     'tx': (-1,1),      # x translation bounds
-#     'ty': (-2, 2),      # y translation bounds  
-#     'angle': (-0.5,0.5),     # rotation bounds in degrees
-#     'scale': (0.9, 1.1),  # scale bounds
-#     }
+#     Returns
+#     -------
+#     convolved : 2D ndarray (float)
+#         Image where each slice has been convolved with a Gaussian of
+#         the corresponding sigma. If a sigma is non-finite or <= 0, the
+#         original slice is copied unchanged.
+#     """
+
+#     img = np.asarray(image, dtype=float)
+#     if img.ndim != 2:
+#         raise ValueError("image must be 2D")
+
+#     sigmas = np.asarray(sigmas, dtype=float)
+#     if sigmas.ndim != 1:
+#         raise ValueError("sigmas must be 1D (one value per slice)")
+
+#     if slice_axis not in (0, 1):
+#         raise ValueError("slice_axis must be 0 or 1")
+
+#     n_slices = img.shape[slice_axis]
+#     if sigmas.size != n_slices:
+#         raise ValueError(
+#             f"sigmas length {sigmas.size} does not match number of slices {n_slices}"
+#         )
+
+#     out = np.empty_like(img, dtype=float)
+
+#     if slice_axis == 0:
+#         # Slices are rows; convolve along columns (axis=1)
+#         for i in range(n_slices):
+#             s = sigmas[i]
+#             row = img[i, :]
+#             if not np.isfinite(s) or s <= 0:
+#                 out[i, :] = row
+#             else:
+#                 out[i, :] = gaussian_filter1d(row, sigma=s, axis=-1,
+#                                               mode=mode, cval=cval)
+#     else:
+#         # Slices are columns; convolve along rows (axis=0)
+#         for j in range(n_slices):
+#             s = sigmas[j]
+#             col = img[:, j]
+#             if not np.isfinite(s) or s <= 0:
+#                 out[:, j] = col
+#             else:
+#                 out[:, j] = gaussian_filter1d(col, sigma=s, axis=0,
+#                                               mode=mode, cval=cval)
+
+#     return out
+
+# perfect_psf = np.zeros( (25,25) )
+# perfect_psf[12, 12] = 1
+# psf = gaussian_filter(perfect_psf, sigma=2.5)
+# psf/= psf.sum()
+# number_of_iterations = 10
+# deconvolved = richardson_lucy(
+#     upper_scan[0],
+#     psf,
+#     num_iter=number_of_iterations,  # <-- correct name
+#     clip=False,
 # )
-lower_scan_aligned = scipy_shift(lower_scan_norm, (0, -1), order=3, mode='constant')
-# lower_scan_aligned_rotated = ird.transform_img(lower_scan_aligned,tvec=[0,0], angle=-0.5, scale=1)
-# upper_scan_rotated = ird.transform_img(lower_scan_norm,tvec=[0,0], angle=-0.3, scale=1)
-# print(f"   ✓ Shift: ({result['tvec'][0]:.3f}, {result['tvec'][1]:.3f}) px")
-# print(f"     Rotation: {result['angle']:.4f}°")
-# print(f"     Scale: {result['scale']:.6f}")
+# deconvolved_s= deconvolved*upper_scan[0].mean() / deconvolved.mean()
+# fig, (centers_upper, fwhm, center_coeffs_upper, sigma_coeffs_upper) = plot_gaussian_slice_fits(
+# deconvolved_s,
+# axis=1,        # slices along y, fit along x
+# fit_min=498,
+# fit_max=532,initial_sigma=5, initial_width=10.0,
+#                       initial_amplitude=-8000,
+#                       initial_center=515, initial_offset=8700
+# )
+# plt.show()    
+    
+    
+    
+ 
+# refocused_lower = convolve_slices_with_gaussian(lower_scan[0], np.sqrt(3.5**2-sigma_lower**2), slice_axis=1,
+#                                       mode='reflect', cval=0.0)
+# fig, (centers_lower2, fwhm2, center_lower2, sigma_lower2) = plot_gaussian_slice_fits(
+# refocused_lower,
+# axis=1,        # slices along y, fit along x
+# fit_min=498,
+# fit_max=532,initial_sigma=5, initial_width=10.0,
+#                       initial_amplitude=-8000,
+#                       initial_center=515, initial_offset=8700
+# )
+# plt.show()
+    
+
+    
+#   #  #%%
+# refocused_upper = convolve_slices_with_gaussian(upper_scan[0], np.sqrt(3.5**2-sigma_upper**2), slice_axis=1,
+#                                       mode='reflect', cval=0.0)
+# fig, (centers_upper2, fwhm2, center_upper2, sigma_upper2) = plot_gaussian_slice_fits(
+# refocused_upper,
+# axis=1,        # slices along y, fit along x
+# fit_min=498,
+# fit_max=532,initial_sigma=5, initial_width=10.0,
+#                       initial_amplitude=-8000,
+#                       initial_center=515, initial_offset=8700
+# )
+# plt.show()
+    
+#     #%%
+# plt.plot(sigma_lower2, label='convolved sigmas lower')   
+# plt.plot(sigma_lower, label='original sigmas lower')
+# plt.plot(sigma_upper2, label='convolved sigmas upper')   
+# plt.plot(sigma_upper, label='original sigmas upper')  
+# plt.legend() 
+    
+# #%%
+#         # Crop edges to avoid border effects
+# margin = 50
+# upper_scan_norm = (upper_scan[0] / np.mean(upper_scan[0]))[margin:-margin, margin:-margin]
+# lower_scan_norm = (lower_scan[0] / np.mean(lower_scan[0]))[margin:-margin, margin:-margin]
+
+# shift_xy, _, _ = phase_cross_correlation(upper_scan_norm, lower_scan_norm, upsample_factor=10) # means 0.1 pixel
+
+# shifted_fft = fourier_shift(np.fft.fftn(lower_scan_norm), shift_xy)
+# lower_scan_aligned = np.fft.ifftn(shifted_fft).real
+
+# #fig = ird.imreg.imshow(upper_scan_norm, lower_scan_norm, result['timg'], cmap ='plasma_r')
+# plt.imshow(upper_scan_norm- lower_scan_aligned)
+# #%%
+# data_plot = np.array([upper_scan[0],lower_scan[0] ])
+# viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
+#                    title='target scan', 
+#                   state_names=['upper', 'lower'])
+    
+# #%%
+
+    
+# # result = ird.similarity(
+# #     upper_scan_norm, 
+# #     lower_scan_norm, # preshifted for better results
+# #     numiter=5,
+# #     constraints={
+# #     'tx': (-1,1),      # x translation bounds
+# #     'ty': (-2, 2),      # y translation bounds  
+# #     'angle': (-0.5,0.5),     # rotation bounds in degrees
+# #     'scale': (0.9, 1.1),  # scale bounds
+# #     }
+# # )
+# lower_scan_aligned = scipy_shift(lower_scan_norm, (0, -1), order=3, mode='constant')
+# # lower_scan_aligned_rotated = ird.transform_img(lower_scan_aligned,tvec=[0,0], angle=-0.5, scale=1)
+# # upper_scan_rotated = ird.transform_img(lower_scan_norm,tvec=[0,0], angle=-0.3, scale=1)
+# # print(f"   ✓ Shift: ({result['tvec'][0]:.3f}, {result['tvec'][1]:.3f}) px")
+# # print(f"     Rotation: {result['angle']:.4f}°")
+# # print(f"     Scale: {result['scale']:.6f}")
    
 
-viewer = display_data( np.array([upper_scan_norm,lower_scan_aligned_rotated, upper_scan_norm-lower_scan_aligned_rotated]), 'states',  'spatial', 'spectral',
-                   title='target scan', 
-                  state_names=['upper', 'lower aligned', 'upper-lower aligned'])
+# viewer = display_data( np.array([upper_scan_norm,lower_scan_aligned_rotated, upper_scan_norm-lower_scan_aligned_rotated]), 'states',  'spatial', 'spectral',
+#                    title='target scan', 
+#                   state_names=['upper', 'lower aligned', 'upper-lower aligned'])
     

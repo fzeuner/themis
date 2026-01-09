@@ -33,7 +33,7 @@ class Frame:
     def get_by_state(self, pol_state: str):
         for pos, half in self.halves.items():
             if half.pol_state == pol_state:
-                return half.data
+                return np.array(half.data)
         return None  # not found
 
     # Convenience: dict-like access, e.g. frame['upper'] or frame['name']

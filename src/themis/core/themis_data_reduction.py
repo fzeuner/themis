@@ -16,6 +16,9 @@ from pathlib import Path
 import shutil
 import re
 from astropy.io import fits
+from scipy.ndimage import shift as scipy_shift
+from tqdm import tqdm  
+
 
 class ReductionLevel:
     def __init__(self, name, file_ext, func, per_type_meta=None):
@@ -354,7 +357,11 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False, auto_reduce_d
         reduced_frames = dct.CycleSet()
         
         # Iterate through all frames in the CycleSet and subtract dark
-        for key, frame in data.items():
+        print('Subtracting dark from all scan frames (raw -> L0)...')
+        items_iter = data.items()
+        items_iter = tqdm(items_iter, desc='RAW→L0 scan')
+
+        for key, frame in items_iter:
             # key is (frame_state, slit_idx, map_idx)
             frame_name_str = f"{data_type}_l0_{frame.name}"
             single_frame = dct.Frame(frame_name_str)
@@ -547,7 +554,11 @@ def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_da
         reduced_frames = dct.CycleSet()
 
         print('Applying dust flat correction to all scan frames (L1 = L0 / dust_flat)...')
-        for key, frame in l0_scan.items():
+
+        items_iter = l0_scan.items()
+        items_iter = tqdm(items_iter, desc='L0→L1 scan')
+
+        for key, frame in items_iter:
             # key is (frame_state, slit_idx, map_idx)
             frame_name_str = f"scan_l1_{frame.name}"
             single_frame = _dust_correct_frame(frame, frame_name_str, dust_flats, propagate_pol_state=True)
@@ -698,9 +709,206 @@ def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_da
         extra_keywords=extra_keywords,
     )
 
-    print(f'✓ L1 {target_data_type} file saved to: {out_path}')
+    print(f'✓ L1 {target_data_type} file saved')
     return out_path
 
+
+def _load_yshift_arrays(config):
+    """Load y-shift arrays from auxiliary files.
+    
+    Returns
+    -------
+    dict or None
+        Dictionary with 'upper' and 'lower' keys containing the y-shift arrays,
+        or None if files are not found.
+    """
+    yshifts = {}
+    
+    # Y-shifts are stored in flat_center auxiliary files
+    files_fc = config.dataset.get('flat_center', {}).get('files')
+    if files_fc is None:
+        print('  Error: flat_center files not found in config')
+        return None
+    
+    aux = getattr(files_fc, 'auxiliary', {})
+    
+    for frame in ['upper', 'lower']:
+        key = f'yshift_{frame}'
+        path = aux.get(key)
+        if path is None or not Path(path).exists():
+            print(f'  Error: y-shift auxiliary file not found for {frame}')
+            print(f'    Expected key: {key}')
+            print(f'    Run determine_image_shifts.py first to generate y-shift files.')
+            return None
+        yshifts[frame] = np.load(path)
+        print(f'  Loaded y-shift for {frame}: {Path(path).name} (shape: {yshifts[frame].shape})')
+    
+    return yshifts
+
+
+def _apply_yshift_to_half(data_2d, yshift_array):
+    """Apply per-column y-shifts to a 2D image.
+    
+    Parameters
+    ----------
+    data_2d : 2D ndarray
+        Input image (ny, nx).
+    yshift_array : 1D ndarray
+        Y-shift values for each column (length must equal nx).
+    
+    Returns
+    -------
+    shifted : 2D ndarray
+        Image with per-column y-shifts applied.
+    """
+    ny, nx = data_2d.shape
+    if yshift_array.size != nx:
+        raise ValueError(
+            f"yshift_array length {yshift_array.size} does not match image width {nx}"
+        )
+    
+    shifted = np.empty_like(data_2d, dtype=float)
+    
+    for j in range(nx):
+        col = data_2d[:, j].astype(float)
+        dy = yshift_array[j]
+        if np.isfinite(dy) and dy != 0:
+            # Shift along y (axis=0), negative because we want to correct the shift
+            shifted[:, j] = scipy_shift(col, -dy, order=3, mode='constant', cval=np.nan)
+        else:
+            shifted[:, j] = col
+    
+    return shifted
+
+
+def reduce_l1_to_l2(config, data_type=None, return_reduced=False):
+    """L1 → L2 reduction: apply y-shifts from calibration target analysis.
+    
+    For scan, flat, and flat_center data types, each frame (upper/lower) is
+    shifted using the y-shift arrays determined from the calibration target
+    and saved as auxiliary numpy files.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object with dataset and file paths.
+    data_type : str
+        One of 'scan', 'flat', 'flat_center'.
+    return_reduced : bool
+        If True, return the reduced frames instead of saving to disk.
+    
+    Returns
+    -------
+    Path or FramesSet/CycleSet or None
+        Path to saved L2 file, or reduced frames if return_reduced=True,
+        or None on failure.
+    """
+    if data_type is None:
+        print('No processing - provide a specific data type.')
+        return None
+    
+    if data_type not in ['scan', 'flat', 'flat_center']:
+        print(f'L2 reduction not defined for data_type: {data_type}')
+        return None
+    
+    print(f"\n{'='*70}")
+    print(f'L1 → L2 REDUCTION FOR {data_type.upper()} (Y-SHIFT CORRECTION)')
+    print(f"{'='*70}")
+    
+    # Load y-shift arrays from auxiliary files
+    print('\nLoading y-shift arrays from auxiliary files...')
+    yshifts = _load_yshift_arrays(config)
+    if yshifts is None:
+        return None
+    
+    # Load L1 data
+    print(f'\nLoading L1 {data_type} data...')
+    l1_data, header = tio.read_any_file(config, data_type, status='l1', verbose=False)
+    
+    reduced_frames = None
+    extra_keywords = {}
+    
+    if data_type == 'scan':
+        if not isinstance(l1_data, dct.CycleSet):
+            print('  Error: Expected L1 scan data to be a CycleSet')
+            return None
+        
+        reduced_frames = dct.CycleSet()
+        
+        print('Applying y-shift correction to all scan frames...')
+
+        items_iter = l1_data.items()
+        
+        items_iter = tqdm(items_iter, desc='L1→L2 scan')
+
+        for key, frame in items_iter:
+            frame_name_str = f"scan_l2_{frame.name}"
+            dest = dct.Frame(frame_name_str)
+            
+            for half in ['upper', 'lower']:
+                half_obj = frame.get_half(half)
+                data_l1 = half_obj.data.astype('float32')
+                data_l2 = _apply_yshift_to_half(data_l1, yshifts[half])
+                
+                if half_obj.pol_state:
+                    dest.set_half(half, data_l2.astype('float32'), half_obj.pol_state)
+                else:
+                    dest.set_half(half, data_l2.astype('float32'))
+            
+            reduced_frames.add_frame(dest, key)
+        
+        extra_keywords = {
+            'YSHIFTCR': ('TRUE', 'Y-shift correction applied from calibration target analysis'),
+        }
+    
+    elif data_type in ['flat', 'flat_center']:
+        if not isinstance(l1_data, dct.FramesSet):
+            print(f'  Error: Expected L1 {data_type} data to be a FramesSet')
+            return None
+        
+        l1_frame = l1_data.get(0)
+        if l1_frame is None:
+            print(f'  Error: No L1 frame found for {data_type}')
+            return None
+        
+        reduced_frames = dct.FramesSet()
+        frame_name_str = f"{data_type}_l2_frame{0:04d}"
+        dest = dct.Frame(frame_name_str)
+        
+        print(f'Applying y-shift correction to {data_type}...')
+        for half in ['upper', 'lower']:
+            half_obj = l1_frame.get_half(half)
+            data_l1 = half_obj.data.astype('float32')
+            data_l2 = _apply_yshift_to_half(data_l1, yshifts[half])
+            dest.set_half(half, data_l2.astype('float32'))
+        
+        reduced_frames.add_frame(dest, 0)
+        
+        extra_keywords = {
+            'YSHIFTCR': ('TRUE', 'Y-shift correction applied from calibration target analysis'),
+        }
+    
+    # Finalize: either return or save
+    if reduced_frames is None:
+        print(f'Unknown data_type: {data_type}')
+        return None
+    
+    if return_reduced:
+        return reduced_frames
+    
+    out_path = tio.save_reduction(
+        config,
+        data_type=data_type,
+        level='l2',
+        frames=reduced_frames,
+        source_header=header,
+        verbose=True,
+        overwrite=True,
+        extra_keywords=extra_keywords,
+    )
+    
+    print(f'✓ L2 {data_type} file saved')
+    return out_path
 
 
 reduction_levels = ReductionRegistry()
@@ -733,5 +941,15 @@ reduction_levels.add(ReductionLevel("l1", "_l1.fits", reduce_l0_to_l1, {
     "flat": ("Dust flat correction using flat_center dust flats. "
               "Each L0 scan frame (upper/lower) is divided by the corresponding flat_center dust flat."),
     "flat_center": "Flat-field correction with spectroflat generated dust_flat. Saves L1 FITS with dust corrected frames and auxilary file with dust flat."
+}))
+
+reduction_levels.add(ReductionLevel("l2", "_l2.fits", reduce_l1_to_l2, {
+    "dark": "Nothing.",
+    "scan": ("Y-shift correction using calibration target analysis. "
+             "Each L1 scan frame (upper/lower) is shifted per-column using y-shift arrays from auxiliary files."),
+    "flat": ("Y-shift correction using calibration target analysis. "
+             "Each L1 flat frame (upper/lower) is shifted per-column using y-shift arrays from auxiliary files."),
+    "flat_center": ("Y-shift correction using calibration target analysis. "
+                    "Each L1 flat_center frame (upper/lower) is shifted per-column using y-shift arrays from auxiliary files.")
 }))
 

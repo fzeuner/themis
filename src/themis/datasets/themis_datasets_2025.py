@@ -165,7 +165,7 @@ class DirectoryPaths:
         # Define paths
         self.raw = self.base / "rdata" / date
         self.reduced = self.base / "pdata" / date
-        self.figures = Path(figures) if figures else Path("/home/franziskaz/figures/themis/")
+        self.figures = Path(figures) if figures else (self.base / "figures")
         self.inversion = Path(inversion) if inversion else (self.base / "inversion")
 
         # Automatically create directories if they don't exist
@@ -345,6 +345,7 @@ class Config:
     slit_width: float
     polarization_states: list
     config_file: Optional[str] = None
+    yshift_calibration_date: Optional[str] = None
 
     def __repr__(self):
         """Human-readable representation of the configuration.
@@ -419,7 +420,8 @@ class Config:
 
 
 def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types: DataTypeRegistry,
-                    reduction_levels: tdr.ReductionRegistry, cam, line: str) -> FileSet:
+                    reduction_levels: tdr.ReductionRegistry, cam, line: str,
+                    yshift_calibration_date: Optional[str] = None) -> FileSet:
     file_set = FileSet()
     data_t = dataset_entry['data_type']
     seq = dataset_entry['sequence']
@@ -511,6 +513,21 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
             if dust_flat_file.exists():
                 file_set.auxiliary[f'dust_flat_{frame}'] = dust_flat_file
 
+    # Discover y-shift auxiliary files (from calibration target analysis)
+    # These are stored without sequence number:
+    #   {line}_calibration_target_yshift_{frame}.npy
+    # and may live in a different date's pdata directory if a master
+    # calibration was used.
+    calib_date = yshift_calibration_date or directories.date
+    calib_reduced = directories.base / "pdata" / calib_date
+
+    for frame in ['upper', 'lower']:
+        yshift_pattern = f"{line}_calibration_target_yshift_{frame}.npy"
+        yshift_file = calib_reduced / yshift_pattern
+        
+        if yshift_file.exists():
+            file_set.auxiliary[f'yshift_{frame}'] = yshift_file
+
     return file_set
 
 
@@ -545,6 +562,7 @@ def get_config(auto_discover_files: bool = True,
     states = list(merged['dataset']['states'])
 
     slit_width = float(merged['params']['slit_width'])
+    yshift_calibration_date = merged['params'].get('yshift_calibration_date', None)
 
     base = merged['paths'].get('base', DEFAULTS['paths']['base'])
     figures = merged['paths'].get('figures', None)
@@ -567,12 +585,21 @@ def get_config(auto_discover_files: bool = True,
         slit_width=slit_width,
         polarization_states=states,
         config_file=resolved_config_path,
+        yshift_calibration_date=yshift_calibration_date,
     )
 
     if auto_discover_files:
         for key in file_types:
             entry = cfg.dataset[key]
-            entry['files'] = _build_file_set(cfg.directories, entry, cfg.data_types, cfg.reduction_levels, cfg.cam, cfg.dataset['line'])
+            entry['files'] = _build_file_set(
+                cfg.directories,
+                entry,
+                cfg.data_types,
+                cfg.reduction_levels,
+                cfg.cam,
+                cfg.dataset['line'],
+                yshift_calibration_date=cfg.yshift_calibration_date,
+            )
         # Validate basic compatibility between files (easy to extend later)
         validate_config(cfg)
 
