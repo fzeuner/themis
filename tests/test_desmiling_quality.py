@@ -10,119 +10,7 @@ from spectroflat import OffsetMap
 from spectroflat.smile import SmileInterpolator
 from themis.datasets.themis_datasets_2025 import get_config
 from themis.core import themis_io as tio
-
-
-def apply_desmiling_spectroflat(image, offset_map_array, mod_state=0):
-    """
-    Apply desmiling row-by-row using spectroflat's SmileInterpolator.desmile_row.
-    This matches how atlas-fit's amend_spectroflat applies corrections.
-    
-    Parameters
-    ----------
-    image : np.ndarray
-        2D image [spatial, wavelength]
-    offset_map_array : np.ndarray
-        2D offset map array [spatial, wavelength] for this specific state
-    mod_state : int
-        Modulation state index (0 for upper, 1 for lower) - for reference only
-    
-    Returns
-    -------
-    np.ndarray
-        Desmiled image [spatial, wavelength]
-    """
-    from spectroflat.smile import SmileInterpolator
-    from spectroflat.utils.processing import MP
-    
-    ny, nx = image.shape
-    rows = np.arange(ny)
-    xes = np.arange(nx)
-    
-    # Apply desmiling row by row, same as atlas-fit does
-    # Arguments: (row_index, x_coordinates, offsets_for_this_row, data_for_this_row)
-    arguments = [(r, xes, offset_map_array[r], image[r]) for r in rows]
-    res = dict(MP.simultaneous(SmileInterpolator.desmile_row, arguments))
-    
-    # Reconstruct the desmiled image from row results
-    desmiled = np.array([res[row] for row in rows])
-    
-    return desmiled
-
-
-def apply_desmiling(image, offset_map_2d, offset_map_header=None):
-    """
-    Apply desmiling to an image using offset map.
-    
-    Parameters
-    ----------
-    image : np.ndarray
-        2D image [spatial, wavelength]
-    offset_map_2d : np.ndarray
-        2D offset map [spatial, wavelength] for this state
-    offset_map_header : dict, optional
-        FITS header with wavelength calibration info.
-        If provided and contains wavelength info, will properly handle
-        wavelength-calibrated offset maps.
-    
-    Returns
-    -------
-    np.ndarray
-        Desmiled image [spatial, wavelength]
-    """
-    ny, nx = image.shape
-    desmiled = np.empty_like(image)
-    
-    # Check if offset map has wavelength calibration
-    has_wl_cal = (offset_map_header is not None and 
-                  'MIN_WL_NM' in offset_map_header and 
-                  'MAX_WL_NM' in offset_map_header)
-    
-    if has_wl_cal:
-        # Wavelength-calibrated offset map: needs interpolation
-        # The offset map is indexed by wavelength, not pixel
-        min_wl = offset_map_header['MIN_WL_NM']
-        max_wl = offset_map_header['MAX_WL_NM']
-        
-        # Assume image has same wavelength range
-        # Create wavelength axes for both image and offset map
-        image_wl = np.linspace(min_wl, max_wl, nx)
-        offset_map_wl = np.linspace(min_wl, max_wl, offset_map_2d.shape[1])
-        
-        # Interpolate offset map to image grid
-        for y in range(ny):
-            # Interpolate offsets from offset_map wavelength grid to image wavelength grid
-            offsets_at_image_wl = np.interp(image_wl, offset_map_wl, offset_map_2d[y])
-            
-            # Now apply the offset correction
-            x_indices = np.arange(nx)
-            shifted_x = x_indices + offsets_at_image_wl
-            
-            desmiled[y] = np.interp(
-                x_indices,
-                shifted_x,
-                image[y],
-                left=np.nan,
-                right=np.nan
-            )
-    else:
-        # Original pixel-based offset map
-        x_indices = np.arange(nx)
-        
-        for y in range(ny):
-            # The offset map tells us how much each pixel is shifted
-            # To desmile: interpolate from shifted coordinates back to regular grid
-            shifted_x = x_indices + offset_map_2d[y]
-            
-            # Interpolate, handling edge cases
-            desmiled[y] = np.interp(
-                x_indices,              # target regular grid
-                shifted_x,              # source distorted coordinates
-                image[y],               # source values
-                left=np.nan,
-                right=np.nan
-            )
-    
-    return desmiled
+from themis.core.themis_data_reduction import _apply_desmiling as apply_desmiling
 
 
 def test_desmiling_quality(config_path='configs/sample_dataset_sr_2025-07-07.toml'):
@@ -271,12 +159,12 @@ def test_desmiling_quality(config_path='configs/sample_dataset_sr_2025-07-07.tom
         # 2. Then apply small delta corrections to the already-desmiled data
         print("\nApplying corrections (outdated + delta on desmiled data)...")
         print("  Step 1: Desmile with OUTDATED offset map...")
-        upper_desmiled_outdated_first = apply_desmiling_spectroflat(upper_original, offset_upper_outdated, mod_state=0)
-        lower_desmiled_outdated_first = apply_desmiling_spectroflat(lower_original, offset_lower_outdated, mod_state=1)
+        upper_desmiled_outdated_first = apply_desmiling(upper_original, offset_upper_outdated, mod_state=0)
+        lower_desmiled_outdated_first = apply_desmiling(lower_original, offset_lower_outdated, mod_state=1)
         
         print("  Step 2: Apply small DELTA corrections to desmiled data...")
-        upper_desmiled_amended = apply_desmiling_spectroflat(upper_desmiled_outdated_first, delta_upper, mod_state=0)
-        lower_desmiled_amended = apply_desmiling_spectroflat(lower_desmiled_outdated_first, delta_lower, mod_state=1)
+        upper_desmiled_amended = apply_desmiling(upper_desmiled_outdated_first, delta_upper, mod_state=0)
+        lower_desmiled_amended = apply_desmiling(lower_desmiled_outdated_first, delta_lower, mod_state=1)
         diff_after_amended = upper_desmiled_amended - lower_desmiled_amended
         
         rms_after_amended = np.sqrt(np.nanmean(diff_after_amended**2))
@@ -308,8 +196,8 @@ def test_desmiling_quality(config_path='configs/sample_dataset_sr_2025-07-07.tom
         
         print("Applying desmiling with OUTDATED offset map (row-by-row, like atlas-fit)...")
         print(f"  Note: Outdated map has {outdated_full.shape[0]} states, using states 0 and 1")
-        upper_desmiled_outdated = apply_desmiling_spectroflat(upper_original, offset_upper_outdated, mod_state=0)
-        lower_desmiled_outdated = apply_desmiling_spectroflat(lower_original, offset_lower_outdated, mod_state=1)
+        upper_desmiled_outdated = apply_desmiling(upper_original, offset_upper_outdated, mod_state=0)
+        lower_desmiled_outdated = apply_desmiling(lower_original, offset_lower_outdated, mod_state=1)
         diff_after_outdated = upper_desmiled_outdated - lower_desmiled_outdated
         
         rms_after_outdated = np.sqrt(np.nanmean(diff_after_outdated**2))

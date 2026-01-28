@@ -157,6 +157,18 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
         hdus.append(fits.ImageHDU(upper, name='UPPER_L2'))
         hdus.append(fits.ImageHDU(lower, name='LOWER_L2'))
 
+    elif level == 'l3' and data_type in ('flat', 'flat_center'):
+        # L3 products for flats: same data as L2, but with refined calibration products
+        avg = frames.get(0)
+
+        if avg is None:
+            raise ValueError("Expected l3 frames to contain index 0")
+
+        upper = avg.get_half('upper').data.astype('float32', copy=False)
+        lower = avg.get_half('lower').data.astype('float32', copy=False)
+        hdus.append(fits.ImageHDU(upper, name='UPPER_L3'))
+        hdus.append(fits.ImageHDU(lower, name='LOWER_L3'))
+
     elif data_type == 'scan' and level in ('l0', 'l1', 'l2'):
         # Expect CycleSet with keys (frame_state, slit_idx, map_idx)
         # Save all frames as individual HDUs; l0, l1, and l2 share the same layout
@@ -398,14 +410,14 @@ def read_any_file(config, data_type, status='raw', verbose=False):
         single_frame.set_half("lower", lower)
         collection.add_frame(single_frame, 0)
 
-    elif status in ('l1', 'l2') and data_type in ('flat', 'flat_center'):
-        # Read reduced L1/L2 flat/flat_center created by save_reduction
-        # L1: dust-corrected, L2: y-shift corrected
+    elif status in ('l1', 'l2', 'l3') and data_type in ('flat', 'flat_center'):
+        # Read reduced L1/L2/L3 flat/flat_center created by save_reduction
+        # L1: dust-corrected, L2: y-shift corrected, L3: refined calibration
         collection = dct.FramesSet()
 
-        # Find expected HDUs by name (UPPER_L1/LOWER_L1 or UPPER_L2/LOWER_L2)
+        # Find expected HDUs by name (UPPER_L1/LOWER_L1 or UPPER_L2/LOWER_L2 or UPPER_L3/LOWER_L3)
         hdu_names = {h.name.upper(): idx for idx, h in enumerate(hdu)}
-        level_suffix = status.upper()  # 'L1' or 'L2'
+        level_suffix = status.upper()  # 'L1' or 'L2' or 'L3'
 
         try:
             upper = np.array(hdu[hdu_names[f'UPPER_{level_suffix}']].data)
