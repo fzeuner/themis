@@ -17,8 +17,13 @@ import shutil
 import re
 from astropy.io import fits
 from scipy.ndimage import shift as scipy_shift
-from tqdm import tqdm  
+from scipy.ndimage import map_coordinates
 
+try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(it, **kwargs):
+        return it
 
 class ReductionLevel:
     def __init__(self, name, file_ext, func, per_type_meta=None):
@@ -774,11 +779,44 @@ def _apply_yshift_to_half(data_2d, yshift_array):
         dy = yshift_array[j]
         if np.isfinite(dy) and dy != 0:
             # Shift along y (axis=0), negative because we want to correct the shift
-            shifted[:, j] = scipy_shift(col, -dy, order=3, mode='constant', cval=np.nan)
+            # NOTE: Using cval=np.nan with spline interpolation (order>1) can
+            # spread NaNs through the entire output column due to spline
+            # prefiltering. Use a NaN-safe boundary mode instead.
+            shifted[:, j] = scipy_shift(col, -dy, order=1, mode='nearest')
         else:
             shifted[:, j] = col
     
     return shifted
+
+
+def _apply_yshift_map_to_half(data_2d, yshift_map):
+    yshift_map = np.asarray(yshift_map, dtype=float)
+    if yshift_map.shape != data_2d.shape:
+        raise ValueError(f"yshift_map shape {yshift_map.shape} does not match image shape {data_2d.shape}")
+
+    ny, nx = data_2d.shape
+    yy, xx = np.meshgrid(np.arange(ny, dtype=float), np.arange(nx, dtype=float), indexing='ij')
+
+    # Match the sign convention of _apply_yshift_to_half:
+    # scipy_shift(col, -dy) implies output[y] = input[y + dy].
+    coords = [yy + yshift_map, xx]
+
+    shifted = map_coordinates(
+        data_2d.astype(float),
+        coords,
+        order=1,
+        mode='nearest',
+    )
+    return shifted
+
+
+def _apply_yshift_correction_to_half(data_2d, yshift):
+    yshift = np.asarray(yshift)
+    if yshift.ndim == 1:
+        return _apply_yshift_to_half(data_2d, yshift)
+    if yshift.ndim == 2:
+        return _apply_yshift_map_to_half(data_2d, yshift)
+    raise ValueError(f"Unsupported yshift ndim={yshift.ndim}; expected 1D (nx,) or 2D (ny,nx).")
 
 
 def reduce_l1_to_l2(config, data_type=None, return_reduced=False):
@@ -848,7 +886,7 @@ def reduce_l1_to_l2(config, data_type=None, return_reduced=False):
             for half in ['upper', 'lower']:
                 half_obj = frame.get_half(half)
                 data_l1 = half_obj.data.astype('float32')
-                data_l2 = _apply_yshift_to_half(data_l1, yshifts[half])
+                data_l2 = _apply_yshift_correction_to_half(data_l1, yshifts[half])
                 
                 if half_obj.pol_state:
                     dest.set_half(half, data_l2.astype('float32'), half_obj.pol_state)
@@ -879,7 +917,7 @@ def reduce_l1_to_l2(config, data_type=None, return_reduced=False):
         for half in ['upper', 'lower']:
             half_obj = l1_frame.get_half(half)
             data_l1 = half_obj.data.astype('float32')
-            data_l2 = _apply_yshift_to_half(data_l1, yshifts[half])
+            data_l2 = _apply_yshift_correction_to_half(data_l1, yshifts[half])
             dest.set_half(half, data_l2.astype('float32'))
         
         reduced_frames.add_frame(dest, 0)

@@ -40,9 +40,9 @@ if __name__ == '__main__':
     
     lv2 = tdr.reduction_levels["l2"]
     
-    result = lv2.reduce(config, data_type='flat_center', return_reduced = False)
-    result = lv2.reduce(config, data_type='flat', return_reduced = False)
-    result = lv2.reduce(config, data_type='scan', return_reduced = False)
+    # result = lv2.reduce(config, data_type='flat_center', return_reduced = False)
+    # result = lv2.reduce(config, data_type='flat', return_reduced = False)
+    # result = lv2.reduce(config, data_type='scan', return_reduced = False)
 #%%    
     data_old, header = tio.read_any_file(config, 'flat_center', verbose=False, status='l1')
     data_plot_old = np.array([data_old.get(0).get_half('upper').data,data_old.get(0).get_half('lower').data ])
@@ -51,35 +51,38 @@ if __name__ == '__main__':
     scan, header = tio.read_any_file(config, 'scan', verbose=False, status='l2')
     scan_old, header = tio.read_any_file(config, 'scan', verbose=False, status='l1')
     
-    data_plot = np.array([np.array((scan.get_state('pQ').stack_all('upper')[0]).data)-
-                         np.array((scan.get_state('pQ').stack_all('lower')[0]).data),
-                         np.array((scan_old.get_state('pQ').stack_all('upper')[0]).data)-
-                         np.array((scan_old.get_state('pQ').stack_all('lower')[0]).data)])
+    data_plot = np.array([np.array((scan.get_state('pU').stack_all('upper')[0]).data)-
+                         np.array((scan.get_state('pU').stack_all('lower')[0]).data),
+                         np.array((scan_old.get_state('pU').stack_all('upper')[0]).data)-
+                         np.array((scan_old.get_state('pU').stack_all('lower')[0]).data)])
     
     viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
                        title='scan', 
                        state_names=['y shifted',
                                     'l1'])
-    
-#%%
-# test y overlap in scan
+ #%%
 
-    data, header = tio.read_any_file(config, 'scan', verbose=False, status='l2')
-    data_old, header = tio.read_any_file(config, 'scan', verbose=False, status='l1')
+    scan, header = tio.read_any_file(config, 'scan', verbose=False, status='l2')
+    state='U'
+    I = 0.25*(np.array((scan.get_state('p'+state).stack_all('upper'))[0])+
+            np.array((scan.get_state('m'+state).stack_all('upper'))[0])+
+            np.array((scan.get_state('m'+state).stack_all('lower'))[0])+
+            np.array((scan.get_state('p'+state).stack_all('lower')[0])))
+    Q = 100*(np.array((scan.get_state('p'+state).stack_all('upper')[0]))/np.array((scan.get_state('m'+state).stack_all('upper')[0]))*
+           np.array((scan.get_state('m'+state).stack_all('lower')[0]))/np.array((scan.get_state('p'+state).stack_all('lower')[0]))-1)
     
-    data_plot = np.array([data.get(0).get_half('upper').data,data.get(0).get_half('lower').data,
-                          data_old.get(0).get_half('upper').data,data_old.get(0).get_half('lower').data])
-  
-    l1, header = tio.read_any_file(config, 'flat', verbose=False, status='l1')
+    # Q = 100*(np.array((scan.get_state('p'+state).stack_all('upper')[0]))-np.array((scan.get_state('m'+state).stack_all('upper')[0]))+
+    #         -np.array((scan.get_state('m'+state).stack_all('lower')[0]))+np.array((scan.get_state('p'+state).stack_all('lower')[0])))
+    data_plot = np.array([I,
+                        Q
+                         ])
     
-    data_plot = np.array([data.get(0).get_half('upper').data/dust.get(0).get_half('upper').data,
-                          data.get(0).get_half('lower').data/dust.get(0).get_half('lower').data,
-                          l1.get(0).get_half('upper').data, l1.get(0).get_half('lower').data])
-    
-    viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
-                       title='flat center l1', 
-                       state_names=['upper different dust corrected', 'lower different dust corrected',
-                                    'self dust corrected upper', 'self dust corrected lower'])
+    viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
+                       title='scan', 
+                       state_names=['y shifted',
+                                    'l1'])
+#%%
+
     
     
     

@@ -493,6 +493,118 @@ fixed_value = center_lower[0]
 lower_shifts = center_lower - fixed_value
 upper_shifts = center_upper - fixed_value
 
+
+def xshift_to_2d_map(x_shift, ny):
+    x_shift = np.asarray(x_shift, dtype=float)
+    if x_shift.ndim != 1:
+        raise ValueError(f"x_shift must be 1D (nx,), got shape {x_shift.shape}")
+    return np.repeat(x_shift[None, :], int(ny), axis=0)
+
+
+def xshift_fade_from_y(x_shift_at_y, ny, y_ref=515, length=485, direction='up'):
+    x_shift_at_y = np.asarray(x_shift_at_y, dtype=float)
+    if x_shift_at_y.ndim != 1:
+        raise ValueError(f"x_shift_at_y must be 1D (nx,), got shape {x_shift_at_y.shape}")
+    if length <= 0:
+        raise ValueError("length must be > 0")
+
+    y = np.arange(int(ny), dtype=float)
+
+    if direction == 'up':
+        w = 1.0 - ((y - float(y_ref)) / float(length))
+        w = np.where((y >= float(y_ref)) & (y <= float(y_ref + length)), w, 0.0)
+        w = np.clip(w, 0.0, 1.0)
+    elif direction == 'down':
+        w = 1.0 - ((float(y_ref) - y) / float(length))
+        w = np.where((y >= float(y_ref - length)) & (y <= float(y_ref)), w, 0.0)
+        w = np.clip(w, 0.0, 1.0)
+    elif direction == 'both':
+        w = 1.0 - (np.abs(y - float(y_ref)) / float(length))
+        w = np.where(np.abs(y - float(y_ref)) <= float(length), w, 0.0)
+        w = np.clip(w, 0.0, 1.0)
+    else:
+        raise ValueError("direction must be one of {'up','down','both'}")
+
+    return w[:, None] * x_shift_at_y[None, :]
+
+
+
+    #%%
+    
+config_test = get_config(config_path='configs/sample_dataset_sr_2025-07-07.toml')
+
+
+
+#%%
+scan, header = tio.read_any_file(config_test, 'scan', verbose=False, status='l1')
+
+upper = scan.get_state('pQ').stack_all('upper')[0]
+lower = scan.get_state('pQ').stack_all('lower')[0]
+
+lower_shift_map = xshift_to_2d_map(lower_shifts, ny=lower.shape[0])
+upper_shift_map = xshift_to_2d_map(upper_shifts, ny=upper.shape[0])
+
+lower_shifted = tdr._apply_yshift_map_to_half(lower, lower_shift_map)
+upper_shifted = tdr._apply_yshift_map_to_half(upper, upper_shift_map)
+
+shift_candidates = np.arange(-5, 5 + 0.1, 0.1)
+best_metric_1 = np.inf
+optimal_shift_1 = 0.0
+best_metric_2 = np.inf
+optimal_shift_2 = 0.0
+
+for step in shift_candidates:
+    y_shift_additional = -step * np.ones(lower.shape[1])
+    lower_shifted_tmp = tdr._apply_yshift_to_half(lower_shifted, y_shift_additional)
+    shifted_diff_tmp = upper_shifted - lower_shifted_tmp
+    current_contrast_1 = shifted_diff_tmp[30:50, 90:360].mean(axis=1).std()
+    current_contrast_2 = shifted_diff_tmp[30:50, 700:1000].mean(axis=1).std()
+    if current_contrast_1 < best_metric_1:
+        best_metric_1 = current_contrast_1
+        optimal_shift_1 = float(step)
+    if current_contrast_2 < best_metric_2:
+        best_metric_2 = current_contrast_2
+        optimal_shift_2 = float(step)
+        #print(current_contrast_1)
+        #print(current_contrast_2)
+print(optimal_shift_1, optimal_shift_2)  # if both are the same then I think that there is no "additional" rotation
+x0 = 90#0.5 * (90 + 360)
+x1 = 0.5 * (700 + 1000)
+nx = lower.shape[1]
+xx = np.arange(nx, dtype=float)
+s0 = -optimal_shift_1
+s1 = -optimal_shift_2
+y_shift_additional = s0 + (s1 - s0) * (xx - x0) / (x1 - x0)
+y_shift_additional = np.where(xx < min(x0, x1), s0, y_shift_additional)
+y_shift_additional = np.where(xx > max(x0, x1), s1, y_shift_additional)
+
+#%%
+
+additional_shift_map = xshift_fade_from_y(y_shift_additional, ny=lower.shape[0], y_ref=40, length=300, direction='both')
+
+total_shift_map_lower = lower_shift_map + additional_shift_map
+
+
+# xshift_fade_from_y(upper_shifts, ny=upper.shape[0], y_ref=515, length=400, direction='both') # not as good as the above
+
+lower_final = tdr._apply_yshift_map_to_half(lower, total_shift_map_lower)
+
+
+#%%
+shifted_diff = upper_shifted - lower_final
+
+data_plot = np.array([shifted_diff, upper - lower])
+
+
+
+viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
+                   title='scan', 
+                   state_names=['y shifted', 'original'
+                                ])
+    
+    
+#%%
+# IF YOU ARE HAPPY WITH THE ABOVE
 # Save shifts as NumPy files and register as auxiliary files for flat_center
 line = config.dataset['line']
 seq_fc = config.dataset['flat_center']['sequence']
@@ -501,8 +613,8 @@ seq_fc_str = f"t{seq_fc:03d}"
 shifts_lower_path = Path(config.directories.reduced) / f"{line}_calibration_target_yshift_lower.npy"
 shifts_upper_path = Path(config.directories.reduced) / f"{line}_calibration_target_yshift_upper.npy"
 
-np.save(shifts_lower_path, lower_shifts)
-np.save(shifts_upper_path, upper_shifts)
+np.save(shifts_lower_path, total_shift_map_lower)
+np.save(shifts_upper_path, upper_shift_map)
 
 files_fc = config.dataset['flat_center']['files']
 if not hasattr(files_fc, 'auxiliary'):
@@ -511,14 +623,7 @@ if not hasattr(files_fc, 'auxiliary'):
 files_fc.auxiliary['yshift_lower'] = shifts_lower_path
 files_fc.auxiliary['yshift_upper'] = shifts_upper_path
 
-print(f"Saved y-shift auxiliary files for flat_center: {shifts_lower_path.name}, {shifts_upper_path.name}")
-
-    #%%
-    
-    
-    
-    
-    
+print(f"Saved y-shift auxiliary files for flat_center: {shifts_lower_path.name}, {shifts_upper_path.name}")    
     
     
  #%%
