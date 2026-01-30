@@ -1042,150 +1042,121 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
         print('No processing - provide a specific data type.')
         return None
     
-    if data_type not in ['flat_center', 'flat']:
+    if data_type not in ['flat_center', 'flat', 'scan']:
         print(f'L3 reduction not yet defined for data_type: {data_type}')
         return None
     
-    reduced_frames = None
-    header = None
-    extra_keywords = {}
+    print(f"\n{'='*70}")
+    print(f'L2 → L3 REDUCTION FOR {data_type.upper()} (DESMILING)')
+    print(f"{'='*70}")
     
+    # For flat_center: optionally run spectroflat first to produce offset maps
     if data_type == 'flat_center':
-        # ============================================================
-        # FLAT_CENTER: Run spectroflat to produce offset map
-        # ============================================================
-        print(f"\n{'='*70}")
-        print(f'L2 → L3 REDUCTION FOR FLAT_CENTER (OFFSET MAP CREATION)')
-        print(f"{'='*70}")
-        
-        # Remove outdated auxiliary files first
         print('\nRemoving outdated auxiliary files...')
         _remove_outdated_auxiliary_files(config, data_type)
-        
-        # Load L2 data
-        print(f'\nLoading L2 {data_type} data...')
-        l2_data, header = tio.read_any_file(config, data_type, status='l2', verbose=False)
-        
-        if not isinstance(l2_data, dct.FramesSet):
-            print(f'  Error: Expected L2 {data_type} data to be a FramesSet')
-            return None
-        
-        l2_frame = l2_data.get(0)
-        if l2_frame is None:
-            print(f'  Error: No L2 frame found for {data_type}')
-            return None
-        
-        # Prepare for saving auxiliary files
-        line = config.dataset['line']
-        seq = config.dataset[data_type]['sequence']
-        seq_str = f"t{seq:03d}"
         
         file_set = config.dataset[data_type]['files']
         if not hasattr(file_set, 'auxiliary'):
             file_set.auxiliary = {}
         
-        reduced_frames = dct.FramesSet()
-        frame_name_str = f"{data_type}_l3_frame{0:04d}"
-        dest = dct.Frame(frame_name_str)
+        line = config.dataset['line']
+        seq = config.dataset[data_type]['sequence']
+        seq_str = f"t{seq:03d}"
         
-        # Process each frame half
+        # Check/run spectroflat for each half
         for frame_name in ['upper', 'lower']:
-            print(f'\n{"#"*70}')
-            print(f'# PROCESSING {frame_name.upper()} FRAME FOR L3')
-            print(f'{"#"*70}\n')
-            
-            # Check if offset map already exists for this frame
             offset_map_file = file_set.auxiliary.get(f'offset_map_{frame_name}')
             skip_spectroflat = False
             
             if offset_map_file and Path(offset_map_file).exists():
-                print(f'  L3 offset map already exists:')
-                print(f'    Offset map: {Path(offset_map_file).name}')
+                print(f'\n  Offset map exists for {frame_name}: {Path(offset_map_file).name}')
                 while True:
                     user_choice = input(f'  Re-run spectroflat for {frame_name}? [y/n]: ').strip().lower()
                     if user_choice in ['y', 'n']:
                         break
-                    else:
-                        print('  Please enter "y" or "n"')
-                
+                    print('  Please enter "y" or "n"')
                 if user_choice == 'n':
-                    print(f'  Using existing L3 offset map')
                     skip_spectroflat = True
             
-            half_obj = l2_frame.get_half(frame_name)
-            frame_2d = half_obj.data.astype('float32')
-            
             if not skip_spectroflat:
-                # Run spectroflat on L2 data (reuse existing function)
-                result = _process_single_frame_spectroflat(frame_2d, frame_name, config, data_type)
+                # Load L2 data for spectroflat
+                l2_data_sf, _ = tio.read_any_file(config, data_type, status='l2', verbose=False)
+                frame_2d = l2_data_sf.get(0).get_half(frame_name).data.astype('float32')
                 
+                result = _process_single_frame_spectroflat(frame_2d, frame_name, config, data_type)
                 if result is None:
-                    print(f'\n L3 reduction failed for {frame_name} (spectroflat step).')
+                    print(f'\n  L3 reduction failed for {frame_name} (spectroflat step).')
                     return None
                 
-                # Save offset map (overwrite any existing)
+                # Save offset map
                 offset_map_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_offset_map_{frame_name}.fits'
                 offset_hdu = fits.PrimaryHDU(data=result['offset_map'])
-                offset_hdu.header['COMMENT'] = f'Offset map from spectroflat L3 - {frame_name} frame'
                 offset_hdu.header['FRAME'] = frame_name
                 offset_hdu.header['REDLEV'] = 'L3'
                 offset_hdu.writeto(str(offset_map_path), overwrite=True)
                 file_set.auxiliary[f'offset_map_{frame_name}'] = offset_map_path
-                print(f'  ✓ Saved L3 offset map: {offset_map_path.name}')
+                print(f'  ✓ Saved offset map: {offset_map_path.name}')
                 
-                # Save illumination pattern (overwrite any existing)
+                # Save illumination pattern
                 illum_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_illumination_pattern_{frame_name}.fits'
                 illum_hdu = fits.PrimaryHDU(data=result['illumination_pattern'])
-                illum_hdu.header['COMMENT'] = f'Illumination pattern from spectroflat L3 - {frame_name} frame'
                 illum_hdu.header['FRAME'] = frame_name
                 illum_hdu.header['REDLEV'] = 'L3'
                 illum_hdu.writeto(str(illum_path), overwrite=True)
                 file_set.auxiliary[f'illumination_pattern_{frame_name}'] = illum_path
-                print(f'  ✓ Saved L3 illumination pattern: {illum_path.name}')
-            
-            # Set the half data (L3 data is same as L2 for flat_center)
-            dest.set_half(frame_name, frame_2d)
-        
-        reduced_frames.add_frame(dest, 0)
-        
-        extra_keywords = {
-            'OFFMAPL3': ('TRUE', 'L3 offset map generated from y-shift corrected flat_center'),
-        }
+                print(f'  ✓ Saved illumination pattern: {illum_path.name}')
     
-    elif data_type == 'flat':
-        # ============================================================
-        # FLAT: Apply offset map from flat_center to desmile
-        # ============================================================
-        print(f"\n{'='*70}")
-        print(f'L2 → L3 REDUCTION FOR FLAT (APPLY OFFSET MAP / DESMILING)')
-        print(f"{'='*70}")
-        
-        # Load offset maps from flat_center
-        print('\nLoading offset maps from flat_center...')
-        files_fc = config.dataset.get('flat_center', {}).get('files')
-        if files_fc is None:
-            print('  Error: flat_center files not found in config')
+    # Load offset maps (from flat_center for both flat and flat_center)
+    print('\nLoading offset maps...')
+    offset_source = 'flat_center'
+    files_src = config.dataset.get(offset_source, {}).get('files')
+    if files_src is None:
+        print(f'  Error: {offset_source} files not found in config')
+        return None
+    
+    aux_src = getattr(files_src, 'auxiliary', {})
+    offset_maps = {}
+    for frame_name in ['upper', 'lower']:
+        path = aux_src.get(f'offset_map_{frame_name}')
+        if path is None or not Path(path).exists():
+            print(f'  ✗ WARNING: No offset map found for {frame_name}.')
+            print(f'    Run flat_center L2->L3 first to generate offset maps.')
+            return None
+        with fits.open(path) as hdul:
+            offset_maps[frame_name] = np.array(hdul[0].data)
+        print(f'  Loaded: {Path(path).name}')
+    
+    # Load L2 data and apply desmiling
+    print(f'\nLoading L2 {data_type} data and applying desmiling...')
+    l2_data, header = tio.read_any_file(config, data_type, status='l2', verbose=False)
+    
+    reduced_frames = None
+    
+    if data_type == 'scan':
+        # Scan is a CycleSet with multiple frames
+        if not isinstance(l2_data, dct.CycleSet):
+            print(f'  Error: Expected L2 scan data to be a CycleSet')
             return None
         
-        aux_fc = getattr(files_fc, 'auxiliary', {})
-        offset_maps = {}
+        reduced_frames = dct.CycleSet()
+        items_iter = tqdm(l2_data.items(), desc='L2→L3 scan desmiling')
         
-        for frame_name in ['upper', 'lower']:
-            key = f'offset_map_{frame_name}'
-            path = aux_fc.get(key)
-            if path is None or not Path(path).exists():
-                print(f'  Error: offset map not found for {frame_name}')
-                print(f'    Expected key: {key}')
-                print(f'    Run flat_center L2->L3 first to generate offset maps.')
-                return None
-            with fits.open(path) as hdul:
-                offset_maps[frame_name] = np.array(hdul[0].data)
-            print(f'  Loaded offset map for {frame_name}: {Path(path).name}')
+        for key, frame in items_iter:
+            dest = dct.Frame(f"scan_l3_{frame.name}")
+            for half in ['upper', 'lower']:
+                half_obj = frame.get_half(half)
+                frame_2d = half_obj.data.astype('float32')
+                desmiled = _apply_desmiling(frame_2d, offset_maps[half])
+                if half_obj.pol_state:
+                    dest.set_half(half, desmiled.astype('float32'), half_obj.pol_state)
+                else:
+                    dest.set_half(half, desmiled.astype('float32'))
+            reduced_frames.add_frame(dest, key)
         
-        # Load L2 flat data
-        print(f'\nLoading L2 {data_type} data...')
-        l2_data, header = tio.read_any_file(config, data_type, status='l2', verbose=False)
-        
+        print(f'  ✓ Applied desmiling to scan frames')
+    
+    else:
+        # flat/flat_center is a FramesSet with single frame
         if not isinstance(l2_data, dct.FramesSet):
             print(f'  Error: Expected L2 {data_type} data to be a FramesSet')
             return None
@@ -1196,24 +1167,17 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
             return None
         
         reduced_frames = dct.FramesSet()
-        frame_name_str = f"{data_type}_l3_frame{0:04d}"
-        dest = dct.Frame(frame_name_str)
+        dest = dct.Frame(f"{data_type}_l3_frame0000")
         
-        print('\nApplying desmiling to flat frames...')
         for frame_name in ['upper', 'lower']:
-            half_obj = l2_frame.get_half(frame_name)
-            frame_2d = half_obj.data.astype('float32')
-            
-            # Apply offset map correction (desmiling)
+            frame_2d = l2_frame.get_half(frame_name).data.astype('float32')
             desmiled = _apply_desmiling(frame_2d, offset_maps[frame_name])
             dest.set_half(frame_name, desmiled.astype('float32'))
-            print(f'  ✓ Applied desmiling to {frame_name} frame')
+            print(f'  ✓ Applied desmiling to {frame_name}')
         
         reduced_frames.add_frame(dest, 0)
-        
-        extra_keywords = {
-            'DESMILED': ('TRUE', 'L3 desmiling applied using flat_center offset maps'),
-        }
+    
+    extra_keywords = {'DESMILED': ('TRUE', 'L3 desmiling applied using offset maps')}
     
     if return_reduced:
         return reduced_frames
@@ -1277,8 +1241,8 @@ reduction_levels.add(ReductionLevel("l2", "_l2.fits", reduce_l1_to_l2, {
 
 reduction_levels.add(ReductionLevel("l3", "_l3.fits", reduce_l2_to_l3, {
     "dark": "Nothing.",
-    "scan": "Not yet defined.",
+    "scan": "Applies offset map (desmiling) from flat_center to produce smile-corrected scan.",
     "flat": "Applies offset map (desmiling) from flat_center to produce smile-corrected flat field.",
-    "flat_center": "Produces offset map from smile correction and illumination pattern using spectroflat. Removes outdated auxiliary files."
+    "flat_center": "Produces offset map and illumination pattern using spectroflat. Applies desmiling to image data."
 }))
 

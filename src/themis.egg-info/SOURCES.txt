@@ -35,6 +35,7 @@ tests/test.py
 tests/test_amend_spectroflat.py
 tests/test_atlas_fit_window.py
 tests/test_blos_inversion.py
+tests/test_desmiling.py
 tests/test_desmiling_quality.py
 tests/test_frame_alignment.py
 tests/test_inversion.py

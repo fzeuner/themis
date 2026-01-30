@@ -3,14 +3,10 @@ Code for analyzing themis data
 
 ## Installation and setup
 
-- **Create/activate conda env** (Python 3.12 recommended):
-  - `conda create -n themis python=3.12`
+- **Create/activate conda env**:
+  - `conda create -n themis python=3.14`
   - `conda activate themis`
 - **Install dependencies**:
-  - `conda env update -n themis -f environment.yml`
-- **Editable install of this package** (so imports like `from themis...` work everywhere and scripts don’t need sys.path hacks):
-  - `pip install -e .`
-  - This uses `pyproject.toml` with `src/` as the package root.
 
 Get https://github.com/fzeuner/spectator, then:
   pip install -e spectator
@@ -21,10 +17,13 @@ Get https://gitlab.gwdg.de/hoelken/atlas-fit/-/tree/main?ref_type=heads, then:
 
 Get https://gitlab.gwdg.de/hoelken/spectroflat:
   pip install spectroflat
-  --> Then, remove all pycache files in the spectroflat directory + remove replace np.infty with np.inf in the spectroflat source code smile_fit.py
+  --> Then, remove all pycache files in the spectroflat directory 
 
+  - `conda env update -n themis -f environment.yml`
+- **Editable install of this package** (so imports like `from themis...` work everywhere and scripts don’t need sys.path hacks):
+  - `pip install -e .`
+  - This uses `pyproject.toml` with `src/` as the package root.
 
-On a fresh machine, repeat the above steps to get started.
 
 ## Configuration-driven datasets (2025)
 
@@ -83,10 +82,4 @@ print(cfg.directories)
 print(cfg.dataset)
 ```
 
-### Notes
-
-- Python 3.12 environment is provided; the loader uses the stdlib `tomllib`.
-- File types are fixed as `scan`, `dark`, `flat` to match existing code.
-- `get_config()` resolves relative config paths automatically. It tries: as given (CWD), relative to project root, and under `project_root/configs/`.
-- You can also pass the config path via an env var `THEMIS_CONFIG` (if your script supports it) or via a CLI flag (if implemented).
 
