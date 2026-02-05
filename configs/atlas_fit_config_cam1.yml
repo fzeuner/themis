@@ -15,15 +15,15 @@ input:
   # Approx. upper wavelength boundary of the input [nm]
   wl_end: 461.1
   # The global stray-light level in the spectrograph in percent [%]
-  stray_light: 2.96
+  stray_light: 4.6
   # Stray-light in percent [%] for lower frame (used by themis pipeline, ignored by atlas-fit)
-  stray_light_lower: 4.38
+  stray_light_lower: 4.31
   # The window [px] for the gauss-fit to operate in around detected line cores
   line_window: 11
   # PSF Model to convolve the atlas with
   # model_psf: examples/modeled_spectral_psf_412nm.txt
   # The FWHM for the data at the central wl [nm]
-  fwhm: 0.00332 
+  fwhm: 0.00321 
 
 fitting:
   # Use the highest quantile as a first order continuum correction
@@ -31,9 +31,9 @@ fitting:
   # Use a low frequency filter to determine pre-filter aberrations, etc.
   # lowpass_filter: False
   # Maximal dispersion degree to try
-  dispersion_max_degree: 2
+  dispersion_max_degree: 4
   # Minimal dispersion degree to try
-  dispersion_min_degree: 1
+  dispersion_min_degree: 2
   # Order of the lowpass-prefilter to apply. Use Null to deactivate
   continuum_filter_order: 8
   # Spline degree for the continuum fit
@@ -43,7 +43,7 @@ fitting:
   # Number of anchor points to derive the continuum from
   continuum_points: 70
   # Max allowed stray light in fit
-  max_stray_light: 20
+  max_stray_light: 10
   # Mask lines with changing intensity (i.e., tellurics)
   # stray_light_ignored_lines:
   #  - 412.02 # example

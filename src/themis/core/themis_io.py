@@ -256,6 +256,43 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     """
     gc.collect()
     
+    # Special handling for status='wl': return wavelength calibration from auxiliary files
+    if status == 'wl' and data_type in ('scan', 'flat', 'flat_center'):
+        wl_calib = tdr._load_wavelength_calibration(config, data_type)
+        if wl_calib is None:
+            raise FileNotFoundError(
+                f"Wavelength calibration not found for data_type '{data_type}'. "
+                f"Run L3 reduction with atlas-fit for flat_center first."
+            )
+        
+        # Build a FramesSet with wavelength arrays for upper/lower
+        collection = dct.FramesSet()
+        frame_name_str = f"{data_type}_wl_calib"
+        frame = dct.Frame(frame_name_str)
+        
+        for half in ['upper', 'lower']:
+            frame.set_half(half, wl_calib[half]['wavelength'].astype('float64'))
+        
+        collection.add_frame(frame, 0)
+        
+        # Create a header with wavelength metadata
+        header = fits.Header()
+        header['DATATYPE'] = data_type
+        header['STATUS'] = 'wl'
+        for half in ['upper', 'lower']:
+            prefix = half[0].upper()  # 'U' or 'L'
+            header[f'{prefix}_MINWL'] = (wl_calib[half]['min_wl'], f'{half} min wavelength [nm]')
+            header[f'{prefix}_MAXWL'] = (wl_calib[half]['max_wl'], f'{half} max wavelength [nm]')
+            header[f'{prefix}_DISP'] = (wl_calib[half]['dispersion'], f'{half} dispersion [nm/px]')
+            header[f'{prefix}_NPIX'] = (wl_calib[half]['n_pixels'], f'{half} number of pixels')
+        
+        if verbose:
+            print(f"Reading wavelength calibration for data_type '{data_type}' from flat_center auxiliary files")
+            print(f"  Upper: {wl_calib['upper']['min_wl']:.4f} - {wl_calib['upper']['max_wl']:.4f} nm")
+            print(f"  Lower: {wl_calib['lower']['min_wl']:.4f} - {wl_calib['lower']['max_wl']:.4f} nm")
+        
+        return collection, header
+    
     # For status='dust' we use the L1 file only to obtain a header; data
     # themselves come from auxiliary dust_flat_* files.
     if status == 'dust' and data_type in ('flat', 'flat_center'):

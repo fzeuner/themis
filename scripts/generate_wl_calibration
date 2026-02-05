@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+# WAVELENGTH CALIBRATION GENERATOR
+
+This script generates a combined wavelength calibration FITS file for upper and lower
+frames using existing atlas_fit_lines files and atlas-fit's Comperator.
+
+## Usage
+    conda activate atlas-fit
+    ./scripts/generate_wl_calibration <config_path> <upper_lines> <lower_lines> <l3_upper> <l3_lower> <output_path>
+
+## Arguments
+    config_path   : Path to the atlas-fit configuration file
+    upper_lines   : Path to atlas_fit_lines.yaml for upper frame
+    lower_lines   : Path to atlas_fit_lines.yaml for lower frame  
+    l3_upper      : Path to L3 FITS file for upper frame (2D)
+    l3_lower      : Path to L3 FITS file for lower frame (2D)
+    output_path   : Path for output wavelength calibration FITS file
+
+## Author
+Auto-generated for themis pipeline
+"""
+import copy
+import logging
+import os
+import sys
+import re
+from argparse import ArgumentParser
+from pathlib import Path
+
+import numpy as np
+import yaml
+from astropy.io import fits
+from scipy.ndimage import zoom
+
+# Add atlas-fit to path
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parent
+atlas_fit_path = project_root / 'atlas-fit'
+sys.path.insert(0, str(atlas_fit_path))
+sys.path.insert(0, str(atlas_fit_path / 'src'))
+
+from atlas_fit import Config, Comperator
+from atlas_fit.utils.tailoring import select_best_atlas_range
+
+log = logging.getLogger()
+
+aparser = ArgumentParser(description='Generate wavelength calibration from atlas-fit lines')
+aparser.add_argument('config_path', type=str, help='Path to atlas-fit configuration file')
+aparser.add_argument('upper_lines', type=str, help='Path to atlas_fit_lines.yaml for upper frame')
+aparser.add_argument('lower_lines', type=str, help='Path to atlas_fit_lines.yaml for lower frame')
+aparser.add_argument('l3_upper', type=str, help='Path to L3 FITS file for upper frame')
+aparser.add_argument('l3_lower', type=str, help='Path to L3 FITS file for lower frame')
+aparser.add_argument('output_path', type=str, help='Output path for wavelength calibration FITS')
+args = aparser.parse_args()
+
+# Load config
+config = Config.from_yaml(args.config_path)
+log.info('Active config:\n%s', repr(config))
+
+# Parse ROI to get row index
+roi_str = config.input.roi.replace('s', '0')
+roi_match = re.match(r'\[(\d+),', roi_str)
+if roi_match:
+    row_idx = int(roi_match.group(1))
+else:
+    row_idx = None  # Will use middle row
+
+wl_calibrations = {}
+
+for frame_name, lines_file, l3_file in [
+    ('upper', args.upper_lines, args.l3_upper),
+    ('lower', args.lower_lines, args.l3_lower)
+]:
+    print(f'\nProcessing {frame_name} frame...')
+    
+    # Load atlas lines
+    with open(lines_file, 'r') as f:
+        points = yaml.safe_load(f)
+    print(f'  Loaded atlas lines: {Path(lines_file).name}')
+    log.info('SELECTED ATLAS POSITIONS:\n %s', points['atlas'])
+    log.info('SELECTED DATA POSITIONS:\n %s', points['data'])
+    
+    # Load L3 data
+    with fits.open(l3_file) as hdul:
+        frame_2d = hdul[0].data.astype('float32')
+    
+    # Extract spectrum row
+    if row_idx is not None:
+        spectrum = frame_2d[row_idx, :]
+    else:
+        spectrum = frame_2d[frame_2d.shape[0]//2, :]
+    
+    print(f'  Spectrum shape: {spectrum.shape}')
+    
+    # Run Comperator to get dispersion fit
+    c = Comperator(copy.copy(spectrum), config, points).run()
+    orig_atlas = select_best_atlas_range(c, config)
+    
+    # Scale wavelength to pixel count
+    scale_factor = len(spectrum) / len(orig_atlas.wl)
+    wl = zoom(orig_atlas.wl, scale_factor, order=4, mode='nearest', grid_mode=True)
+    
+    wl_calibrations[frame_name] = {
+        'wavelength': wl,
+        'min_wl_nm': float(min(wl)),
+        'max_wl_nm': float(max(wl)),
+        'dispersion': float((wl[-1] - wl[0]) / len(wl)),
+        'n_pixels': len(wl),
+    }
+    print(f'  ✓ Wavelength range: {min(wl):.4f} - {max(wl):.4f} nm')
+    print(f'  ✓ Dispersion: {wl_calibrations[frame_name]["dispersion"]:.6e} nm/px')
+
+# Save combined wavelength calibration file
+print(f'\nSaving wavelength calibration to: {args.output_path}')
+
+hdul = fits.HDUList()
+
+# Primary HDU with metadata
+primary = fits.PrimaryHDU()
+primary.header['COMMENT'] = 'Wavelength calibration from atlas-fit'
+hdul.append(primary)
+
+# Add wavelength HDU for each frame
+for frame_name in ['upper', 'lower']:
+    wl_data = wl_calibrations[frame_name]
+    wl_hdu = fits.ImageHDU(data=wl_data['wavelength'], name=f'WL_{frame_name.upper()}')
+    wl_hdu.header['FRAME'] = frame_name
+    wl_hdu.header['MIN_WL'] = (wl_data['min_wl_nm'], 'Minimum wavelength [nm]')
+    wl_hdu.header['MAX_WL'] = (wl_data['max_wl_nm'], 'Maximum wavelength [nm]')
+    wl_hdu.header['DISPERS'] = (wl_data['dispersion'], 'Dispersion [nm/px]')
+    wl_hdu.header['NPIXELS'] = (wl_data['n_pixels'], 'Number of pixels')
+    hdul.append(wl_hdu)
+
+hdul.writeto(args.output_path, overwrite=True)
+print(f'✓ Saved wavelength calibration: {args.output_path}')
+print('Done.')

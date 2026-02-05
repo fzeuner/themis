@@ -984,6 +984,447 @@ def _apply_desmiling(image, offset_map_2d):
     return desmiled
 
 
+def _create_temp_atlas_config(atlas_config_path, output_name, remove_stray_light_key=True):
+    """
+    Create a temporary atlas-fit config file with unsupported keys removed.
+    
+    Always removes stray_light_lower which is a custom key not recognized by 
+    atlas-fit's Config class. Optionally removes stray_light as well.
+    
+    Parameters
+    ----------
+    atlas_config_path : Path or str
+        Path to the original atlas-fit config file
+    output_name : str
+        Name for the temporary config file (without path)
+    remove_stray_light_key : bool
+        If True (default), also remove stray_light key (for external atlas-fit calls).
+        If False, keep stray_light (for internal Comperator usage).
+        
+    Returns
+    -------
+    tuple
+        (temp_config_path, config_text)
+    """
+    with open(atlas_config_path, 'r') as f:
+        config_text = f.read()
+    
+    # Always remove stray_light_lower (custom key not recognized by atlas-fit)
+    config_text = re.sub(
+        r'^\s*#.*stray.light.*lower.*\n',
+        '',
+        config_text,
+        flags=re.MULTILINE | re.IGNORECASE
+    )
+    config_text = re.sub(
+        r'^\s*stray_light_lower:\s*[\d.]+\s*\n',
+        '',
+        config_text,
+        flags=re.MULTILINE
+    )
+    
+    # Optionally remove stray_light (only for external atlas-fit prepare calls)
+    if remove_stray_light_key:
+        config_text = re.sub(
+            r'^\s*stray_light:\s*[\d.]+\s*\n',
+            '',
+            config_text,
+            flags=re.MULTILINE
+        )
+    
+    # Write temporary config file
+    project_root = Path(__file__).resolve().parents[3]
+    temp_config_path = project_root / 'configs' / output_name
+    with open(temp_config_path, 'w') as f:
+        f.write(config_text)
+    
+    return temp_config_path, config_text
+
+
+def _load_wavelength_calibration(config, data_type='flat_center'):
+    """
+    Load wavelength calibration from auxiliary file.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        Data type to load wavelength calibration for. For 'scan' and 'flat',
+        the calibration is loaded from 'flat_center' auxiliary files.
+        
+    Returns
+    -------
+    dict or None
+        Dictionary with wavelength calibration data for 'upper' and 'lower' frames:
+        {
+            'upper': {'wavelength': np.array, 'min_wl': float, 'max_wl': float, 'dispersion': float, 'n_pixels': int},
+            'lower': {'wavelength': np.array, 'min_wl': float, 'max_wl': float, 'dispersion': float, 'n_pixels': int}
+        }
+        Returns None if file not found.
+    """
+    # Wavelength calibration is always from flat_center
+    source_type = 'flat_center'
+    
+    files_src = config.dataset.get(source_type, {}).get('files')
+    if files_src is None:
+        return None
+    
+    aux = getattr(files_src, 'auxiliary', {})
+    wl_calib_file = aux.get('wavelength_calibration')
+    
+    if wl_calib_file is None or not Path(wl_calib_file).exists():
+        return None
+    
+    # Load wavelength calibration FITS file
+    wl_calibrations = {}
+    
+    with fits.open(wl_calib_file) as hdul:
+        for frame_name in ['upper', 'lower']:
+            ext_name = f'WL_{frame_name.upper()}'
+            if ext_name in hdul:
+                wl_hdu = hdul[ext_name]
+                wl_calibrations[frame_name] = {
+                    'wavelength': np.array(wl_hdu.data),
+                    'min_wl': wl_hdu.header.get('MIN_WL'),
+                    'max_wl': wl_hdu.header.get('MAX_WL'),
+                    'dispersion': wl_hdu.header.get('DISPERS'),
+                    'n_pixels': wl_hdu.header.get('NPIXELS'),
+                }
+    
+    if len(wl_calibrations) != 2:
+        return None
+    
+    return wl_calibrations
+
+
+def _generate_wavelength_calibration(config, data_type='flat_center'):
+    """
+    Generate a combined wavelength calibration file for upper and lower frames
+    using existing atlas_fit_lines files and the external generate_wl_calibration script.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        Data type (default 'flat_center')
+        
+    Returns
+    -------
+    Path or None
+        Path to the generated wavelength calibration file, or None on failure
+    """
+    print(f'\n{"="*70}')
+    print(f'GENERATING WAVELENGTH CALIBRATION FILE')
+    print(f'{"="*70}')
+    
+    # Check if wavelength calibration file already exists (auto-detection)
+    file_set = config.dataset[data_type]['files']
+    aux = getattr(file_set, 'auxiliary', {})
+    wl_calib_file = aux.get('wavelength_calibration')
+    
+    if wl_calib_file and Path(wl_calib_file).exists():
+        print(f'  Wavelength calibration file already exists: {Path(wl_calib_file).name}')
+        while True:
+            user_choice = input(f'  Re-generate wavelength calibration? [y/n]: ').strip().lower()
+            if user_choice in ['y', 'n']:
+                break
+            else:
+                print('  Please enter "y" or "n"')
+        
+        if user_choice == 'n':
+            print(f'  ✓ Using existing wavelength calibration file')
+            return wl_calib_file
+        else:
+            print(f'  Deleting old wavelength calibration file: {Path(wl_calib_file).name}')
+            Path(wl_calib_file).unlink()
+    
+    # Check atlas-fit config
+    if not hasattr(config.cam, 'atlas_fit_config') or config.cam.atlas_fit_config is None:
+        print('  Error: No atlas_fit_config found for this camera.')
+        return None
+    
+    atlas_config_path = config.cam.atlas_fit_config
+    if not Path(atlas_config_path).exists():
+        print(f'  Error: Atlas fit config not found: {atlas_config_path}')
+        return None
+    
+    # Check L3 file exists
+    l3_file = config.dataset[data_type]['files'].get('l3')
+    if l3_file is None or not l3_file.exists():
+        print(f'  Error: L3 {data_type} file not found. Run L3 reduction first.')
+        return None
+    
+    # Check atlas_lines files exist for both frames
+    aux = getattr(file_set, 'auxiliary', {})
+    upper_lines = aux.get('atlas_lines_upper')
+    lower_lines = aux.get('atlas_lines_lower')
+    
+    if upper_lines is None or not Path(upper_lines).exists():
+        print(f'  Error: atlas_lines file not found for upper frame')
+        print(f'  Run atlas-fit wavelength calibration first.')
+        return None
+    if lower_lines is None or not Path(lower_lines).exists():
+        print(f'  Error: atlas_lines file not found for lower frame')
+        print(f'  Run atlas-fit wavelength calibration first.')
+        return None
+    
+    # Extract individual frames to temporary files
+    print(f'\n  Extracting frames for wavelength calibration...')
+    temp_upper_path = config.directories.reduced / f'temp_{data_type}_upper_for_wl_calib.fits'
+    temp_lower_path = config.directories.reduced / f'temp_{data_type}_lower_for_wl_calib.fits'
+    
+    try:
+        l3_data, _ = tio.read_any_file(config, data_type, verbose=False, status='l3')
+        
+        for frame_name, temp_path in [('upper', temp_upper_path), ('lower', temp_lower_path)]:
+            frame_data = l3_data[0][frame_name].data
+            hdu = fits.PrimaryHDU(data=frame_data)
+            hdu.writeto(temp_path, overwrite=True)
+        print(f'  ✓ Extracted upper and lower frames to temporary files')
+    except Exception as e:
+        print(f'  Error extracting frames: {e}')
+        return None
+    
+    # Create temporary config file (keep stray_light for Comperator)
+    temp_config_path, _ = _create_temp_atlas_config(
+        atlas_config_path, 
+        f'temp_wl_calib_{data_type}_config.yml',
+        remove_stray_light_key=False
+    )
+    
+    # Determine output path
+    line = config.dataset['line']
+    seq = config.dataset[data_type]['sequence']
+    seq_str = f"t{seq:03d}"
+    wl_calib_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_wavelength_calibration.fits'
+    
+    # Find script
+    project_root = Path(__file__).resolve().parents[3]
+    wl_script = project_root / 'scripts' / 'generate_wl_calibration'
+    
+    # Display command to run
+    print(f'\n  Please run the following command in an EXTERNAL terminal:')
+    print(f'  {"-"*68}')
+    print(f'  conda activate atlas-fit')
+    print(f'  cd {config.directories.reduced}')
+    print(f'  {wl_script} \\')
+    print(f'      {temp_config_path} \\')
+    print(f'      {upper_lines} \\')
+    print(f'      {lower_lines} \\')
+    print(f'      {temp_upper_path} \\')
+    print(f'      {temp_lower_path} \\')
+    print(f'      {wl_calib_path}')
+    print(f'  {"-"*68}')
+    
+    # Wait for user confirmation
+    while True:
+        user_input = input(f'\n  Did wavelength calibration complete successfully? (y/n): ').strip().lower()
+        if user_input == 'y':
+            print(f'  ✓ Wavelength calibration completed')
+            break
+        elif user_input == 'n':
+            print(f'  ✗ Skipping wavelength calibration')
+            # Clean up temp files
+            for temp_file in [temp_upper_path, temp_lower_path, temp_config_path]:
+                if temp_file.exists():
+                    temp_file.unlink()
+            return None
+        else:
+            print('  Please enter "y" or "n"')
+    
+    # Verify output file exists
+    if not wl_calib_path.exists():
+        print(f'  Error: Wavelength calibration file not found: {wl_calib_path}')
+        # Clean up temp files before returning
+        for temp_file in [temp_upper_path, temp_lower_path, temp_config_path]:
+            if temp_file.exists():
+                temp_file.unlink()
+        return None
+    
+    # Clean up temp files
+    for temp_file in [temp_upper_path, temp_lower_path, temp_config_path]:
+        if temp_file.exists():
+            temp_file.unlink()
+    print(f'  ✓ Cleaned up temporary files')
+    
+    # Store in auxiliary files
+    if not hasattr(file_set, 'auxiliary'):
+        file_set.auxiliary = {}
+    file_set.auxiliary['wavelength_calibration'] = wl_calib_path
+    
+    print(f'  ✓ Saved wavelength calibration: {wl_calib_path.name}')
+    return wl_calib_path
+
+
+def _process_single_frame_atlas_fit(config, data_type, frame_name):
+    """
+    Helper function to run atlas-fit for a single frame (upper or lower).
+    Uses L3 (desmiled) data as input.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        'flat' or 'flat_center'
+    frame_name : str
+        'upper' or 'lower'
+        
+    Returns
+    -------
+    Path
+        Path to the generated atlas_lines YAML file, or None on failure
+    """
+    
+    print(f'  Running atlas-fit for {frame_name} frame...')
+    
+    # Check if atlas-fit config is available
+    if not hasattr(config.cam, 'atlas_fit_config') or config.cam.atlas_fit_config is None:
+        print('  Error: No atlas_fit_config found for this camera.')
+        return None
+    
+    atlas_config_path = config.cam.atlas_fit_config
+    if not Path(atlas_config_path).exists():
+        print(f'  Error: Atlas fit config file not found: {atlas_config_path}')
+        return None
+    
+    # Get the L3 file path (desmiled data)
+    l3_file = config.dataset[data_type]['files'].get('l3')
+    if l3_file is None or not l3_file.exists():
+        print(f'  Error: L3 {data_type} file not found.')
+        return None
+    
+    # Find atlas-fit prepare script
+    project_root = Path(__file__).resolve().parents[3]
+    prepare_script = project_root / 'atlas-fit' / 'bin' / 'prepare'
+    if not prepare_script.exists():
+        print(f'  Error: Atlas-fit prepare script not found: {prepare_script}')
+        return None
+    
+    # Extract individual frame to temporary file
+    temp_frame_path = config.directories.reduced / f'temp_{data_type}_{frame_name}_for_atlas.fits'
+    
+    try:
+        # Read the L3 data (desmiled)
+        data, header = tio.read_any_file(config, data_type, verbose=False, status='l3')
+        
+        if len(data) > 0:
+            if frame_name == 'upper':
+                frame_data = data[0]['upper'].data
+            elif frame_name == 'lower':
+                frame_data = data[0]['lower'].data
+            else:
+                print(f'  Unknown frame name: {frame_name}')
+                return None
+            
+            # Create a simple FITS file with the 2D frame data
+            hdu = fits.PrimaryHDU(data=frame_data)
+            hdu.writeto(temp_frame_path, overwrite=True)
+            print(f'  ✓ Extracted {frame_name} frame to temporary file')
+        else:
+            print(f'  Error: No frames found in {data_type} data')
+            return None
+    except Exception as e:
+        print(f'  Error extracting {frame_name} frame: {e}')
+        return None
+    
+    # Create temporary config file with unsupported keys removed
+    temp_config_path, config_text = _create_temp_atlas_config(
+        atlas_config_path,
+        f'temp_atlas_fit_{data_type}_{frame_name}_config.yml'
+    )
+    
+    # Also update corrected_frame to point to extracted frame
+    config_text = re.sub(
+        r'corrected_frame:\s*(.+)',
+        f'corrected_frame: {temp_frame_path}',
+        config_text
+    )
+    with open(temp_config_path, 'w') as f:
+        f.write(config_text)
+    
+    # Determine output filename
+    line = config.dataset['line']
+    seq = config.dataset[data_type]['sequence']
+    base_filename = f'{line}_{data_type}_t{seq:03d}'
+    lines_file = config.directories.reduced / f'{base_filename}_{frame_name}_atlas_lines.yaml'
+    
+    print(f'  ✓ Created temporary config: {temp_config_path.name}')
+    
+    # The prepare script outputs to 'atlas_fit_lines.yaml' in the working directory
+    temp_output_file = config.directories.reduced / 'atlas_fit_lines.yaml'
+    
+    # Display command to run
+    print(f'\n  Please run the following command in an EXTERNAL terminal:')
+    print(f'  {"-"*68}')
+    print(f'  conda activate atlas-fit')
+    print(f'  cd {config.directories.reduced}')
+    print(f'  {prepare_script} {temp_config_path}')
+    print(f'  {"-"*68}')
+    print(f'  Note: Output will be saved as atlas_fit_lines.yaml and renamed automatically.')
+    if frame_name == 'upper':
+        print(f'\n  IMPORTANT: After atlas-fit completes, note the fitted stray-light value')
+        print(f'  and FWHM displayed in the output (e.g., "stray-light: X.XX %") and update')
+        print(f'  "stray_light" and "fwhm" in the config file before running amend_spectroflat:')
+        print(f'  {atlas_config_path}')
+    elif frame_name == 'lower':
+        print(f'\n  IMPORTANT: After atlas-fit completes, note the fitted stray-light value')
+        print(f'  and update "stray_light_lower" in the config file (FWHM is shared):')
+        print(f'  {atlas_config_path}')
+    
+    # Wait for user confirmation
+    while True:
+        user_input = input(f'\n  Did atlas-fit complete successfully for {frame_name}? (y/n): ').strip().lower()
+        if user_input == 'y':
+            print(f'  ✓ Atlas-fit completed for {frame_name}')
+            break
+        elif user_input == 'n':
+            print(f'  ✗ Skipping atlas-fit for {frame_name}')
+            # Clean up
+            if temp_config_path.exists():
+                temp_config_path.unlink()
+            if temp_frame_path.exists():
+                temp_frame_path.unlink()
+            # Clean up any generated atlas_fit_lines.yaml
+            if temp_output_file.exists():
+                temp_output_file.unlink()
+            return None
+        else:
+            print('  Please enter "y" or "n"')
+    
+    # Clean up temporary files
+    if temp_config_path.exists():
+        temp_config_path.unlink()
+    if temp_frame_path.exists():
+        temp_frame_path.unlink()
+    
+    # Rename the output file to the correct name
+    if temp_output_file.exists():
+        # Delete old file if it exists (shouldn't, but just in case)
+        if lines_file.exists():
+            lines_file.unlink()
+        temp_output_file.rename(lines_file)
+        print(f'  ✓ Renamed atlas_fit_lines.yaml → {lines_file.name}')
+    else:
+        print(f'  Error: Output file not found: {temp_output_file}')
+        return None
+    
+    # Verify output file exists
+    if not lines_file.exists():
+        print(f'  Error: Output file not found: {lines_file}')
+        return None
+    
+    # Store in auxiliary files
+    file_set = config.dataset[data_type]['files']
+    if not hasattr(file_set, 'auxiliary'):
+        file_set.auxiliary = {}
+    file_set.auxiliary[f'atlas_lines_{frame_name}'] = lines_file
+    
+    return lines_file
+
+
 def _remove_outdated_auxiliary_files(config, data_type):
     """
     Remove outdated auxiliary files (offset_map and illumination_pattern) from 
@@ -1194,6 +1635,76 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
     )
     
     print(f'✓ L3 {data_type} file saved')
+    
+    # ============================================================
+    # ATLAS-FIT WAVELENGTH CALIBRATION (flat_center only, after desmiling)
+    # ============================================================
+    if data_type == 'flat_center':
+        print(f'\n{"="*70}')
+        print(f'ATLAS-FIT WAVELENGTH CALIBRATION FOR FLAT_CENTER')
+        print(f'{"="*70}')
+        
+        file_set = config.dataset[data_type]['files']
+        if not hasattr(file_set, 'auxiliary'):
+            file_set.auxiliary = {}
+        
+        line = config.dataset['line']
+        seq = config.dataset[data_type]['sequence']
+        
+        atlas_lines_files = {}
+        
+        for frame_name in ['upper', 'lower']:
+            print(f'\n{"-"*70}')
+            print(f'ATLAS-FIT: {frame_name.upper()} FRAME')
+            print(f'{"-"*70}')
+            
+            # Check if atlas lines file already exists
+            atlas_lines_file = file_set.auxiliary.get(f'atlas_lines_{frame_name}')
+            
+            skip_atlas_fit = False
+            if atlas_lines_file and Path(atlas_lines_file).exists():
+                print(f'  Atlas lines file already exists: {Path(atlas_lines_file).name}')
+                while True:
+                    user_choice = input(f'  Re-run atlas-fit for {frame_name}? [y/n]: ').strip().lower()
+                    if user_choice in ['y', 'n']:
+                        break
+                    else:
+                        print('  Please enter "y" or "n"')
+                
+                if user_choice == 'n':
+                    print(f'  ✓ Using existing atlas lines file')
+                    atlas_lines_files[frame_name] = atlas_lines_file
+                    skip_atlas_fit = True
+                else:
+                    # User wants to re-run: delete the old file
+                    print(f'  Deleting old atlas lines file: {Path(atlas_lines_file).name}')
+                    Path(atlas_lines_file).unlink()
+            
+            if not skip_atlas_fit:
+                # Run atlas-fit for this frame
+                atlas_result = _process_single_frame_atlas_fit(config, data_type, frame_name)
+                if not atlas_result:
+                    print(f'\n✗ Atlas-fit failed for {frame_name}.')
+                    print(f'  L3 file was saved successfully, but wavelength calibration was not completed.')
+                    # Don't return None here - L3 was already saved successfully
+                else:
+                    atlas_lines_files[frame_name] = atlas_result
+                    print(f'  ✓ Generated atlas lines file for {frame_name}')
+        
+        if len(atlas_lines_files) == 2:
+            print(f'\n✓ Atlas-fit wavelength calibration complete for flat_center')
+            
+            # Generate combined wavelength calibration file
+            print('\nGenerating combined wavelength calibration file...')
+            wl_calib_path = _generate_wavelength_calibration(config, data_type)
+            if wl_calib_path:
+                print(f'✓ Wavelength calibration file generated')
+            else:
+                print('✗ Failed to generate wavelength calibration file')
+        elif atlas_lines_files:
+            print(f'\n⚠ Atlas-fit completed for {list(atlas_lines_files.keys())} only')
+            print('  Cannot generate wavelength calibration without both upper and lower atlas lines')
+    
     return out_path
 
 
@@ -1243,6 +1754,7 @@ reduction_levels.add(ReductionLevel("l3", "_l3.fits", reduce_l2_to_l3, {
     "dark": "Nothing.",
     "scan": "Applies offset map (desmiling) from flat_center to produce smile-corrected scan.",
     "flat": "Applies offset map (desmiling) from flat_center to produce smile-corrected flat field.",
-    "flat_center": "Produces offset map and illumination pattern using spectroflat. Applies desmiling to image data."
+    "flat_center": "Produces offset map and illumination pattern using spectroflat. Applies desmiling to image data. \
+    Runs atlas-fit wavelength calibration on desmiled L3 data. Saves the wavelength calibration file."
 }))
 

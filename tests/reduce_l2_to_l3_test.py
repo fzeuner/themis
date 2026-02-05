@@ -38,8 +38,8 @@ if __name__ == '__main__':
     lv3 = tdr.reduction_levels["l3"]
     
     result = lv3.reduce(config, data_type='flat_center', return_reduced = False)
-    result = lv3.reduce(config, data_type='flat', return_reduced = False)
-    result = lv3.reduce(config, data_type='scan', return_reduced = False)
+    #result = lv3.reduce(config, data_type='flat', return_reduced = False)
+    #result = lv3.reduce(config, data_type='scan', return_reduced = False)
 #%%    
     data, _ = tio.read_any_file(config, 'flat', verbose=False, status='l3')
     data_old, _ = tio.read_any_file(config, 'flat', verbose=False, status='l2')

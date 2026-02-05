@@ -11,13 +11,14 @@ Code for analyzing themis data
 Get https://github.com/fzeuner/spectator, then:
   pip install -e spectator
 
-Get https://gitlab.gwdg.de/hoelken/atlas-fit/-/tree/main?ref_type=heads, then:
-  git clone https://gitlab.gwdg.de/hoelken/atlas-fit.git
-  pip install -e atlas-fit
-
 Get https://gitlab.gwdg.de/hoelken/spectroflat:
   pip install spectroflat
-  --> Then, remove all pycache files in the spectroflat directory 
+
+- **Create/activate conda env**:
+  - `conda create -n atlas-fit python=3.10`
+  Get https://gitlab.gwdg.de/hoelken/atlas-fit/-/tree/main?ref_type=heads, then:
+  git clone https://gitlab.gwdg.de/hoelken/atlas-fit.git
+  pip install -e atlas-fit
 
   - `conda env update -n themis -f environment.yml`
 - **Editable install of this package** (so imports like `from themis...` work everywhere and scripts don’t need sys.path hacks):
