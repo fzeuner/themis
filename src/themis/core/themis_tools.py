@@ -461,6 +461,7 @@ def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, D
 
 
     # CALCULATE OBSERVED WAVELENGTH RANGE
+    print(f'  z3ccspectrum: idealfac = {idealfac:.6f}')
     xobs0 = xatlas[idealshift]
     xobs1 = xatlas[idealshift + npts - 1]
     lambdaperpx = (xobs1 - xobs0) / (ippts[npts - 1])
@@ -480,12 +481,12 @@ def z3ccspectrum(yin, xatlas, yatlas, FACL=0.8, FACH=1.5, FACS=0.01, CUT=None, D
         plt.plot(xobs, yobs, label='Observation')
         plt.plot(xatlas, yatlas, color='red', linestyle='--',label='Reference')
         plt.title('Z3ccspectrum - result')
-        plt.xlabel('Wavelength [A]')
+        plt.xlabel('Wavelength [nm]')
         plt.ylabel('Normalized')
         plt.legend()
         plt.show()
 
-    return(xobs)
+    return(xobs, idealfac)
 
 
 

@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+# EXTRACT DELTA OFFSETS FROM AMEND_SPECTROFLAT LOGIC
+
+Runs the Comperator from atlas-fit on a single 2D frame to extract the
+wavelength-correction delta offsets (per-column pixel shifts) and the
+wavelength vector. Saves both to a FITS file.
+
+## Usage
+    conda activate atlas-fit
+    ./scripts/extract_delta_offsets <config_path> <lines_file> <frame_fits> <output_path>
+
+## Arguments
+    config_path  : Path to the atlas-fit configuration file (temp, with stray_light set)
+    lines_file   : Path to atlas_fit_lines.yaml for this frame
+    frame_fits   : Path to L3 FITS file for this frame (2D)
+    output_path  : Path for output delta_offsets FITS file
+"""
+import copy
+import logging
+import os
+import re
+import sys
+from argparse import ArgumentParser
+from pathlib import Path
+
+import numpy as np
+import yaml
+from astropy.io import fits
+from scipy.ndimage import zoom
+
+# Add atlas-fit to path
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parent
+atlas_fit_path = project_root / 'atlas-fit'
+sys.path.insert(0, str(atlas_fit_path))
+sys.path.insert(0, str(atlas_fit_path / 'src'))
+
+from atlas_fit import Config, Comperator
+from atlas_fit.utils.tailoring import select_best_atlas_range
+
+log = logging.getLogger()
+
+aparser = ArgumentParser(description='Extract delta offsets from atlas-fit wavelength calibration')
+aparser.add_argument('config_path', type=str, help='Path to atlas-fit configuration file')
+aparser.add_argument('lines_file', type=str, help='Path to atlas_fit_lines.yaml')
+aparser.add_argument('frame_fits', type=str, help='Path to L3 FITS file (2D frame)')
+aparser.add_argument('output_path', type=str, help='Output path for delta_offsets FITS')
+args = aparser.parse_args()
+
+# Load config and atlas lines
+config = Config.from_yaml(args.config_path)
+with open(args.lines_file, 'r') as f:
+    points = yaml.safe_load(f)
+
+# Load 2D frame
+with fits.open(args.frame_fits) as hdul:
+    frame_2d = hdul[0].data.astype('float32')
+
+# Parse ROI to get row index
+roi_str = config.input.roi.replace('s', '0')
+roi_match = re.match(r'\[(\d+),', roi_str)
+if roi_match:
+    row_idx = int(roi_match.group(1))
+else:
+    row_idx = frame_2d.shape[0] // 2
+
+spectrum = frame_2d[row_idx, :]
+print(f'Spectrum shape: {spectrum.shape}, ROI row: {row_idx}')
+
+# Run Comperator to get dispersion fit
+c = Comperator(copy.copy(spectrum), config, points).run()
+orig_atlas = select_best_atlas_range(c, config)
+
+# Extract delta offsets: wavelength-correction per-column pixel shifts
+xes = np.arange(len(c.spectrum.data))
+delta_offsets = c.new_data_xes - xes
+
+# Scale wavelength to pixel count
+scale_factor = len(spectrum) / len(orig_atlas.wl)
+wl = zoom(orig_atlas.wl, scale_factor, order=4, mode='nearest', grid_mode=True)
+
+print(f'Delta offsets shape: {delta_offsets.shape}')
+print(f'Delta offsets range: {delta_offsets.min():.4f} to {delta_offsets.max():.4f} px')
+print(f'Wavelength range: {min(wl):.4f} - {max(wl):.4f} nm')
+print(f'Dispersion: {(wl[-1] - wl[0]) / len(wl):.6e} nm/px')
+
+# Save to FITS
+hdul = fits.HDUList()
+
+primary = fits.PrimaryHDU(data=delta_offsets)
+primary.header['ROI_ROW'] = (row_idx, 'ROI row used for Comperator')
+primary.header['COMMENT'] = 'Delta offsets (per-column pixel shifts) from atlas-fit'
+hdul.append(primary)
+
+wl_hdu = fits.ImageHDU(data=wl, name='WAVELENGTH')
+wl_hdu.header['MIN_WL'] = (float(min(wl)), 'Minimum wavelength [nm]')
+wl_hdu.header['MAX_WL'] = (float(max(wl)), 'Maximum wavelength [nm]')
+wl_hdu.header['DISPERS'] = (float((wl[-1] - wl[0]) / len(wl)), 'Dispersion [nm/px]')
+wl_hdu.header['NPIXELS'] = (len(wl), 'Number of pixels')
+hdul.append(wl_hdu)
+
+hdul.writeto(args.output_path, overwrite=True)
+print(f'✓ Saved delta offsets and wavelength: {args.output_path}')
+print('Done.')

@@ -1258,6 +1258,275 @@ def _generate_wavelength_calibration(config, data_type='flat_center'):
     return wl_calib_path
 
 
+def _process_amend_spectroflat(config, data_type, frame_name):
+    """
+    Run extract_delta_offsets script externally to get wavelength-correction
+    delta offsets for a single frame. Saves delta_offsets as auxiliary file.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        'flat_center'
+    frame_name : str
+        'upper' or 'lower'
+        
+    Returns
+    -------
+    Path or None
+        Path to the saved delta_offsets FITS file, or None on failure
+    """
+    print(f'  Preparing amend_spectroflat for {frame_name} frame...')
+    
+    atlas_config_path = config.cam.atlas_fit_config
+    file_set = config.dataset[data_type]['files']
+    aux = getattr(file_set, 'auxiliary', {})
+    
+    # Need atlas_lines file
+    atlas_lines_file = aux.get(f'atlas_lines_{frame_name}')
+    if not atlas_lines_file or not Path(atlas_lines_file).exists():
+        print(f'  Error: atlas_lines file not found for {frame_name}. Run atlas-fit first.')
+        return None
+    
+    # Extract frame to temporary FITS
+    temp_frame_path = config.directories.reduced / f'temp_{data_type}_{frame_name}_for_amend.fits'
+    l3_data, _ = tio.read_any_file(config, data_type, verbose=False, status='l3')
+    frame_data = l3_data[0][frame_name].data
+    hdu = fits.PrimaryHDU(data=frame_data)
+    hdu.writeto(temp_frame_path, overwrite=True)
+    
+    # Create temporary config (keep stray_light for Comperator)
+    temp_config_path, _ = _create_temp_atlas_config(
+        atlas_config_path,
+        f'temp_amend_{data_type}_{frame_name}_config.yml',
+        remove_stray_light_key=False
+    )
+    
+    # Output path for delta offsets
+    line = config.dataset['line']
+    seq = config.dataset[data_type]['sequence']
+    delta_offsets_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_delta_offsets_{frame_name}.fits'
+    
+    # Find script
+    project_root = Path(__file__).resolve().parents[3]
+    script = project_root / 'scripts' / 'extract_delta_offsets'
+    
+    # Display command to run
+    print(f'\n  Please run the following command in an EXTERNAL terminal:')
+    print(f'  {"-"*68}')
+    print(f'  conda activate atlas-fit')
+    print(f'  cd {config.directories.reduced}')
+    print(f'  {script} \\')
+    print(f'      {temp_config_path} \\')
+    print(f'      {atlas_lines_file} \\')
+    print(f'      {temp_frame_path} \\')
+    print(f'      {delta_offsets_path}')
+    print(f'  {"-"*68}')
+    
+    # Wait for user confirmation
+    while True:
+        user_input = input(f'\n  Did extract_delta_offsets complete successfully for {frame_name}? (y/n): ').strip().lower()
+        if user_input == 'y':
+            break
+        elif user_input == 'n':
+            for f in [temp_frame_path, temp_config_path]:
+                if f.exists():
+                    f.unlink()
+            return None
+        else:
+            print('  Please enter "y" or "n"')
+    
+    # Clean up temp files
+    for f in [temp_frame_path, temp_config_path]:
+        if f.exists():
+            f.unlink()
+    
+    # Verify output
+    if not delta_offsets_path.exists():
+        print(f'  Error: Delta offsets file not found: {delta_offsets_path}')
+        return None
+    
+    # Store in auxiliary files
+    file_set.auxiliary[f'delta_offsets_{frame_name}'] = delta_offsets_path
+    print(f'  ✓ Saved delta offsets: {delta_offsets_path.name}')
+    
+    return delta_offsets_path
+
+
+def _process_lower_frame_alignment(config, data_type):
+    """
+    Align the lower L3 frame to the corrected upper L4 frame using
+    z3ccspectrum cross-correlation.
+    
+    Extracts a 1D spectrum from the lower L3 frame at the ROI row specified
+    in the atlas-fit config, cross-correlates it against the corrected upper
+    L4 spectrum at the same row, and computes a pixel-offset map from the
+    wavelength difference.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        'flat_center'
+        
+    Returns
+    -------
+    Path or None
+        Path to the saved delta_offsets_lower FITS file, or None on failure
+    """
+    import yaml
+    from themis.core.themis_tools import z3ccspectrum
+    
+    file_set = config.dataset[data_type]['files']
+    
+    # --- Load atlas-fit config to get ROI row and column trim ---
+    atlas_config_path = config.cam.atlas_fit_config
+    with open(atlas_config_path, 'r') as f:
+        atlas_cfg = yaml.safe_load(f)
+    
+    roi_str = atlas_cfg['input']['roi']  # e.g. "[400,10:-10]"
+    roi_str = roi_str.strip('[] ')
+    parts = roi_str.split(',')
+    roi_row = int(parts[0].strip())
+    col_slice_str = parts[1].strip()  # e.g. "10:-10"
+    col_parts = col_slice_str.split(':')
+    col_start = int(col_parts[0]) if col_parts[0] else 0
+    col_end = int(col_parts[1]) if col_parts[1] else None
+    
+    print(f'  ROI from atlas config: row={roi_row}, columns=[{col_start}:{col_end}]')
+    
+    # --- Load upper wavelength grid from delta_offsets_upper ---
+    delta_offsets_upper_file = file_set.auxiliary.get('delta_offsets_upper')
+    with fits.open(delta_offsets_upper_file) as hdul:
+        wl_upper = np.array(hdul['WAVELENGTH'].data)  # in nm
+    
+    # --- Load L4 upper frame (already corrected) and L3 lower frame ---
+    l4_data, _ = tio.read_any_file(config, data_type, verbose=False, status='l4')
+    upper_l4_frame = l4_data[0]['upper'].data.astype('float64')
+    
+    l3_data, _ = tio.read_any_file(config, data_type, verbose=False, status='l3')
+    lower_l3_frame = l3_data[0]['lower'].data.astype('float64')
+    
+    # --- Extract 1D spectra at the ROI row ---
+    upper_spec = upper_l4_frame[roi_row, :]
+    lower_spec = lower_l3_frame[roi_row, :]
+    
+    # Trim columns as in atlas config
+    if col_end is not None:
+        upper_spec_trimmed = upper_spec[col_start:col_end]
+        wl_upper_trimmed = wl_upper[col_start:col_end]
+    else:
+        upper_spec_trimmed = upper_spec[col_start:]
+        wl_upper_trimmed = wl_upper[col_start:]
+    
+    print(f'  Upper L4 spectrum: {len(upper_spec_trimmed)} px (reference)')
+    print(f'  Lower L3 spectrum: {len(lower_spec)} px (to calibrate)')
+    print(f'  Wavelength range: {wl_upper_trimmed[0]:.4f} - {wl_upper_trimmed[-1]:.4f} nm')
+    
+    # --- Run z3ccspectrum ---
+    # z3ccspectrum expects: yin=observed, xatlas=wavelength, yatlas=reference
+    # Use narrow scaling range since upper/lower are from the same instrument
+    print(f'  Running z3ccspectrum...')
+    wl_lower, idealfac = z3ccspectrum(
+        lower_spec.copy(),
+        wl_upper_trimmed.copy(),
+        (upper_spec_trimmed / upper_spec_trimmed.max()).copy(),
+        FACL=0.95, FACH=1.05, FACS=0.001,
+        CUT=[col_start, abs(col_end) if col_end is not None and col_end < 0 else 10],
+        SHOW=1,
+    )
+    
+    if not isinstance(wl_lower, np.ndarray) or len(wl_lower) == 0:
+        print(f'  Error: z3ccspectrum failed to find a solution.')
+        return None
+    
+    print(f'  z3ccspectrum result: {wl_lower[0]:.4f} - {wl_lower[-1]:.4f} nm')
+    
+    # --- Compute delta offsets in pixels ---
+    # delta_offset[px] = (wl_lower[px] - wl_upper[px]) / dispersion_per_pixel
+    # dispersion = mean nm/pixel from the upper wavelength grid
+    dispersion = np.gradient(wl_upper)  # nm per pixel, per pixel
+    delta_wl = wl_lower - wl_upper  # wavelength difference at each pixel
+    delta_offsets_lower = delta_wl / dispersion  # convert to pixel shift
+    
+    print(f'  Delta offsets range: {delta_offsets_lower.min():.4f} to {delta_offsets_lower.max():.4f} px')
+    print(f'  Mean shift: {delta_offsets_lower.mean():.4f} px')
+    
+    # --- Save delta offsets as FITS ---
+    line = config.dataset['line']
+    seq = config.dataset[data_type]['sequence']
+    delta_offsets_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_delta_offsets_lower.fits'
+    
+    hdu_primary = fits.PrimaryHDU(data=delta_offsets_lower.astype('float32'))
+    hdu_primary.header['METHOD'] = ('z3ccspectrum', 'Cross-correlation against upper L4')
+    hdu_primary.header['ROI_ROW'] = (roi_row, 'Row used for cross-correlation')
+    hdu_wl = fits.ImageHDU(data=wl_lower.astype('float64'), name='WAVELENGTH')
+    hdul = fits.HDUList([hdu_primary, hdu_wl])
+    hdul.writeto(delta_offsets_path, overwrite=True)
+    
+    file_set.auxiliary['delta_offsets_lower'] = delta_offsets_path
+    print(f'  ✓ Saved delta offsets: {delta_offsets_path.name}')
+    
+    return delta_offsets_path
+
+
+def _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config):
+    """
+    Diagnostic plot comparing corrected upper and lower L4 spectra
+    at three spatial positions: near-top, center, near-bottom.
+    Edges are excluded from both the plot and the RMS calculation.
+    """
+    import matplotlib.pyplot as plt
+    
+    # Load wavelength vector from upper delta_offsets
+    delta_offsets_upper_file = file_set.auxiliary.get('delta_offsets_upper')
+    try:
+        with fits.open(delta_offsets_upper_file) as hdul:
+            wl = np.array(hdul['WAVELENGTH'].data)
+    except Exception:
+        wl = np.arange(upper_l4.shape[1])
+    
+    nx = upper_l4.shape[1]
+    ny = upper_l4.shape[0]
+    edge = max(10, nx // 50)  # ignore ~2% on each side
+    margin = max(5, ny // 10)
+    rows = {
+        'near-top': margin,
+        'center': ny // 2,
+        'near-bottom': ny - margin - 1,
+    }
+    
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+    
+    for ax, (label, row) in zip(axes, rows.items()):
+        upper_spec = upper_l4[row, edge:-edge]
+        lower_spec = lower_l4[row, edge:-edge]
+        wl_trimmed = wl[edge:-edge]
+        
+        # Normalise for comparison
+        upper_norm = upper_spec / np.mean(upper_spec)
+        lower_norm = lower_spec / np.mean(lower_spec)
+        
+        ax.plot(wl_trimmed, upper_norm, label=f'Upper L4 (row {row})', alpha=0.8)
+        ax.plot(wl_trimmed, lower_norm, label=f'Lower L4 (row {row})', alpha=0.8, ls='--')
+        
+        residual_rms = np.std(upper_norm - lower_norm)
+        ax.set_title(f'{label} (row {row}) — RMS residual: {residual_rms:.5f}')
+        ax.set_ylabel('Normalised intensity')
+        ax.legend(loc='lower left')
+    
+    axes[-1].set_xlabel('Wavelength [nm]')
+    fig.suptitle(f'L4 Upper vs Lower — wavelength alignment check (edges ±{edge} px excluded)', fontsize=14)
+    plt.tight_layout()
+    
+    plot_path = config.directories.reduced / 'l4_upper_lower_comparison.png'
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.show()
+    print(f'  ✓ Saved diagnostic plot: {plot_path.name}')
+
+
 def _process_single_frame_atlas_fit(config, data_type, frame_name):
     """
     Helper function to run atlas-fit for a single frame (upper or lower).
@@ -1469,7 +1738,7 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
     config : Config
         Configuration object with dataset and file paths.
     data_type : str
-        One of 'flat', 'flat_center'.
+        One of 'scan', 'flat', 'flat_center'.
     return_reduced : bool
         If True, return the reduced frames instead of saving to disk.
     
@@ -1636,75 +1905,231 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
     
     print(f'✓ L3 {data_type} file saved')
     
-    # ============================================================
-    # ATLAS-FIT WAVELENGTH CALIBRATION (flat_center only, after desmiling)
-    # ============================================================
-    if data_type == 'flat_center':
-        print(f'\n{"="*70}')
-        print(f'ATLAS-FIT WAVELENGTH CALIBRATION FOR FLAT_CENTER')
-        print(f'{"="*70}')
-        
-        file_set = config.dataset[data_type]['files']
-        if not hasattr(file_set, 'auxiliary'):
-            file_set.auxiliary = {}
-        
-        line = config.dataset['line']
-        seq = config.dataset[data_type]['sequence']
-        
-        atlas_lines_files = {}
-        
-        for frame_name in ['upper', 'lower']:
-            print(f'\n{"-"*70}')
-            print(f'ATLAS-FIT: {frame_name.upper()} FRAME')
-            print(f'{"-"*70}')
-            
-            # Check if atlas lines file already exists
-            atlas_lines_file = file_set.auxiliary.get(f'atlas_lines_{frame_name}')
-            
-            skip_atlas_fit = False
-            if atlas_lines_file and Path(atlas_lines_file).exists():
-                print(f'  Atlas lines file already exists: {Path(atlas_lines_file).name}')
-                while True:
-                    user_choice = input(f'  Re-run atlas-fit for {frame_name}? [y/n]: ').strip().lower()
-                    if user_choice in ['y', 'n']:
-                        break
-                    else:
-                        print('  Please enter "y" or "n"')
-                
-                if user_choice == 'n':
-                    print(f'  ✓ Using existing atlas lines file')
-                    atlas_lines_files[frame_name] = atlas_lines_file
-                    skip_atlas_fit = True
-                else:
-                    # User wants to re-run: delete the old file
-                    print(f'  Deleting old atlas lines file: {Path(atlas_lines_file).name}')
-                    Path(atlas_lines_file).unlink()
-            
-            if not skip_atlas_fit:
-                # Run atlas-fit for this frame
-                atlas_result = _process_single_frame_atlas_fit(config, data_type, frame_name)
-                if not atlas_result:
-                    print(f'\n✗ Atlas-fit failed for {frame_name}.')
-                    print(f'  L3 file was saved successfully, but wavelength calibration was not completed.')
-                    # Don't return None here - L3 was already saved successfully
-                else:
-                    atlas_lines_files[frame_name] = atlas_result
-                    print(f'  ✓ Generated atlas lines file for {frame_name}')
-        
-        if len(atlas_lines_files) == 2:
-            print(f'\n✓ Atlas-fit wavelength calibration complete for flat_center')
-            
-            # Generate combined wavelength calibration file
-            print('\nGenerating combined wavelength calibration file...')
-            wl_calib_path = _generate_wavelength_calibration(config, data_type)
-            if wl_calib_path:
-                print(f'✓ Wavelength calibration file generated')
-            else:
-                print('✗ Failed to generate wavelength calibration file')
-        elif atlas_lines_files:
-            print(f'\n⚠ Atlas-fit completed for {list(atlas_lines_files.keys())} only')
-            print('  Cannot generate wavelength calibration without both upper and lower atlas lines')
+    return out_path
+
+
+def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
+    """
+    L3 → L4 reduction.
     
+    For flat_center: Runs atlas-fit wavelength calibration on the upper frame,
+    extracts delta offsets via amend_spectroflat, applies wavelength-correction
+    shifts to the upper L3 frame, and saves as L4.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object with dataset and file paths.
+    data_type : str
+        One of 'scan', 'flat', 'flat_center'.
+    return_reduced : bool
+        If True, return the reduced frames instead of saving to disk.
+    
+    Returns
+    -------
+    Path or None
+        Path to saved L4 file, or None on failure.
+    """
+    if data_type is None:
+        print('No processing - provide a specific data type.')
+        return None
+    
+    if data_type not in ['flat_center']:
+        print(f'L4 reduction not yet defined for data_type: {data_type}')
+        return None
+    
+    print(f"\n{'='*70}")
+    print(f'L3 → L4 REDUCTION FOR {data_type.upper()} (ATLAS-FIT WAVELENGTH CALIBRATION)')
+    print(f"{'='*70}")
+    
+    file_set = config.dataset[data_type]['files']
+    if not hasattr(file_set, 'auxiliary'):
+        file_set.auxiliary = {}
+    
+    frame_name = 'upper'
+    
+    # ============================================================
+    # STEP 1: ATLAS-FIT (upper frame)
+    # ============================================================
+    print(f'\n{"-"*70}')
+    print(f'STEP 1: ATLAS-FIT ({frame_name.upper()} FRAME)')
+    print(f'{"-"*70}')
+    
+    atlas_lines_file = file_set.auxiliary.get(f'atlas_lines_{frame_name}')
+    
+    skip_atlas_fit = False
+    if atlas_lines_file and Path(atlas_lines_file).exists():
+        print(f'  Atlas lines file already exists: {Path(atlas_lines_file).name}')
+        while True:
+            user_choice = input(f'  Re-run atlas-fit for {frame_name}? [y/n]: ').strip().lower()
+            if user_choice in ['y', 'n']:
+                break
+            else:
+                print('  Please enter "y" or "n"')
+        
+        if user_choice == 'n':
+            print(f'  ✓ Using existing atlas lines file')
+            skip_atlas_fit = True
+        else:
+            print(f'  Deleting old atlas lines file: {Path(atlas_lines_file).name}')
+            Path(atlas_lines_file).unlink()
+    
+    if not skip_atlas_fit:
+        atlas_result = _process_single_frame_atlas_fit(config, data_type, frame_name)
+        if not atlas_result:
+            print(f'\n✗ Atlas-fit failed for {frame_name}.')
+            return None
+        print(f'  ✓ Generated atlas lines file for {frame_name}')
+    
+    # ============================================================
+    # STEP 2: EXTRACT DELTA OFFSETS (upper frame)
+    # ============================================================
+    print(f'\n{"-"*70}')
+    print(f'STEP 2: EXTRACT DELTA OFFSETS ({frame_name.upper()} FRAME)')
+    print(f'{"-"*70}')
+    
+    delta_offsets_file = file_set.auxiliary.get(f'delta_offsets_{frame_name}')
+    
+    skip_amend = False
+    if delta_offsets_file and Path(delta_offsets_file).exists():
+        print(f'  Delta offsets file already exists: {Path(delta_offsets_file).name}')
+        while True:
+            user_choice = input(f'  Re-run extract_delta_offsets for {frame_name}? [y/n]: ').strip().lower()
+            if user_choice in ['y', 'n']:
+                break
+            else:
+                print('  Please enter "y" or "n"')
+        
+        if user_choice == 'n':
+            print(f'  ✓ Using existing delta offsets file')
+            skip_amend = True
+        else:
+            print(f'  Deleting old delta offsets file: {Path(delta_offsets_file).name}')
+            Path(delta_offsets_file).unlink()
+    
+    if not skip_amend:
+        delta_result = _process_amend_spectroflat(config, data_type, frame_name)
+        if not delta_result:
+            print(f'\n✗ Extract delta offsets failed for {frame_name}.')
+            return None
+    
+    # ============================================================
+    # STEP 3: APPLY DELTA OFFSETS TO UPPER L3 FRAME → SAVE L4
+    # ============================================================
+    print(f'\n{"-"*70}')
+    print(f'STEP 3: APPLY DELTA OFFSETS TO UPPER → SAVE L4')
+    print(f'{"-"*70}')
+    
+    # Load upper delta offsets
+    delta_offsets_upper_file = file_set.auxiliary.get('delta_offsets_upper')
+    with fits.open(delta_offsets_upper_file) as hdul:
+        delta_offsets_upper = np.array(hdul[0].data)
+    print(f'  Loaded upper delta offsets: {Path(delta_offsets_upper_file).name}')
+    print(f'  Range: {delta_offsets_upper.min():.4f} to {delta_offsets_upper.max():.4f} px')
+    
+    # Load L3 data
+    l3_data, header = tio.read_any_file(config, data_type, verbose=False, status='l3')
+    upper_l3 = l3_data[0]['upper'].data.astype('float32')
+    lower_l3 = l3_data[0]['lower'].data.astype('float32')
+    
+    # Apply delta offsets to upper frame (uniform shift per column across all rows)
+    upper_l4 = _apply_desmiling(upper_l3, np.tile(delta_offsets_upper, (upper_l3.shape[0], 1)))
+    print(f'  ✓ Applied delta offsets to upper frame')
+    
+    # Save intermediate L4 (upper corrected, lower unchanged) — needed for step 4
+    reduced_frames = dct.FramesSet()
+    dest = dct.Frame(f"{data_type}_l4_frame0000")
+    dest.set_half('upper', upper_l4.astype('float32'))
+    dest.set_half('lower', lower_l3.astype('float32'))
+    reduced_frames.add_frame(dest, 0)
+    
+    extra_keywords = {
+        'DESMILED': ('TRUE', 'L3 desmiling applied'),
+        'WLCORR_U': ('TRUE', 'L4 wavelength correction applied to upper frame'),
+    }
+    
+    out_path = tio.save_reduction(
+        config,
+        data_type=data_type,
+        level='l4',
+        frames=reduced_frames,
+        source_header=header,
+        verbose=True,
+        overwrite=True,
+        extra_keywords=extra_keywords,
+    )
+    print(f'  ✓ Intermediate L4 saved (upper corrected)')
+    
+    # ============================================================
+    # STEP 4: LOWER FRAME ALIGNMENT (z3ccspectrum vs upper L4)
+    # ============================================================
+    print(f'\n{"-"*70}')
+    print(f'STEP 4: LOWER FRAME ALIGNMENT (z3ccspectrum vs upper L4)')
+    print(f'{"-"*70}')
+    
+    delta_offsets_lower_file = file_set.auxiliary.get('delta_offsets_lower')
+    
+    skip_lower = False
+    if delta_offsets_lower_file and Path(delta_offsets_lower_file).exists():
+        print(f'  Delta offsets file already exists: {Path(delta_offsets_lower_file).name}')
+        while True:
+            user_choice = input(f'  Re-run lower frame alignment? [y/n]: ').strip().lower()
+            if user_choice in ['y', 'n']:
+                break
+            else:
+                print('  Please enter "y" or "n"')
+        
+        if user_choice == 'n':
+            print(f'  ✓ Using existing delta offsets for lower')
+            skip_lower = True
+        else:
+            print(f'  Deleting old delta offsets file: {Path(delta_offsets_lower_file).name}')
+            Path(delta_offsets_lower_file).unlink()
+    
+    if not skip_lower:
+        delta_result = _process_lower_frame_alignment(config, data_type)
+        if not delta_result:
+            print(f'\n✗ Lower frame alignment failed.')
+            print(f'  L4 file was saved with upper correction only.')
+            return out_path
+    
+    # Apply lower delta offsets and re-save L4
+    delta_offsets_lower_file = file_set.auxiliary.get('delta_offsets_lower')
+    with fits.open(delta_offsets_lower_file) as hdul:
+        delta_offsets_lower = np.array(hdul[0].data)
+    print(f'  Loaded lower delta offsets: {Path(delta_offsets_lower_file).name}')
+    print(f'  Range: {delta_offsets_lower.min():.4f} to {delta_offsets_lower.max():.4f} px')
+    
+    lower_l4 = _apply_desmiling(lower_l3, np.tile(delta_offsets_lower, (lower_l3.shape[0], 1)))
+    print(f'  ✓ Applied delta offsets to lower frame')
+    
+    # Diagnostic plot: compare corrected upper vs lower at 3 spatial positions
+    _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config)
+    
+    # Re-save L4 with both frames corrected
+    reduced_frames = dct.FramesSet()
+    dest = dct.Frame(f"{data_type}_l4_frame0000")
+    dest.set_half('upper', upper_l4.astype('float32'))
+    dest.set_half('lower', lower_l4.astype('float32'))
+    reduced_frames.add_frame(dest, 0)
+    
+    extra_keywords['WLCORR_L'] = ('TRUE', 'L4 lower wavelength correction via z3ccspectrum')
+    
+    if return_reduced:
+        return reduced_frames
+    
+    out_path = tio.save_reduction(
+        config,
+        data_type=data_type,
+        level='l4',
+        frames=reduced_frames,
+        source_header=header,
+        verbose=True,
+        overwrite=True,
+        extra_keywords=extra_keywords,
+    )
+    
+    print(f'✓ L4 {data_type} file saved (upper + lower corrected)')
     return out_path
 
 
@@ -1754,7 +2179,12 @@ reduction_levels.add(ReductionLevel("l3", "_l3.fits", reduce_l2_to_l3, {
     "dark": "Nothing.",
     "scan": "Applies offset map (desmiling) from flat_center to produce smile-corrected scan.",
     "flat": "Applies offset map (desmiling) from flat_center to produce smile-corrected flat field.",
-    "flat_center": "Produces offset map and illumination pattern using spectroflat. Applies desmiling to image data. \
-    Runs atlas-fit wavelength calibration on desmiled L3 data. Saves the wavelength calibration file."
+    "flat_center": "Produces desmiling offset map and illumination pattern using spectroflat. Applies desmiling to data."
 }))
 
+reduction_levels.add(ReductionLevel("l4", "_l4.fits", reduce_l3_to_l4, {
+    "dark": "Nothing.",
+    "scan": "Nothing at the moment.",
+    "flat": "Nothing at the moment.",
+    "flat_center": "Runs atlas-fit on upper frame (FTS atlas), extracts delta offsets. Aligns lower frame to upper via z3ccspectrum cross-correlation. Applies wavelength correction to both frames."
+}))

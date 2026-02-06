@@ -512,6 +512,13 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
             
             if dust_flat_file.exists():
                 file_set.auxiliary[f'dust_flat_{frame}'] = dust_flat_file
+            
+            # Discover delta offsets file (per frame, from amend_spectroflat)
+            delta_offsets_pattern = f"{line}_{data_t}_{seq_str}_delta_offsets_{frame}.fits"
+            delta_offsets_file = Path(directories.reduced) / delta_offsets_pattern
+            
+            if delta_offsets_file.exists():
+                file_set.auxiliary[f'delta_offsets_{frame}'] = delta_offsets_file
 
     # Discover y-shift auxiliary files (from calibration target analysis)
     # These are stored without sequence number:

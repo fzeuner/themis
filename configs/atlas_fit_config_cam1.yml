@@ -9,13 +9,13 @@ input:
   # Path to the Input file to use. Must be fits format.
   corrected_frame: examples/test.fits.gz
   # The region of interest to extrac from the input frame, in typical python numpy format.
-  roi: "[50,:]"
+  roi: "[400,10:-10]"
   # Approx. lower wavelength boundary of the input [nm]
   wl_start: 460.5
   # Approx. upper wavelength boundary of the input [nm]
   wl_end: 461.1
   # The global stray-light level in the spectrograph in percent [%]
-  stray_light: 4.6
+  stray_light: 4.02
   # Stray-light in percent [%] for lower frame (used by themis pipeline, ignored by atlas-fit)
   stray_light_lower: 4.31
   # The window [px] for the gauss-fit to operate in around detected line cores
@@ -23,7 +23,7 @@ input:
   # PSF Model to convolve the atlas with
   # model_psf: examples/modeled_spectral_psf_412nm.txt
   # The FWHM for the data at the central wl [nm]
-  fwhm: 0.00321 
+  fwhm: 0.00326 
 
 fitting:
   # Use the highest quantile as a first order continuum correction
@@ -33,7 +33,7 @@ fitting:
   # Maximal dispersion degree to try
   dispersion_max_degree: 4
   # Minimal dispersion degree to try
-  dispersion_min_degree: 2
+  dispersion_min_degree: 1
   # Order of the lowpass-prefilter to apply. Use Null to deactivate
   continuum_filter_order: 8
   # Spline degree for the continuum fit

@@ -157,17 +157,17 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
         hdus.append(fits.ImageHDU(upper, name='UPPER_L2'))
         hdus.append(fits.ImageHDU(lower, name='LOWER_L2'))
 
-    elif level == 'l3' and data_type in ('flat', 'flat_center'):
-        # L3 products for flats: same data as L2, but with refined calibration products
+    elif level in ('l3', 'l4') and data_type in ('flat', 'flat_center'):
         avg = frames.get(0)
 
         if avg is None:
-            raise ValueError("Expected l3 frames to contain index 0")
+            raise ValueError(f"Expected {level} frames to contain index 0")
 
         upper = avg.get_half('upper').data.astype('float32', copy=False)
         lower = avg.get_half('lower').data.astype('float32', copy=False)
-        hdus.append(fits.ImageHDU(upper, name='UPPER_L3'))
-        hdus.append(fits.ImageHDU(lower, name='LOWER_L3'))
+        level_suffix = level.upper()
+        hdus.append(fits.ImageHDU(upper, name=f'UPPER_{level_suffix}'))
+        hdus.append(fits.ImageHDU(lower, name=f'LOWER_{level_suffix}'))
 
     elif data_type == 'scan' and level in ('l0', 'l1', 'l2', 'l3'):
         # Expect CycleSet with keys (frame_state, slit_idx, map_idx)
@@ -447,7 +447,7 @@ def read_any_file(config, data_type, status='raw', verbose=False):
         single_frame.set_half("lower", lower)
         collection.add_frame(single_frame, 0)
 
-    elif status in ('l1', 'l2', 'l3') and data_type in ('flat', 'flat_center'):
+    elif status in ('l1', 'l2', 'l3', 'l4') and data_type in ('flat', 'flat_center'):
         # Read reduced L1/L2/L3 flat/flat_center created by save_reduction
         # L1: dust-corrected, L2: y-shift corrected, L3: refined calibration
         collection = dct.FramesSet()
