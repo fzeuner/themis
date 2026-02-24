@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+# RUN SPECTROFLAT ON A SINGLE FRAME
+
+Runs spectroflat's Analyser on a single 2D frame (upper or lower half) to
+produce an offset map and illumination pattern. Designed to be run in the
+atlas-fit conda environment where spectroflat is compatible.
+
+## Usage
+    conda activate atlas-fit
+    python scripts/run_spectroflat <frame_fits> <offset_map_out> <illum_pattern_out> [--report_dir DIR]
+
+## Arguments
+    frame_fits         : Path to input FITS file (2D frame, e.g. L2 upper/lower half)
+    offset_map_out     : Output path for offset map FITS (multi-HDU: map + error)
+    illum_pattern_out  : Output path for illumination pattern FITS
+
+## Optional
+    --report_dir DIR   : Directory for spectroflat report plots (default: no report)
+"""
+import sys
+from argparse import ArgumentParser
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from spectroflat import Analyser, Config as SpectroflatConfig, SmileConfig, SensorFlatConfig
+from qollib.strings import parse_shape
+
+
+def main():
+    aparser = ArgumentParser(description='Run spectroflat on a single 2D frame')
+    aparser.add_argument('frame_fits', type=str, help='Input FITS file (2D frame)')
+    aparser.add_argument('offset_map_out', type=str, help='Output offset map FITS path')
+    aparser.add_argument('illum_pattern_out', type=str, help='Output illumination pattern FITS path')
+    aparser.add_argument('--report_dir', type=str, default=None,
+                         help='Directory for spectroflat report plots')
+    args = aparser.parse_args()
+
+    # Load 2D frame
+    with fits.open(args.frame_fits) as hdul:
+        frame_2d = hdul[0].data.astype('float32')
+    print(f'Loaded frame: {args.frame_fits}')
+    print(f'  Shape: {frame_2d.shape}')
+
+    # Create 4 identical states (spectroflat expects multi-state input)
+    dirty_flat = np.stack([frame_2d, frame_2d, frame_2d, frame_2d], axis=0)
+    print(f'  Stacked shape: {dirty_flat.shape} [state, spatial, wavelength]')
+
+    # Define ROI
+    roi = parse_shape(f'[20:{dirty_flat.shape[1]-20},20:{dirty_flat.shape[2]-20}]')
+
+    # Configure spectroflat
+    sf_config = SpectroflatConfig(roi=roi, iterations=2)
+    sf_config.sensor_flat = SensorFlatConfig(
+        spacial_degree=4,
+        sigma_mask=4.5,
+        fit_border=1,
+        average_column_response_map=False,
+        ignore_gradient=True,
+        roi=roi
+    )
+    sf_config.smile = SmileConfig(
+        line_distance=11,
+        strong_smile_deg=8,
+        max_dispersion_deg=4,
+        line_prominence=0.1,
+        height_sigma=0.04,
+        smooth=True,
+        emission_spectrum=False,
+        state_aware=False,
+        align_states=False,
+        smile_deg=3,
+        rotation_correction=0,
+        detrend=False,
+        roi=roi
+    )
+
+    # Report directory
+    report_dir = args.report_dir if args.report_dir else None
+    if report_dir:
+        Path(report_dir).mkdir(exist_ok=True, parents=True)
+    else:
+        # Use a temporary directory that we don't care about
+        import tempfile
+        report_dir = tempfile.mkdtemp(prefix='spectroflat_report_')
+
+    # Run spectroflat
+    print('Running spectroflat Analyser...')
+    analyser = Analyser(dirty_flat, sf_config, str(report_dir))
+    analyser.run()
+    print('✓ Analysis complete')
+
+    # Save offset map using OffsetMap.dump() (multi-HDU: map + error)
+    analyser.offset_map.dump(args.offset_map_out)
+    print(f'✓ Saved offset map: {args.offset_map_out}')
+
+    # Save illumination pattern (full 4-state array for amend_spectroflat compatibility)
+    illum_hdu = fits.PrimaryHDU(data=analyser.illumination_pattern)
+    illum_hdu.writeto(args.illum_pattern_out, overwrite=True)
+    print(f'✓ Saved illumination pattern: {args.illum_pattern_out}')
+
+    print('Done.')
+
+
+if __name__ == '__main__':
+    main()

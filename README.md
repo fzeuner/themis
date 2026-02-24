@@ -15,7 +15,7 @@ Get https://gitlab.gwdg.de/hoelken/spectroflat:
   pip install spectroflat
 
 - **Create/activate conda env**:
-  - `conda create -n atlas-fit python=3.10`
+  - `conda create -n atlas-fit python=3.10 numpy=1.26`
   Get https://gitlab.gwdg.de/hoelken/atlas-fit/-/tree/main?ref_type=heads, then:
   git clone https://gitlab.gwdg.de/hoelken/atlas-fit.git
   pip install -e atlas-fit

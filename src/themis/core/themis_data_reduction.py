@@ -9,8 +9,12 @@ import textwrap
 from themis.core import themis_tools as tt
 from themis.core import data_classes as dct
 from themis.core import themis_io as tio
-from spectroflat import Analyser, Config as SpectroflatConfig, OffsetMap, SmileConfig, SensorFlatConfig
-from qollib.strings import parse_shape
+try:
+    from spectroflat import Analyser, Config as SpectroflatConfig, OffsetMap, SmileConfig, SensorFlatConfig
+    from qollib.strings import parse_shape
+    _HAS_SPECTROFLAT = True
+except ImportError:
+    _HAS_SPECTROFLAT = False
 import numpy as np
 from pathlib import Path
 import shutil
@@ -1258,7 +1262,7 @@ def _generate_wavelength_calibration(config, data_type='flat_center'):
     return wl_calib_path
 
 
-def _process_amend_spectroflat(config, data_type, frame_name):
+def _process_amend_spectroflat(config, data_type, frame_name, frame_data_override=None):
     """
     Run extract_delta_offsets script externally to get wavelength-correction
     delta offsets for a single frame. Saves delta_offsets as auxiliary file.
@@ -1271,6 +1275,9 @@ def _process_amend_spectroflat(config, data_type, frame_name):
         'flat_center'
     frame_name : str
         'upper' or 'lower'
+    frame_data_override : np.ndarray, optional
+        If provided, use this 2D array as input instead of reading from L3.
+        Used for the lower frame after z3cc shifts have been applied.
         
     Returns
     -------
@@ -1291,17 +1298,57 @@ def _process_amend_spectroflat(config, data_type, frame_name):
     
     # Extract frame to temporary FITS
     temp_frame_path = config.directories.reduced / f'temp_{data_type}_{frame_name}_for_amend.fits'
-    l3_data, _ = tio.read_any_file(config, data_type, verbose=False, status='l3')
-    frame_data = l3_data[0][frame_name].data
+    if frame_data_override is not None:
+        frame_data = frame_data_override
+    else:
+        l3_data, _ = tio.read_any_file(config, data_type, verbose=False, status='l3')
+        frame_data = l3_data[0][frame_name].data
     hdu = fits.PrimaryHDU(data=frame_data)
     hdu.writeto(temp_frame_path, overwrite=True)
     
     # Create temporary config (keep stray_light for Comperator)
-    temp_config_path, _ = _create_temp_atlas_config(
+    temp_config_path, config_text = _create_temp_atlas_config(
         atlas_config_path,
         f'temp_amend_{data_type}_{frame_name}_config.yml',
         remove_stray_light_key=False
     )
+    
+    # For lower frame: swap stray_light with stray_light_lower value and use generic atlas
+    if frame_name == 'lower':
+        import yaml
+        with open(atlas_config_path, 'r') as f:
+            atlas_cfg = yaml.safe_load(f)
+        stray_light_lower = atlas_cfg['input'].get('stray_light_lower')
+        if stray_light_lower is not None:
+            config_text = re.sub(
+                r'stray_light:\s*[\d.]+',
+                f'stray_light: {stray_light_lower}',
+                config_text
+            )
+            print(f'  Using stray_light_lower = {stray_light_lower} for lower frame')
+        
+        # Use generic atlas from upper reference
+        ref_atlas_path = aux.get('upper_reference_atlas')
+        if ref_atlas_path and Path(ref_atlas_path).exists():
+            atlas_line_window = atlas_cfg.get('atlas', {}).get('line_window', 16)
+            atlas_fwhm = atlas_cfg.get('atlas', {}).get('fwhm', atlas_cfg['input'].get('fwhm', 0))
+            new_atlas_section = (
+                f"atlas:\n"
+                f"  key: 'generic'\n"
+                f"  path: {ref_atlas_path}\n"
+                f"  fwhm: {atlas_fwhm}\n"
+                f"  line_window: {atlas_line_window}\n"
+            )
+            config_text = re.sub(
+                r'^atlas:.*?(?=^\w|\Z)',
+                new_atlas_section,
+                config_text,
+                flags=re.MULTILINE | re.DOTALL
+            )
+            print(f'  Using generic atlas: {Path(ref_atlas_path).name}')
+        
+        with open(temp_config_path, 'w') as f:
+            f.write(config_text)
     
     # Output path for delta offsets
     line = config.dataset['line']
@@ -1354,7 +1401,249 @@ def _process_amend_spectroflat(config, data_type, frame_name):
     return delta_offsets_path
 
 
-def _process_lower_frame_alignment(config, data_type):
+def _run_amend_spectroflat(config, data_type, frame_2d, frame_name='upper'):
+    """
+    Run amend_spectroflat externally on a delta-offset-corrected frame
+    to obtain the continuum correction from the amended illumination pattern.
+    
+    Creates a temporary 4-state FITS (4 identical copies of the corrected
+    frame) and a temporary config with offset_map, soft_flat, and mod_states.
+    After amend_spectroflat runs, extracts the continuum correction from
+    amended_soft_flat.fits HDU 1, cleans up unwanted outputs (offset map,
+    amended_corrected_frame), and saves the amended illumination pattern.
+    
+    For the lower frame, stray_light is swapped with stray_light_lower and
+    the atlas is switched to generic (upper L4 reference).
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        'flat_center'
+    frame_2d : np.ndarray
+        2D array of the delta-offset-corrected frame (upper or lower)
+    frame_name : str
+        'upper' or 'lower'
+        
+    Returns
+    -------
+    np.ndarray or None
+        2D continuum correction array, or None on failure
+    """
+    file_set = config.dataset[data_type]['files']
+    aux = getattr(file_set, 'auxiliary', {})
+    reduced_dir = config.directories.reduced
+    
+    # Check prerequisites: offset_map and illumination_pattern
+    offset_map_path = aux.get(f'offset_map_{frame_name}')
+    illum_pattern_path = aux.get(f'illumination_pattern_{frame_name}')
+    atlas_lines_file = aux.get(f'atlas_lines_{frame_name}')
+    
+    if not offset_map_path or not Path(offset_map_path).exists():
+        print(f'  Error: Offset map not found for {frame_name}. Run L3 reduction first.')
+        return None
+    if not illum_pattern_path or not Path(illum_pattern_path).exists():
+        print(f'  Error: Illumination pattern not found for {frame_name}. Run L3 reduction first.')
+        return None
+    if not atlas_lines_file or not Path(atlas_lines_file).exists():
+        print(f'  Error: Atlas lines file not found for {frame_name}. Run step 1 first.')
+        return None
+    
+    # Check if amended illumination pattern already exists
+    line = config.dataset['line']
+    seq = config.dataset[data_type]['sequence']
+    amended_illum_path = reduced_dir / f'{line}_{data_type}_t{seq:03d}_amended_illumination_{frame_name}.fits'
+    
+    if amended_illum_path.exists():
+        print(f'  Amended illumination pattern already exists: {amended_illum_path.name}')
+        while True:
+            user_choice = input(f'  Re-run amend_spectroflat? [y/n]: ').strip().lower()
+            if user_choice in ['y', 'n']:
+                break
+            else:
+                print('  Please enter "y" or "n"')
+        
+        if user_choice == 'n':
+            print(f'  ✓ Using existing amended illumination pattern')
+            with fits.open(amended_illum_path) as hdul:
+                if len(hdul) > 1:
+                    continuum_correction = np.array(hdul[1].data)
+                    # Average over states if 3D
+                    if continuum_correction.ndim == 3:
+                        continuum_correction = np.mean(continuum_correction, axis=0)
+                    print(f'  ✓ Loaded continuum correction: shape {continuum_correction.shape}')
+                    file_set.auxiliary[f'amended_illumination_{frame_name}'] = amended_illum_path
+                    return continuum_correction
+                else:
+                    print(f'  Error: No continuum correction HDU in amended illumination pattern')
+                    return None
+    
+    # --- Create temporary 4-state FITS from delta-corrected frame ---
+    temp_frame_path = reduced_dir / f'temp_{data_type}_{frame_name}_for_amend.fits'
+    stacked_data = np.stack([frame_2d, frame_2d, frame_2d, frame_2d], axis=0)
+    hdu = fits.PrimaryHDU(data=stacked_data.astype('float32'))
+    hdu.writeto(temp_frame_path, overwrite=True)
+    print(f'  ✓ Created temporary 4-state FITS: {temp_frame_path.name}')
+    
+    # --- Create temporary config ---
+    atlas_config_path = config.cam.atlas_fit_config
+    with open(atlas_config_path, 'r') as f:
+        config_text = f.read()
+    
+    # Update corrected_frame
+    config_text = re.sub(
+        r'corrected_frame:\s*(.+)',
+        f'corrected_frame: {temp_frame_path}',
+        config_text
+    )
+    # Prepend 's' to ROI for multi-state format: "[400,10:-10]" → "[s, 400,10:-10]"
+    config_text = re.sub(
+        r'roi:\s*"?\[([^\]]+)\]"?',
+        r'roi: "[s, \1]"',
+        config_text
+    )
+    # Add/update mod_states
+    if 'mod_states:' in config_text:
+        config_text = re.sub(r'mod_states:\s*\d+', 'mod_states: 4', config_text)
+    else:
+        config_text = re.sub(
+            r'(corrected_frame:\s*.+)',
+            r'\1\n  mod_states: 4',
+            config_text
+        )
+    # Add offset_map and soft_flat
+    config_text = re.sub(
+        r'(mod_states:\s*\d+)',
+        rf'\1\n  offset_map: {offset_map_path}',
+        config_text
+    )
+    config_text = re.sub(
+        r'(offset_map:\s*.+)',
+        rf'\1\n  soft_flat: {illum_pattern_path}',
+        config_text
+    )
+    # For lower frame: swap stray_light with stray_light_lower and use generic atlas
+    if frame_name == 'lower':
+        import yaml
+        with open(atlas_config_path, 'r') as f_cfg:
+            atlas_cfg = yaml.safe_load(f_cfg)
+        stray_light_lower = atlas_cfg['input'].get('stray_light_lower')
+        if stray_light_lower is not None:
+            config_text = re.sub(
+                r'stray_light:\s*[\d.]+',
+                f'stray_light: {stray_light_lower}',
+                config_text
+            )
+            print(f'  Using stray_light_lower = {stray_light_lower} for lower frame')
+        
+        # Use generic atlas from upper reference
+        ref_atlas_path = aux.get('upper_reference_atlas')
+        if ref_atlas_path and Path(ref_atlas_path).exists():
+            atlas_line_window = atlas_cfg.get('atlas', {}).get('line_window', 16)
+            atlas_fwhm_val = atlas_cfg.get('atlas', {}).get('fwhm', atlas_cfg['input'].get('fwhm', 0))
+            new_atlas_section = (
+                f"atlas:\n"
+                f"  key: 'generic'\n"
+                f"  path: {ref_atlas_path}\n"
+                f"  fwhm: {atlas_fwhm_val}\n"
+                f"  line_window: {atlas_line_window}\n"
+            )
+            config_text = re.sub(
+                r'^atlas:.*?(?=^\w|\Z)',
+                new_atlas_section,
+                config_text,
+                flags=re.MULTILINE | re.DOTALL
+            )
+            print(f'  Using generic atlas: {Path(ref_atlas_path).name}')
+    
+    # Remove stray_light_lower (not recognized by atlas-fit)
+    config_text = re.sub(
+        r'^\s*#.*stray.light.*lower.*\n',
+        '',
+        config_text,
+        flags=re.MULTILINE | re.IGNORECASE
+    )
+    config_text = re.sub(
+        r'^\s*stray_light_lower:\s*[\d.]+\s*\n',
+        '',
+        config_text,
+        flags=re.MULTILINE
+    )
+    
+    project_root = Path(__file__).resolve().parents[3]
+    temp_config_path = project_root / 'configs' / f'temp_amend_{data_type}_{frame_name}_config.yml'
+    with open(temp_config_path, 'w') as f:
+        f.write(config_text)
+    print(f'  ✓ Created temporary config: {temp_config_path.name}')
+    
+    # --- Display command ---
+    amend_script = project_root / 'atlas-fit' / 'bin' / 'amend_spectroflat'
+    print(f'\n  Please run the following command in an EXTERNAL terminal:')
+    print(f'  {"-"*68}')
+    print(f'  conda activate atlas-fit')
+    print(f'  cd {reduced_dir}')
+    print(f'  python {amend_script} {temp_config_path} {atlas_lines_file}')
+    print(f'  {"-"*68}')
+    
+    # Wait for user confirmation
+    while True:
+        user_input = input(f'\n  Did amend_spectroflat complete successfully? (y/n): ').strip().lower()
+        if user_input == 'y':
+            break
+        elif user_input == 'n':
+            for f in [temp_frame_path, temp_config_path]:
+                if Path(f).exists():
+                    Path(f).unlink()
+            return None
+        else:
+            print('  Please enter "y" or "n"')
+    
+    # --- Process outputs ---
+    amended_soft_flat = reduced_dir / 'amended_soft_flat.fits'
+    if not amended_soft_flat.exists():
+        print(f'  Error: amended_soft_flat.fits not found in {reduced_dir}')
+        for f in [temp_frame_path, temp_config_path]:
+            if Path(f).exists():
+                Path(f).unlink()
+        return None
+    
+    # Extract continuum correction from HDU 1
+    with fits.open(amended_soft_flat) as hdul:
+        if len(hdul) < 2:
+            print(f'  Error: No continuum correction HDU in amended_soft_flat.fits')
+            for f in [temp_frame_path, temp_config_path]:
+                if Path(f).exists():
+                    Path(f).unlink()
+            return None
+        continuum_correction = np.array(hdul[1].data)
+    
+    # Average over states if 3D (4 identical states → just take mean)
+    if continuum_correction.ndim == 3:
+        continuum_correction = np.mean(continuum_correction, axis=0)
+    print(f'  ✓ Extracted continuum correction: shape {continuum_correction.shape}')
+    
+    # Save amended illumination pattern permanently
+    amended_soft_flat.rename(amended_illum_path)
+    file_set.auxiliary[f'amended_illumination_{frame_name}'] = amended_illum_path
+    print(f'  ✓ Saved amended illumination pattern: {amended_illum_path.name}')
+    
+    # --- Clean up unwanted outputs ---
+    for cleanup_file in [
+        reduced_dir / 'wl_calibrated_offsets.fits',
+        reduced_dir / 'amended_corrected_frame.fits',
+        reduced_dir / 'amended_corrected_frame.txt',
+        temp_frame_path,
+        temp_config_path,
+    ]:
+        if cleanup_file.exists():
+            cleanup_file.unlink()
+            print(f'  ✓ Removed: {cleanup_file.name}')
+    
+    return continuum_correction
+
+
+def _process_lower_frame_alignment(config, data_type, upper_l4, lower_l3):
     """
     Align the lower L3 frame to the corrected upper L4 frame using
     z3ccspectrum cross-correlation.
@@ -1370,6 +1659,10 @@ def _process_lower_frame_alignment(config, data_type):
         Configuration object
     data_type : str
         'flat_center'
+    upper_l4 : np.ndarray
+        2D corrected upper L4 frame
+    lower_l3 : np.ndarray
+        2D lower L3 frame (desmiled but not wavelength-corrected)
         
     Returns
     -------
@@ -1402,16 +1695,9 @@ def _process_lower_frame_alignment(config, data_type):
     with fits.open(delta_offsets_upper_file) as hdul:
         wl_upper = np.array(hdul['WAVELENGTH'].data)  # in nm
     
-    # --- Load L4 upper frame (already corrected) and L3 lower frame ---
-    l4_data, _ = tio.read_any_file(config, data_type, verbose=False, status='l4')
-    upper_l4_frame = l4_data[0]['upper'].data.astype('float64')
-    
-    l3_data, _ = tio.read_any_file(config, data_type, verbose=False, status='l3')
-    lower_l3_frame = l3_data[0]['lower'].data.astype('float64')
-    
     # --- Extract 1D spectra at the ROI row ---
-    upper_spec = upper_l4_frame[roi_row, :]
-    lower_spec = lower_l3_frame[roi_row, :]
+    upper_spec = upper_l4[roi_row, :].astype('float64')
+    lower_spec = lower_l3[roi_row, :].astype('float64')
     
     # Trim columns as in atlas config
     if col_end is not None:
@@ -1443,33 +1729,112 @@ def _process_lower_frame_alignment(config, data_type):
         return None
     
     print(f'  z3ccspectrum result: {wl_lower[0]:.4f} - {wl_lower[-1]:.4f} nm')
+    print(f'  Mean wl shift: {np.mean(wl_lower - wl_upper):.6f} nm')
     
-    # --- Compute delta offsets in pixels ---
-    # delta_offset[px] = (wl_lower[px] - wl_upper[px]) / dispersion_per_pixel
-    # dispersion = mean nm/pixel from the upper wavelength grid
-    dispersion = np.gradient(wl_upper)  # nm per pixel, per pixel
-    delta_wl = wl_lower - wl_upper  # wavelength difference at each pixel
-    delta_offsets_lower = delta_wl / dispersion  # convert to pixel shift
-    
-    print(f'  Delta offsets range: {delta_offsets_lower.min():.4f} to {delta_offsets_lower.max():.4f} px')
-    print(f'  Mean shift: {delta_offsets_lower.mean():.4f} px')
-    
-    # --- Save delta offsets as FITS ---
+    # --- Save wavelength grid as FITS ---
     line = config.dataset['line']
     seq = config.dataset[data_type]['sequence']
-    delta_offsets_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_delta_offsets_lower.fits'
+    z3cc_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_z3cc_offsets_lower.fits'
     
-    hdu_primary = fits.PrimaryHDU(data=delta_offsets_lower.astype('float32'))
+    hdu_primary = fits.PrimaryHDU()
     hdu_primary.header['METHOD'] = ('z3ccspectrum', 'Cross-correlation against upper L4')
     hdu_primary.header['ROI_ROW'] = (roi_row, 'Row used for cross-correlation')
+    hdu_primary.header['IDEALFAC'] = (idealfac, 'z3ccspectrum scaling factor')
     hdu_wl = fits.ImageHDU(data=wl_lower.astype('float64'), name='WAVELENGTH')
     hdul = fits.HDUList([hdu_primary, hdu_wl])
-    hdul.writeto(delta_offsets_path, overwrite=True)
+    hdul.writeto(z3cc_path, overwrite=True)
     
-    file_set.auxiliary['delta_offsets_lower'] = delta_offsets_path
-    print(f'  ✓ Saved delta offsets: {delta_offsets_path.name}')
+    file_set.auxiliary['z3cc_offsets_lower'] = z3cc_path
+    print(f'  ✓ Saved z3cc wavelength grid: {z3cc_path.name}')
     
-    return delta_offsets_path
+    return z3cc_path
+
+
+def _generate_upper_reference_atlas(config, data_type, upper_l4):
+    """
+    Generate a reference atlas text file from the corrected upper L4 frame.
+    
+    Spatially averages the central rows (excluding edges) to produce a 1D
+    spectrum, pairs it with the upper wavelength grid (in Angstrom), and
+    saves a 3-column text file (wavelength, intensity, continuum) suitable
+    for atlas-fit's GenericAtlas.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        'flat_center'
+    upper_l4 : np.ndarray
+        2D array of the corrected upper L4 frame
+        
+    Returns
+    -------
+    Path or None
+        Path to the saved reference atlas text file, or None on failure
+    """
+    import yaml
+    
+    file_set = config.dataset[data_type]['files']
+    
+    # --- Load upper wavelength grid from delta_offsets_upper ---
+    delta_offsets_upper_file = file_set.auxiliary.get('delta_offsets_upper')
+    if not delta_offsets_upper_file or not Path(delta_offsets_upper_file).exists():
+        print(f'  Error: delta_offsets_upper not found. Run upper steps first.')
+        return None
+    
+    with fits.open(delta_offsets_upper_file) as hdul:
+        wl_upper = np.array(hdul['WAVELENGTH'].data)  # in nm
+    
+    # --- Parse ROI from atlas-fit config ---
+    atlas_config_path = config.cam.atlas_fit_config
+    with open(atlas_config_path, 'r') as f:
+        atlas_cfg = yaml.safe_load(f)
+    
+    roi_str = atlas_cfg['input']['roi']  # e.g. "[400,10:-10]"
+    roi_str = roi_str.strip('[] ')
+    parts = roi_str.split(',')
+    col_slice_str = parts[1].strip()  # e.g. "10:-10"
+    col_parts = col_slice_str.split(':')
+    col_start = int(col_parts[0]) if col_parts[0] else 0
+    col_end = int(col_parts[1]) if col_parts[1] else None
+    
+    # --- Spatially average central rows (exclude 20% edges) ---
+    ny = upper_l4.shape[0]
+    margin = ny // 5
+    center_rows = upper_l4[margin:ny - margin, :]
+    avg_spectrum = np.mean(center_rows, axis=0).astype('float64')
+    
+    print(f'  Averaged rows {margin}–{ny - margin} ({ny - 2*margin} rows)')
+    print(f'  Spectrum length: {len(avg_spectrum)} px')
+    
+    # --- Trim to ROI columns ---
+    if col_end is not None:
+        avg_trimmed = avg_spectrum[col_start:col_end]
+        wl_trimmed = wl_upper[col_start:col_end]
+    else:
+        avg_trimmed = avg_spectrum[col_start:]
+        wl_trimmed = wl_upper[col_start:]
+    
+    # --- Normalize spectrum to 1 and create 3-column file ---
+    wl_angstrom = wl_trimmed * 10.0  # nm → Å
+    avg_normalized = avg_trimmed / np.max(avg_trimmed)
+    continuum = np.ones_like(avg_normalized)
+    
+    file_data = np.column_stack([wl_angstrom, avg_normalized, continuum])
+    
+    # --- Save ---
+    line = config.dataset['line']
+    seq = config.dataset[data_type]['sequence']
+    ref_atlas_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_upper_reference_atlas.txt'
+    np.savetxt(ref_atlas_path, file_data, fmt='%.8e',
+               header='wavelength[A]  intensity  continuum')
+    
+    file_set.auxiliary['upper_reference_atlas'] = ref_atlas_path
+    print(f'  ✓ Saved reference atlas: {ref_atlas_path.name}')
+    print(f'  Wavelength range: {wl_trimmed[0]:.4f} – {wl_trimmed[-1]:.4f} nm')
+    
+    return ref_atlas_path
 
 
 def _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config):
@@ -1527,10 +1892,12 @@ def _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config):
     print(f'  ✓ Saved diagnostic plot: {plot_path.name}')
 
 
-def _process_single_frame_atlas_fit(config, data_type, frame_name):
+def _process_single_frame_atlas_fit(config, data_type, frame_name,
+                                    generic_atlas_path=None,
+                                    frame_data_override=None):
     """
     Helper function to run atlas-fit for a single frame (upper or lower).
-    Uses L3 (desmiled) data as input.
+    Uses L3 (desmiled) data as input, unless frame_data_override is provided.
     
     Parameters
     ----------
@@ -1540,6 +1907,15 @@ def _process_single_frame_atlas_fit(config, data_type, frame_name):
         'flat' or 'flat_center'
     frame_name : str
         'upper' or 'lower'
+    generic_atlas_path : Path or str, optional
+        Path to a generic atlas text file (3-column: wavelength, intensity,
+        continuum). When provided, the atlas config is switched to
+        atlas.key='generic' with atlas.path pointing to this file, and
+        stray_light is set to 0.
+        Used for the lower frame to align against the upper L4 reference.
+    frame_data_override : np.ndarray, optional
+        If provided, use this 2D array as input instead of reading from L3.
+        Used for the lower frame after z3cc shifts have been applied.
         
     Returns
     -------
@@ -1576,41 +1952,94 @@ def _process_single_frame_atlas_fit(config, data_type, frame_name):
     temp_frame_path = config.directories.reduced / f'temp_{data_type}_{frame_name}_for_atlas.fits'
     
     try:
-        # Read the L3 data (desmiled)
-        data, header = tio.read_any_file(config, data_type, verbose=False, status='l3')
-        
-        if len(data) > 0:
-            if frame_name == 'upper':
-                frame_data = data[0]['upper'].data
-            elif frame_name == 'lower':
-                frame_data = data[0]['lower'].data
-            else:
-                print(f'  Unknown frame name: {frame_name}')
-                return None
-            
-            # Create a simple FITS file with the 2D frame data
-            hdu = fits.PrimaryHDU(data=frame_data)
-            hdu.writeto(temp_frame_path, overwrite=True)
-            print(f'  ✓ Extracted {frame_name} frame to temporary file')
+        if frame_data_override is not None:
+            # Use the provided pre-processed frame data
+            frame_data = frame_data_override
+            print(f'  ✓ Using pre-processed {frame_name} frame data')
         else:
-            print(f'  Error: No frames found in {data_type} data')
-            return None
+            # Read the L3 data (desmiled)
+            data, header = tio.read_any_file(config, data_type, verbose=False, status='l3')
+            
+            if len(data) > 0:
+                if frame_name == 'upper':
+                    frame_data = data[0]['upper'].data
+                elif frame_name == 'lower':
+                    frame_data = data[0]['lower'].data
+                else:
+                    print(f'  Unknown frame name: {frame_name}')
+                    return None
+            else:
+                print(f'  Error: No frames found in {data_type} data')
+                return None
+        
+        # Create a simple FITS file with the 2D frame data
+        hdu = fits.PrimaryHDU(data=frame_data)
+        hdu.writeto(temp_frame_path, overwrite=True)
+        print(f'  ✓ Extracted {frame_name} frame to temporary file')
     except Exception as e:
         print(f'  Error extracting {frame_name} frame: {e}')
         return None
     
     # Create temporary config file with unsupported keys removed
+    # Keep stray_light for both frames (atlas-fit needs it)
     temp_config_path, config_text = _create_temp_atlas_config(
         atlas_config_path,
-        f'temp_atlas_fit_{data_type}_{frame_name}_config.yml'
+        f'temp_atlas_fit_{data_type}_{frame_name}_config.yml',
+        remove_stray_light_key=False
     )
     
-    # Also update corrected_frame to point to extracted frame
+    # Update corrected_frame to point to extracted frame
     config_text = re.sub(
         r'corrected_frame:\s*(.+)',
         f'corrected_frame: {temp_frame_path}',
         config_text
     )
+    
+    # For lower frame: swap stray_light with stray_light_lower value
+    if frame_name == 'lower':
+        import yaml
+        with open(atlas_config_path, 'r') as f_cfg:
+            atlas_cfg = yaml.safe_load(f_cfg)
+        stray_light_lower = atlas_cfg['input'].get('stray_light_lower')
+        if stray_light_lower is not None:
+            config_text = re.sub(
+                r'(?<!\w)stray_light:\s*[\d.]+',
+                f'stray_light: {stray_light_lower}',
+                config_text
+            )
+            print(f'  Using stray_light_lower = {stray_light_lower} for lower frame')
+    
+    # Optionally switch atlas to generic (e.g. upper L4 reference)
+    if generic_atlas_path is not None:
+        import yaml
+        with open(atlas_config_path, 'r') as f_cfg:
+            atlas_cfg = yaml.safe_load(f_cfg)
+        # Set stray_light to 0 (reference atlas already includes stray light)
+        config_text = re.sub(
+            r'(?<!\w)stray_light:\s*[\d.]+',
+            'stray_light: 0',
+            config_text
+        )
+        atlas_fwhm = atlas_cfg.get('atlas', {}).get('fwhm', atlas_cfg['input'].get('fwhm', 0))
+        atlas_line_window = atlas_cfg.get('atlas', {}).get('line_window', 16)
+        
+        new_atlas_section = (
+            f"atlas:\n"
+            f"  key: 'generic'\n"
+            f"  path: {generic_atlas_path}\n"
+            f"  fwhm: {atlas_fwhm}\n"
+            f"  line_window: {atlas_line_window}\n"
+        )
+        # Remove old atlas section (from "atlas:" to end or next top-level key)
+        config_text = re.sub(
+            r'^atlas:.*?(?=^\w|\Z)',
+            new_atlas_section,
+            config_text,
+            flags=re.MULTILINE | re.DOTALL
+        )
+        print(f'  Using generic atlas: {Path(generic_atlas_path).name}')
+        print(f'  stray_light set to 0 (reference already includes it)')
+    
     with open(temp_config_path, 'w') as f:
         f.write(config_text)
     
@@ -1775,11 +2204,12 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
         
         # Check/run spectroflat for each half
         for frame_name in ['upper', 'lower']:
-            offset_map_file = file_set.auxiliary.get(f'offset_map_{frame_name}')
-            skip_spectroflat = False
+            offset_map_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_offset_map_{frame_name}.fits'
+            illum_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_illumination_pattern_{frame_name}.fits'
             
-            if offset_map_file and Path(offset_map_file).exists():
-                print(f'\n  Offset map exists for {frame_name}: {Path(offset_map_file).name}')
+            skip_spectroflat = False
+            if offset_map_path.exists() and illum_path.exists():
+                print(f'\n  Offset map exists for {frame_name}: {offset_map_path.name}')
                 while True:
                     user_choice = input(f'  Re-run spectroflat for {frame_name}? [y/n]: ').strip().lower()
                     if user_choice in ['y', 'n']:
@@ -1787,33 +2217,59 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
                     print('  Please enter "y" or "n"')
                 if user_choice == 'n':
                     skip_spectroflat = True
+                    file_set.auxiliary[f'offset_map_{frame_name}'] = offset_map_path
+                    file_set.auxiliary[f'illumination_pattern_{frame_name}'] = illum_path
+                    print(f'  ✓ Using existing offset map and illumination pattern')
             
             if not skip_spectroflat:
-                # Load L2 data for spectroflat
+                # Save frame to temporary FITS for external script
                 l2_data_sf, _ = tio.read_any_file(config, data_type, status='l2', verbose=False)
                 frame_2d = l2_data_sf.get(0).get_half(frame_name).data.astype('float32')
+                temp_frame_path = Path(config.directories.reduced) / f'temp_{data_type}_{frame_name}_for_spectroflat.fits'
+                fits.PrimaryHDU(data=frame_2d).writeto(str(temp_frame_path), overwrite=True)
                 
-                result = _process_single_frame_spectroflat(frame_2d, frame_name, config, data_type)
-                if result is None:
-                    print(f'\n  L3 reduction failed for {frame_name} (spectroflat step).')
+                report_dir = Path(config.directories.figures) / 'spectroflat_report' / frame_name
+                
+                project_root = Path(__file__).resolve().parents[3]
+                script = project_root / 'scripts' / 'run_spectroflat'
+                
+                print(f'\n  Please run the following command in an EXTERNAL terminal:')
+                print(f'  {"-"*68}')
+                print(f'  conda activate atlas-fit')
+                print(f'  python {script} \\')
+                print(f'      {temp_frame_path} \\')
+                print(f'      {offset_map_path} \\')
+                print(f'      {illum_path} \\')
+                print(f'      --report_dir {report_dir}')
+                print(f'  {"-"*68}')
+                
+                while True:
+                    user_input = input(f'\n  Did run_spectroflat complete successfully for {frame_name}? (y/n): ').strip().lower()
+                    if user_input == 'y':
+                        break
+                    elif user_input == 'n':
+                        if temp_frame_path.exists():
+                            temp_frame_path.unlink()
+                        print(f'\n  L3 reduction aborted for {frame_name}.')
+                        return None
+                    else:
+                        print('  Please enter "y" or "n"')
+                
+                # Clean up temp file
+                if temp_frame_path.exists():
+                    temp_frame_path.unlink()
+                
+                # Verify outputs
+                if not offset_map_path.exists():
+                    print(f'  Error: Offset map not found: {offset_map_path}')
+                    return None
+                if not illum_path.exists():
+                    print(f'  Error: Illumination pattern not found: {illum_path}')
                     return None
                 
-                # Save offset map
-                offset_map_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_offset_map_{frame_name}.fits'
-                offset_hdu = fits.PrimaryHDU(data=result['offset_map'])
-                offset_hdu.header['FRAME'] = frame_name
-                offset_hdu.header['REDLEV'] = 'L3'
-                offset_hdu.writeto(str(offset_map_path), overwrite=True)
                 file_set.auxiliary[f'offset_map_{frame_name}'] = offset_map_path
-                print(f'  ✓ Saved offset map: {offset_map_path.name}')
-                
-                # Save illumination pattern
-                illum_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_illumination_pattern_{frame_name}.fits'
-                illum_hdu = fits.PrimaryHDU(data=result['illumination_pattern'])
-                illum_hdu.header['FRAME'] = frame_name
-                illum_hdu.header['REDLEV'] = 'L3'
-                illum_hdu.writeto(str(illum_path), overwrite=True)
                 file_set.auxiliary[f'illumination_pattern_{frame_name}'] = illum_path
+                print(f'  ✓ Saved offset map: {offset_map_path.name}')
                 print(f'  ✓ Saved illumination pattern: {illum_path.name}')
     
     # Load offset maps (from flat_center for both flat and flat_center)
@@ -1833,7 +2289,11 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
             print(f'    Run flat_center L2->L3 first to generate offset maps.')
             return None
         with fits.open(path) as hdul:
-            offset_maps[frame_name] = np.array(hdul[0].data)
+            omap = np.array(hdul[0].data)
+            # OffsetMap.dump() saves multi-state (4, ny, nx); take state 0
+            if omap.ndim == 3:
+                omap = omap[0]
+            offset_maps[frame_name] = omap
         print(f'  Loaded: {Path(path).name}')
     
     # Load L2 data and apply desmiling
@@ -1908,13 +2368,225 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
     return out_path
 
 
+def _apply_flat_center_corrections_to_l3(config, data_type, return_reduced=False):
+    """
+    Apply flat_center wavelength + continuum corrections to L3 data (flat or scan).
+    
+    No recalculation — loads all corrections from flat_center auxiliary files:
+      Upper: delta offsets (desmiling) + amend_spectroflat continuum correction
+      Lower: z3ccspectrum wavelength resampling + ratio polyfit continuum correction
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        'flat' or 'scan'
+    return_reduced : bool
+        If True, return the reduced frames instead of saving to disk.
+    
+    Returns
+    -------
+    Path or None
+        Path to saved L4 file, or None on failure.
+    """
+    from scipy.interpolate import interp1d
+    
+    print(f"\n{'='*70}")
+    print(f'L3 → L4 REDUCTION FOR {data_type.upper()} (APPLYING FLAT_CENTER CORRECTIONS)')
+    print(f"{'='*70}")
+    
+    # --- Load flat_center auxiliary files ---
+    fc_files = config.dataset.get('flat_center', {}).get('files')
+    if fc_files is None:
+        print('  Error: flat_center files not found in config. Run flat_center L4 first.')
+        return None
+    fc_aux = getattr(fc_files, 'auxiliary', {})
+    
+    # --- Load L3 data (flat: FramesSet, scan: CycleSet) ---
+    l3_data, header = tio.read_any_file(config, data_type, verbose=False, status='l3')
+    
+    # Debug: show actual type
+    print(f'  Debug: l3_data type = {type(l3_data)}')
+    
+    # Check if we have a CycleSet (scan) or FramesSet (flat)
+    from themis.core.data_classes import CycleSet
+    is_cycle_set = isinstance(l3_data, CycleSet)
+    
+    # Safely get frame count
+    if hasattr(l3_data, '__len__'):
+        n_frames = len(l3_data)
+    else:
+        n_frames = 'unknown'
+    
+    if is_cycle_set:
+        print(f'  Loaded {data_type} L3: CycleSet with {n_frames} frames')
+    else:
+        print(f'  Loaded {data_type} L3: FramesSet with {n_frames} frames')
+    
+    # --- Load flat_center correction data (once) ---
+    delta_offsets_upper_file = fc_aux.get('delta_offsets_upper')
+    if not delta_offsets_upper_file or not Path(delta_offsets_upper_file).exists():
+        print(f'  Error: delta_offsets_upper not found. Run flat_center L4 first.')
+        return None
+    with fits.open(delta_offsets_upper_file) as hdul:
+        delta_offsets_upper = np.array(hdul[0].data)
+        wl_upper = np.array(hdul['WAVELENGTH'].data)
+    print(f'  Loaded delta offsets: {Path(delta_offsets_upper_file).name}')
+    print(f'  Range: {delta_offsets_upper.min():.4f} to {delta_offsets_upper.max():.4f} px')
+    
+    # Load continuum correction from amended illumination
+    amended_illum_upper = fc_aux.get('amended_illumination_upper')
+    if amended_illum_upper and Path(amended_illum_upper).exists():
+        with fits.open(amended_illum_upper) as hdul:
+            if len(hdul) > 1:
+                cont_corr_upper = np.array(hdul[1].data)
+                if cont_corr_upper.ndim == 3:
+                    cont_corr_upper = np.mean(cont_corr_upper, axis=0)
+                cont_norm_upper = cont_corr_upper / np.mean(cont_corr_upper)
+                print(f'  ✓ Loaded continuum correction from amended illumination')
+            else:
+                print(f'  ⚠ No continuum HDU in amended illumination. Skipping.')
+                cont_norm_upper = None
+    else:
+        print(f'  ⚠ Amended illumination not found. Skipping continuum correction.')
+        cont_norm_upper = None
+    
+    # Load z3cc wavelength grid for lower frame
+    z3cc_file = fc_aux.get('z3cc_offsets_lower')
+    if not z3cc_file or not Path(z3cc_file).exists():
+        print(f'  Error: z3cc_offsets_lower not found. Run flat_center L4 first.')
+        return None
+    with fits.open(z3cc_file) as hdul:
+        wl_lower_z3cc = np.array(hdul['WAVELENGTH'].data)
+    
+    # Load ratio polyfit continuum correction
+    cont_corr_lower_file = fc_aux.get('continuum_correction_lower')
+    if cont_corr_lower_file and Path(cont_corr_lower_file).exists():
+        with fits.open(cont_corr_lower_file) as hdul:
+            cont_norm_lower = np.array(hdul[0].data)
+        print(f'  ✓ Loaded lower continuum correction (ratio polyfit)')
+    else:
+        print(f'  ⚠ Continuum correction not found. Skipping.')
+        cont_norm_lower = None
+    
+    print(f'  Lower wl range: {wl_lower_z3cc[0]:.4f} - {wl_lower_z3cc[-1]:.4f} nm')
+    print(f'  Upper wl range: {wl_upper[0]:.4f} - {wl_upper[-1]:.4f} nm')
+    
+    # --- Process all frames ---
+    print(f'\n{"-"*70}')
+    print(f'APPLYING CORRECTIONS TO ALL FRAMES')
+    print(f'{"-"*70}')
+    
+    from tqdm import tqdm
+    corrected_frames = dct.CycleSet() if is_cycle_set else dct.FramesSet()
+    
+    # Use tqdm for progress indication
+    items_iter = l3_data.items()
+    desc = f'L3→L4 {data_type}'
+    if is_cycle_set:
+        items_iter = tqdm(items_iter, desc=desc)
+    
+    for key, frame in items_iter:
+        # Get upper and lower data (handle pol states for scan)
+        upper_half = frame.get_half('upper')
+        lower_half = frame.get_half('lower')
+        
+        if upper_half is None or lower_half is None:
+            continue
+        
+        # Get actual numpy data arrays
+        upper_l3 = upper_half.data.astype('float32')
+        lower_l3 = lower_half.data.astype('float32')
+        
+        # Apply corrections to upper frame
+        upper_shifted = _apply_desmiling(upper_l3, np.tile(delta_offsets_upper, (upper_l3.shape[0], 1)))
+        if cont_norm_upper is not None:
+            upper_l4 = upper_shifted / cont_norm_upper
+        else:
+            upper_l4 = upper_shifted
+        
+        # Apply corrections to lower frame
+        lower_z3cc_shifted = np.empty_like(lower_l3)
+        for row in range(lower_l3.shape[0]):
+            f_interp = interp1d(wl_lower_z3cc, lower_l3[row, :], kind='cubic',
+                                bounds_error=False, fill_value='extrapolate')
+            lower_z3cc_shifted[row, :] = f_interp(wl_upper)
+        
+        if cont_norm_lower is not None:
+            lower_l4 = lower_z3cc_shifted * cont_norm_lower
+        else:
+            lower_l4 = lower_z3cc_shifted
+        
+        # Create corrected frame
+        corrected_frame = dct.Frame(frame.name if hasattr(frame, 'name') else f'{data_type}_corrected_{key}')
+        
+        # Set corrected data with preserved polarization states
+        corrected_frame.set_half('upper', upper_l4, upper_half.pol_state)
+        corrected_frame.set_half('lower', lower_l4, lower_half.pol_state)
+        
+        corrected_frames.add_frame(corrected_frame, key)
+    
+    # ==================================================================
+    # SAVE L4
+    # ==================================================================
+    print(f'\n{"-"*70}')
+    print(f'SAVE L4')
+    print(f'{"-"*70}')
+    
+    file_set = config.dataset[data_type]['files']
+    if not hasattr(file_set, 'auxiliary'):
+        file_set.auxiliary = {}
+    
+    # Diagnostic plot (only for single frame data like flat)
+    if not is_cycle_set and len(corrected_frames) > 0:
+        sample_frame = list(corrected_frames.values())[0]
+        upper_l4 = sample_frame.get_half('upper').data
+        lower_l4 = sample_frame.get_half('lower').data
+        _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config)
+    
+    # Save L4
+    reduced_frames = corrected_frames
+    
+    extra_keywords = {
+        'DESMILED': ('TRUE', 'L3 desmiling applied'),
+        'WLCORR_U': ('TRUE', 'L4 upper: flat_center delta offsets + continuum correction'),
+        'WLCORR_L': ('TRUE', 'L4 lower: flat_center z3cc wl shift + ratio polyfit continuum'),
+    }
+    
+    if return_reduced:
+        return reduced_frames
+    
+    out_path = tio.save_reduction(
+        config,
+        data_type=data_type,
+        level='l4',
+        frames=reduced_frames,
+        source_header=header,
+        verbose=True,
+        overwrite=True,
+        extra_keywords=extra_keywords,
+    )
+    
+    print(f'✓ L4 {data_type} file saved (corrections from flat_center applied)')
+    return out_path
+
+
 def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
     """
     L3 → L4 reduction.
     
-    For flat_center: Runs atlas-fit wavelength calibration on the upper frame,
-    extracts delta offsets via amend_spectroflat, applies wavelength-correction
-    shifts to the upper L3 frame, and saves as L4.
+    For flat_center:
+      Step 1: Atlas-fit wavelength calibration on upper frame (interactive).
+      Step 2: Extract delta offsets for upper frame.
+      Step 3: Apply delta offsets to upper, run amend_spectroflat to get
+              continuum correction. Apply continuum correction to upper.
+      Step 4: z3ccspectrum cross-correlation of lower L3 vs upper L4.
+              Apply resulting shifts to lower L3 (temporary).
+      Step 5: Derive continuum correction for lower frame by dividing
+              upper_l4 / lower_z3cc_shifted and fitting a low-order 2D
+              polynomial surface. Apply correction to lower frame.
+      Step 6: Diagnostic plot + save L4.
     
     Parameters
     ----------
@@ -1934,9 +2606,15 @@ def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
         print('No processing - provide a specific data type.')
         return None
     
-    if data_type not in ['flat_center']:
+    if data_type not in ['flat_center', 'flat', 'scan']:
         print(f'L4 reduction not yet defined for data_type: {data_type}')
         return None
+    
+    # ==================================================================
+    # FLAT & SCAN: apply flat_center corrections (no recalculation)
+    # ==================================================================
+    if data_type in ['flat', 'scan']:
+        return _apply_flat_center_corrections_to_l3(config, data_type, return_reduced)
     
     print(f"\n{'='*70}")
     print(f'L3 → L4 REDUCTION FOR {data_type.upper()} (ATLAS-FIT WAVELENGTH CALIBRATION)')
@@ -2014,10 +2692,10 @@ def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
             return None
     
     # ============================================================
-    # STEP 3: APPLY DELTA OFFSETS TO UPPER L3 FRAME → SAVE L4
+    # STEP 3: APPLY DELTA OFFSETS + AMEND SPECTROFLAT (upper)
     # ============================================================
     print(f'\n{"-"*70}')
-    print(f'STEP 3: APPLY DELTA OFFSETS TO UPPER → SAVE L4')
+    print(f'STEP 3: APPLY DELTA OFFSETS + AMEND SPECTROFLAT (UPPER)')
     print(f'{"-"*70}')
     
     # Load upper delta offsets
@@ -2033,87 +2711,177 @@ def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
     lower_l3 = l3_data[0]['lower'].data.astype('float32')
     
     # Apply delta offsets to upper frame (uniform shift per column across all rows)
-    upper_l4 = _apply_desmiling(upper_l3, np.tile(delta_offsets_upper, (upper_l3.shape[0], 1)))
+    upper_shifted = _apply_desmiling(upper_l3, np.tile(delta_offsets_upper, (upper_l3.shape[0], 1)))
     print(f'  ✓ Applied delta offsets to upper frame')
     
-    # Save intermediate L4 (upper corrected, lower unchanged) — needed for step 4
-    reduced_frames = dct.FramesSet()
-    dest = dct.Frame(f"{data_type}_l4_frame0000")
-    dest.set_half('upper', upper_l4.astype('float32'))
-    dest.set_half('lower', lower_l3.astype('float32'))
-    reduced_frames.add_frame(dest, 0)
+    # Run amend_spectroflat on the delta-corrected upper frame
+    # This produces the continuum correction from the amended illumination pattern
+    cont_corr_upper = _run_amend_spectroflat(config, data_type, upper_shifted, frame_name='upper')
+    if cont_corr_upper is None:
+        print(f'\n✗ amend_spectroflat failed for upper. Proceeding without continuum correction.')
+        cont_corr_upper = np.ones_like(upper_shifted)
     
-    extra_keywords = {
-        'DESMILED': ('TRUE', 'L3 desmiling applied'),
-        'WLCORR_U': ('TRUE', 'L4 wavelength correction applied to upper frame'),
-    }
-    
-    out_path = tio.save_reduction(
-        config,
-        data_type=data_type,
-        level='l4',
-        frames=reduced_frames,
-        source_header=header,
-        verbose=True,
-        overwrite=True,
-        extra_keywords=extra_keywords,
-    )
-    print(f'  ✓ Intermediate L4 saved (upper corrected)')
+    # Apply continuum correction to upper frame
+    cont_norm_upper = cont_corr_upper / np.mean(cont_corr_upper)
+    upper_l4 = upper_shifted / cont_norm_upper
+    print(f'  ✓ Applied continuum correction to upper frame')
     
     # ============================================================
-    # STEP 4: LOWER FRAME ALIGNMENT (z3ccspectrum vs upper L4)
+    # STEP 4: Z3CCSPECTRUM ALIGNMENT (lower L3 vs upper L4)
     # ============================================================
     print(f'\n{"-"*70}')
-    print(f'STEP 4: LOWER FRAME ALIGNMENT (z3ccspectrum vs upper L4)')
+    print(f'STEP 4: Z3CCSPECTRUM ALIGNMENT (LOWER L3 vs UPPER L4)')
     print(f'{"-"*70}')
     
-    delta_offsets_lower_file = file_set.auxiliary.get('delta_offsets_lower')
+    lower_l4 = None  # will be set if lower pipeline succeeds
+    lower_pipeline_ok = True
     
-    skip_lower = False
-    if delta_offsets_lower_file and Path(delta_offsets_lower_file).exists():
-        print(f'  Delta offsets file already exists: {Path(delta_offsets_lower_file).name}')
+    z3cc_offsets_file = file_set.auxiliary.get('z3cc_offsets_lower')
+    
+    skip_z3cc = False
+    if z3cc_offsets_file and Path(z3cc_offsets_file).exists():
+        print(f'  z3cc offsets file already exists: {Path(z3cc_offsets_file).name}')
         while True:
-            user_choice = input(f'  Re-run lower frame alignment? [y/n]: ').strip().lower()
+            user_choice = input(f'  Re-run z3ccspectrum for lower? [y/n]: ').strip().lower()
             if user_choice in ['y', 'n']:
                 break
             else:
                 print('  Please enter "y" or "n"')
         
         if user_choice == 'n':
-            print(f'  ✓ Using existing delta offsets for lower')
-            skip_lower = True
+            print(f'  ✓ Using existing z3cc offsets file')
+            skip_z3cc = True
         else:
-            print(f'  Deleting old delta offsets file: {Path(delta_offsets_lower_file).name}')
-            Path(delta_offsets_lower_file).unlink()
+            print(f'  Deleting old z3cc offsets file: {Path(z3cc_offsets_file).name}')
+            Path(z3cc_offsets_file).unlink()
     
-    if not skip_lower:
-        delta_result = _process_lower_frame_alignment(config, data_type)
-        if not delta_result:
-            print(f'\n✗ Lower frame alignment failed.')
-            print(f'  L4 file was saved with upper correction only.')
-            return out_path
+    if not skip_z3cc:
+        z3cc_result = _process_lower_frame_alignment(config, data_type, upper_l4, lower_l3)
+        if not z3cc_result:
+            print(f'\n✗ z3ccspectrum alignment failed for lower.')
+            lower_pipeline_ok = False
     
-    # Apply lower delta offsets and re-save L4
-    delta_offsets_lower_file = file_set.auxiliary.get('delta_offsets_lower')
-    with fits.open(delta_offsets_lower_file) as hdul:
-        delta_offsets_lower = np.array(hdul[0].data)
-    print(f'  Loaded lower delta offsets: {Path(delta_offsets_lower_file).name}')
-    print(f'  Range: {delta_offsets_lower.min():.4f} to {delta_offsets_lower.max():.4f} px')
+    # Apply z3cc wavelength correction: resample lower L3 from wl_lower onto wl_upper
+    if lower_pipeline_ok:
+        from scipy.interpolate import interp1d
+        
+        z3cc_offsets_file = file_set.auxiliary.get('z3cc_offsets_lower')
+        with fits.open(z3cc_offsets_file) as hdul:
+            wl_lower_z3cc = np.array(hdul['WAVELENGTH'].data)  # wavelength grid for lower frame
+        
+        # Load upper wavelength grid
+        delta_offsets_upper_file = file_set.auxiliary.get('delta_offsets_upper')
+        with fits.open(delta_offsets_upper_file) as hdul:
+            wl_upper = np.array(hdul['WAVELENGTH'].data)
+        
+        print(f'  Lower wl range: {wl_lower_z3cc[0]:.4f} - {wl_lower_z3cc[-1]:.4f} nm')
+        print(f'  Upper wl range: {wl_upper[0]:.4f} - {wl_upper[-1]:.4f} nm')
+        print(f'  Mean shift: {np.mean(wl_lower_z3cc - wl_upper):.6f} nm')
+        
+        # Resample each row of lower_l3 from wl_lower onto wl_upper
+        lower_z3cc_shifted = np.empty_like(lower_l3)
+        for row in range(lower_l3.shape[0]):
+            f_interp = interp1d(wl_lower_z3cc, lower_l3[row, :], kind='cubic',
+                                bounds_error=False, fill_value='extrapolate')
+            lower_z3cc_shifted[row, :] = f_interp(wl_upper)
+        
+        print(f'  ✓ Resampled lower frame from wl_lower onto wl_upper')
     
-    lower_l4 = _apply_desmiling(lower_l3, np.tile(delta_offsets_lower, (lower_l3.shape[0], 1)))
-    print(f'  ✓ Applied delta offsets to lower frame')
+    # ============================================================
+    # STEP 5: CONTINUUM CORRECTION (lower) — ratio upper_l4 / lower_z3cc_shifted
+    # ============================================================
+    if lower_pipeline_ok:
+        print(f'\n{"-"*70}')
+        print(f'STEP 5: CONTINUUM CORRECTION (LOWER) — RATIO FIT')
+        print(f'{"-"*70}')
+        
+        # Compute ratio: upper_l4 / lower_z3cc_shifted
+        # This captures the continuum difference between upper and lower
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = upper_l4 / lower_z3cc_shifted
+            ratio[~np.isfinite(ratio)] = 1.0
+        
+        print(f'  Ratio (upper_l4 / lower_shifted) shape: {ratio.shape}')
+        print(f'  Ratio range: {np.nanmin(ratio):.4f} – {np.nanmax(ratio):.4f}')
+        
+        # Fit a low-order 2D polynomial surface through the ratio
+        ny, nx = ratio.shape
+        y_coords, x_coords = np.mgrid[0:ny, 0:nx]
+        
+        # Flatten for fitting
+        x_flat = x_coords.ravel().astype('float64')
+        y_flat = y_coords.ravel().astype('float64')
+        z_flat = ratio.ravel().astype('float64')
+        
+        # Remove outliers (clip to median ± 3*std)
+        med = np.median(z_flat)
+        std = np.std(z_flat)
+        mask = np.abs(z_flat - med) < 3 * std
+        x_fit = x_flat[mask]
+        y_fit = y_flat[mask]
+        z_fit = z_flat[mask]
+        print(f'  Fitting with {mask.sum()}/{len(mask)} pixels (3-sigma clipping)')
+        
+        # Build 2D polynomial design matrix (order 3: 1, x, y, x², xy, y², x³, x²y, xy², y³)
+        poly_order = 5
+        from numpy.polynomial.polynomial import polyvander2d
+        deg = [poly_order, poly_order]
+        V = polyvander2d(x_fit / nx, y_fit / ny, deg)  # normalise coords to [0,1]
+        
+        # Least squares fit
+        coeffs, residuals, rank, sv = np.linalg.lstsq(V, z_fit, rcond=None)
+        print(f'  2D polynomial fit: order {poly_order}, {len(coeffs)} coefficients')
+        
+        # Evaluate fitted surface on full grid
+        V_full = polyvander2d(x_flat / nx, y_flat / ny, deg)
+        cont_surface = (V_full @ coeffs).reshape(ny, nx)
+        
+        cont_norm_lower = cont_surface
+        print(f'  Continuum correction range: {cont_norm_lower.min():.6f} – {cont_norm_lower.max():.6f}')
+        
+        # Apply continuum correction
+        lower_l4 = lower_z3cc_shifted * cont_norm_lower
+        print(f'  ✓ Applied continuum correction to lower frame')
+        
+        # Save continuum correction as FITS for diagnostics
+        line = config.dataset['line']
+        seq = config.dataset[data_type]['sequence']
+        cont_corr_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_continuum_correction_lower.fits'
+        hdu_primary = fits.PrimaryHDU(data=cont_norm_lower.astype('float32'))
+        hdu_primary.header['METHOD'] = ('ratio_polyfit', 'upper_l4 / lower_shifted, 2D poly fit')
+        hdu_primary.header['POLYORD'] = (poly_order, 'Polynomial order')
+        hdu_ratio = fits.ImageHDU(data=ratio.astype('float32'), name='RATIO')
+        hdul_out = fits.HDUList([hdu_primary, hdu_ratio])
+        hdul_out.writeto(cont_corr_path, overwrite=True)
+        file_set.auxiliary['continuum_correction_lower'] = cont_corr_path
+        print(f'  ✓ Saved continuum correction: {cont_corr_path.name}')
+    
+    if lower_l4 is None:
+        lower_l4 = lower_l3
+        print(f'  ⚠ Lower frame saved without correction')
+    
+    # ============================================================
+    # STEP 6: SAVE L4
+    # ============================================================
+    print(f'\n{"-"*70}')
+    print(f'STEP 6: SAVE L4')
+    print(f'{"-"*70}')
     
     # Diagnostic plot: compare corrected upper vs lower at 3 spatial positions
     _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config)
     
-    # Re-save L4 with both frames corrected
+    # Save L4
     reduced_frames = dct.FramesSet()
     dest = dct.Frame(f"{data_type}_l4_frame0000")
     dest.set_half('upper', upper_l4.astype('float32'))
     dest.set_half('lower', lower_l4.astype('float32'))
     reduced_frames.add_frame(dest, 0)
     
-    extra_keywords['WLCORR_L'] = ('TRUE', 'L4 lower wavelength correction via z3ccspectrum')
+    extra_keywords = {
+        'DESMILED': ('TRUE', 'L3 desmiling applied'),
+        'WLCORR_U': ('TRUE', 'L4 upper wavelength + continuum correction via atlas-fit'),
+        'WLCORR_L': ('TRUE', 'L4 lower: z3ccspectrum wl shift + ratio polyfit continuum correction'),
+    }
     
     if return_reduced:
         return reduced_frames
@@ -2184,7 +2952,7 @@ reduction_levels.add(ReductionLevel("l3", "_l3.fits", reduce_l2_to_l3, {
 
 reduction_levels.add(ReductionLevel("l4", "_l4.fits", reduce_l3_to_l4, {
     "dark": "Nothing.",
-    "scan": "Nothing at the moment.",
-    "flat": "Nothing at the moment.",
-    "flat_center": "Runs atlas-fit on upper frame (FTS atlas), extracts delta offsets. Aligns lower frame to upper via z3ccspectrum cross-correlation. Applies wavelength correction to both frames."
+    "scan": "Apply flat_center wavelength calibration + continuum correction to scan data. Upper: delta offsets + amend_spectroflat continuum. Lower: z3ccspectrum resampling + ratio polyfit continuum.",
+    "flat": "Apply flat_center wavelength calibration + continuum correction to flat data. Upper: delta offsets + amend_spectroflat continuum. Lower: z3ccspectrum resampling + ratio polyfit continuum.",
+    "flat_center": "Atlas-fit wavelength calibration + delta offsets + amend_spectroflat continuum correction for upper frame. Lower frame: z3ccspectrum wavelength alignment + ratio polyfit continuum correction."
 }))

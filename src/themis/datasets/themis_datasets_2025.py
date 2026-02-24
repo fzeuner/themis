@@ -519,6 +519,36 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
             
             if delta_offsets_file.exists():
                 file_set.auxiliary[f'delta_offsets_{frame}'] = delta_offsets_file
+            
+            # Discover amended illumination file (per frame, from amend_spectroflat)
+            amended_illum_pattern = f"{line}_{data_t}_{seq_str}_amended_illumination_{frame}.fits"
+            amended_illum_file = Path(directories.reduced) / amended_illum_pattern
+            
+            if amended_illum_file.exists():
+                file_set.auxiliary[f'amended_illumination_{frame}'] = amended_illum_file
+        
+        # Discover lower-specific auxiliary files (only for flat_center)
+        if data_t == 'flat_center':
+            # z3cc offsets file (lower frame wavelength grid)
+            z3cc_pattern = f"{line}_{data_t}_{seq_str}_z3cc_offsets_lower.fits"
+            z3cc_file = Path(directories.reduced) / z3cc_pattern
+            
+            if z3cc_file.exists():
+                file_set.auxiliary['z3cc_offsets_lower'] = z3cc_file
+            
+            # Continuum correction file (lower frame ratio polyfit)
+            cont_corr_pattern = f"{line}_{data_t}_{seq_str}_continuum_correction_lower.fits"
+            cont_corr_file = Path(directories.reduced) / cont_corr_pattern
+            
+            if cont_corr_file.exists():
+                file_set.auxiliary['continuum_correction_lower'] = cont_corr_file
+            
+            # Upper reference atlas file (generic atlas from upper L4)
+            ref_atlas_pattern = f"{line}_{data_t}_{seq_str}_upper_reference_atlas.txt"
+            ref_atlas_file = Path(directories.reduced) / ref_atlas_pattern
+            
+            if ref_atlas_file.exists():
+                file_set.auxiliary['upper_reference_atlas'] = ref_atlas_file
 
     # Discover y-shift auxiliary files (from calibration target analysis)
     # These are stored without sequence number:

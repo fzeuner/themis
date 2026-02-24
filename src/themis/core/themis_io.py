@@ -169,7 +169,7 @@ def save_reduction(config, *, data_type: str, level: str, frames: dct.FramesSet,
         hdus.append(fits.ImageHDU(upper, name=f'UPPER_{level_suffix}'))
         hdus.append(fits.ImageHDU(lower, name=f'LOWER_{level_suffix}'))
 
-    elif data_type == 'scan' and level in ('l0', 'l1', 'l2', 'l3'):
+    elif data_type == 'scan' and level in ('l0', 'l1', 'l2', 'l3', 'l4'):
         # Expect CycleSet with keys (frame_state, slit_idx, map_idx)
         # Save all frames as individual HDUs; l0, l1, and l2 share the same layout
         if not isinstance(frames, dct.CycleSet):
@@ -468,7 +468,7 @@ def read_any_file(config, data_type, status='raw', verbose=False):
         single_frame.set_half("lower", lower)
         collection.add_frame(single_frame, 0)
 
-    elif status in ('l0', 'l1', 'l2', 'l3') and data_type == 'scan':
+    elif status in ('l0', 'l1', 'l2', 'l3', 'l4') and data_type == 'scan':
         # Read reduced scan created by save_reduction (l0 or l1): reconstruct CycleSet from HDUs
         collection = dct.CycleSet()
         
