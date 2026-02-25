@@ -791,6 +791,133 @@ class init:
 
 
     
+class StokesResult:
+    """Container for Stokes polarimetry results.
+    
+    Access results via method ('difference' or 'ratio') and Stokes parameter.
+    Arrays are shaped (n_slit, n_map, ny, nx), so numpy slicing works:
+        result.difference.I[0, :]       -> all maps at slit 0
+        result.ratio.V[0, 0]            -> single 2D frame
+        result.difference.Q[:, 0, :, :] -> all slits at map 0
+    """
+    class _MethodResult:
+        def __init__(self):
+            self.I = None  # np.ndarray (n_slit, n_map, ny, nx)
+            self.Q = None
+            self.U = None
+            self.V = None
+        
+        def __repr__(self):
+            params = [s for s in ['I', 'Q', 'U', 'V'] if getattr(self, s) is not None]
+            shape = self.I.shape if self.I is not None else None
+            return f"StokesMethod(params={params}, shape={shape})"
+    
+    def __init__(self):
+        self.difference = self._MethodResult()
+        self.ratio = self._MethodResult()
+    
+    def __repr__(self):
+        return f"StokesResult(difference={self.difference}, ratio={self.ratio})"
+
+
+def compute_polarimetry(cycle_set):
+    """Compute Stokes I, Q, U, V from a CycleSet using difference and ratio methods.
+    
+    For each Stokes parameter S in {Q, U, V} at each (slit_idx, map_idx):
+    
+    Difference method:
+        S/I = 0.25 * (pS_upper - pS_lower + mS_lower - mS_upper) / I
+        I   = 0.25 * (pS_upper + pS_lower + mS_lower + mS_upper)
+    
+    Ratio method:
+        I = same as difference
+        S = pS_upper / mS_upper * mS_lower / pS_lower - 1
+    
+    Parameters
+    ----------
+    cycle_set : CycleSet
+        L4 scan data with keys (frame_state, slit_idx, map_idx).
+        frame_state is e.g. 'pQ', 'mQ', 'pU', 'mU', 'pV', 'mV'.
+    
+    Returns
+    -------
+    StokesResult
+        Access via .difference or .ratio, then .I, .Q, .U, .V
+        Each is a numpy array with shape (n_slit, n_map, ny, nx).
+    """
+    # Collect grid dimensions and available Stokes parameters
+    slit_indices = set()
+    map_indices = set()
+    stokes_params = set()
+    for key in cycle_set.keys():
+        frame_state, slit_idx, map_idx = key
+        slit_indices.add(slit_idx)
+        map_indices.add(map_idx)
+        stokes_params.add(frame_state[1:])
+    
+    slit_indices = sorted(slit_indices)
+    map_indices = sorted(map_indices)
+    stokes_params = sorted(stokes_params)
+    n_slit = len(slit_indices)
+    n_map = len(map_indices)
+    slit_to_idx = {s: i for i, s in enumerate(slit_indices)}
+    map_to_idx = {m: i for i, m in enumerate(map_indices)}
+    
+    # Get frame shape from first available frame
+    first_key = next(iter(cycle_set.keys()))
+    first_frame = cycle_set[first_key]
+    ny, nx = first_frame.get_half('upper').data.shape
+    
+    print(f'  Stokes parameters found: {stokes_params}')
+    print(f'  Grid: {n_slit} slit x {n_map} map, frame shape: ({ny}, {nx})')
+    
+    # Pre-allocate arrays
+    result = StokesResult()
+    for method in [result.difference, result.ratio]:
+        method.I = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
+        for s in stokes_params:
+            setattr(method, s, np.zeros((n_slit, n_map, ny, nx), dtype='float32'))
+    
+    for slit_idx, map_idx in tqdm(
+            [(s, m) for s in slit_indices for m in map_indices],
+            desc='Computing polarimetry'):
+        si = slit_to_idx[slit_idx]
+        mi = map_to_idx[map_idx]
+        
+        for stokes in stokes_params:
+            p_frame = cycle_set.get_state_slit_map(f'p{stokes}', slit_idx, map_idx)
+            m_frame = cycle_set.get_state_slit_map(f'm{stokes}', slit_idx, map_idx)
+            
+            if p_frame is None or m_frame is None:
+                print(f'    ⚠ Missing p{stokes}/m{stokes} at slit={slit_idx}, map={map_idx}')
+                continue
+            
+            pS_upper = p_frame.get_half('upper').data.astype('float64')
+            pS_lower = p_frame.get_half('lower').data.astype('float64')
+            mS_upper = m_frame.get_half('upper').data.astype('float64')
+            mS_lower = m_frame.get_half('lower').data.astype('float64')
+            
+            # --- Difference method ---
+            I_diff = 0.25 * (pS_upper + pS_lower + mS_lower + mS_upper)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                S_diff = 0.25 * (pS_upper - pS_lower + mS_lower - mS_upper) / I_diff
+            S_diff = np.nan_to_num(S_diff, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # --- Ratio method ---
+            with np.errstate(divide='ignore', invalid='ignore'):
+                S_ratio = (pS_upper / mS_upper * mS_lower / pS_lower - 1)
+            S_ratio = np.nan_to_num(S_ratio, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # Store
+            result.difference.I[si, mi] = I_diff.astype('float32')
+            result.ratio.I[si, mi] = I_diff.astype('float32')
+            getattr(result.difference, stokes)[si, mi] = S_diff.astype('float32')
+            getattr(result.ratio, stokes)[si, mi] = S_ratio.astype('float32')
+    
+    print(f'  ✓ Polarimetry computed: {n_slit} slit x {n_map} map, {len(stokes_params)} Stokes parameters')
+    return result
+
+
 def prep_data_for_pca(data):
     # prepare data for PCA - first dimension is wavelength << other dimension
     # print(data.shape)

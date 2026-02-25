@@ -4,14 +4,14 @@
 # Spectral line key used to select camera config from themis.core.cam_config.cam
 line = "sr"
 # Observation date (used in directory structure)
-date = "2025-07-07"
+date = "2025-07-05"
 # Sequences for scan/flat/dark
-sequence = 26
-flat_sequence = 25
-flat_center_sequence = 23
+sequence = 27
+flat_sequence = 26
+flat_center_sequence = 26
 dark_sequence = 1
 # Polarization states order (modify as needed) - only for scan data!
-states = ["pQ", "mQ", "pU", "mU", "pV", "mV"]
+states = ["pQ"]
 
 [paths]
 # Base directory for rdata/pdata/inversion

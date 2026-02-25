@@ -36,6 +36,8 @@ def main():
     aparser.add_argument('illum_pattern_out', type=str, help='Output illumination pattern FITS path')
     aparser.add_argument('--report_dir', type=str, default=None,
                          help='Directory for spectroflat report plots')
+    aparser.add_argument('--dust_flat_out', type=str, default=None,
+                         help='Output path for dust flat FITS (optional)')
     args = aparser.parse_args()
 
     # Load 2D frame
@@ -100,6 +102,13 @@ def main():
     illum_hdu = fits.PrimaryHDU(data=analyser.illumination_pattern)
     illum_hdu.writeto(args.illum_pattern_out, overwrite=True)
     print(f'✓ Saved illumination pattern: {args.illum_pattern_out}')
+
+    # Save dust flat if requested
+    if args.dust_flat_out:
+        dust_hdu = fits.PrimaryHDU(data=analyser.dust_flat[0])
+        dust_hdu.header['COMMENT'] = 'Dust flat from spectroflat (state 0)'
+        dust_hdu.writeto(args.dust_flat_out, overwrite=True)
+        print(f'✓ Saved dust flat: {args.dust_flat_out}')
 
     print('Done.')
 

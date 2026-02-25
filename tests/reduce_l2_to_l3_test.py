@@ -37,22 +37,20 @@ if __name__ == '__main__':
     
     lv3 = tdr.reduction_levels["l3"]
     
-    result = lv3.reduce(config, data_type='flat_center', return_reduced = False)
+    #result = lv3.reduce(config, data_type='flat_center', return_reduced = False)
     #result = lv3.reduce(config, data_type='flat', return_reduced = False)
     #result = lv3.reduce(config, data_type='scan', return_reduced = False)
 #%%    
     data, _ = tio.read_any_file(config, 'flat', verbose=False, status='l3')
     data_old, _ = tio.read_any_file(config, 'flat', verbose=False, status='l2')
     
-    data_plot = np.array([(data_old.get(0).get_half('lower').data-
-     data_old.get(0).get_half('upper').data ),
-                          (data.get(0).get_half('lower').data-
-                           data.get(0).get_half('upper').data )])
+    data_plot = np.array([data.get(0).get_half('upper').data,
+                           data.get(0).get_half('lower').data ])
     
     viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
-                       title='scan', 
-                       state_names=['l2 lower-upper',
-                                    'l3 lower-upper'])
+                       title='flat', 
+                       state_names=['l3 upper',
+                                    'l3 lower'])
 #%%
 
     

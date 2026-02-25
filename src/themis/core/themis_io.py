@@ -351,7 +351,7 @@ def read_any_file(config, data_type, status='raw', verbose=False):
         return collection, header
     
     # Correct for signed/unsigned integer overflow in flat data
-    if status == 'raw' and data_type in ('flat', 'flat_center'):
+    if status == 'raw' and data_type in ('flat', 'flat_center', 'scan'):
         # If there are negative values larger than -32768 (i.e., closer to zero),
         # shift them into the unsigned range by adding 2*32768+1 = 65537
         if np.any(data < 0):

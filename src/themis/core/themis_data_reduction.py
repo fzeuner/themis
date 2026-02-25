@@ -9,12 +9,6 @@ import textwrap
 from themis.core import themis_tools as tt
 from themis.core import data_classes as dct
 from themis.core import themis_io as tio
-try:
-    from spectroflat import Analyser, Config as SpectroflatConfig, OffsetMap, SmileConfig, SensorFlatConfig
-    from qollib.strings import parse_shape
-    _HAS_SPECTROFLAT = True
-except ImportError:
-    _HAS_SPECTROFLAT = False
 import numpy as np
 from pathlib import Path
 import shutil
@@ -151,80 +145,6 @@ class ReductionRegistry:
             "levels=[" + ", ".join(shown) + "]"
             ")"
         )
-
-
-def _process_single_frame_spectroflat(frame_2d, frame_name, config, data_type):
-    """
-    Helper function to process a single frame (upper or lower) with spectroflat.
-    
-    Parameters
-    ----------
-    frame_2d : ndarray
-        2D array of frame data (spatial, wavelength)
-    frame_name : str
-        'upper' or 'lower'
-    config : Config
-        Configuration object
-    data_type : str
-        Type of data being processed
-        
-    Returns
-    -------
-    dict
-        Dictionary with keys: 'dust_flat', 'offset_map', 'illumination_pattern', 'analyser'
-    """
-    
-    print(f"  Processing {frame_name.upper()} frame...")
-    
-    # Create 4 states by duplicating the frame
-    dirty_flat = np.stack([frame_2d, frame_2d, frame_2d, frame_2d], axis=0)
-    print(f"    Input shape: {dirty_flat.shape} [state, spatial, wavelength]")
-    
-    # Define ROI
-    roi = parse_shape(f'[20:{dirty_flat.shape[1]-20},20:{dirty_flat.shape[2]-20}]')
-    
-    # Configure spectroflat
-    sf_config = SpectroflatConfig(roi=roi, iterations=2) # iterations 2 is considered enough
-    sf_config.sensor_flat = SensorFlatConfig(
-        spacial_degree=4,
-        sigma_mask=4.5,  # masks pixels which deviate from the mean by more than 4.5 sigma
-        fit_border=1,
-        average_column_response_map=False,
-        ignore_gradient=True,
-        roi=roi
-    )
-    sf_config.smile = SmileConfig(
-        line_distance=11,
-        strong_smile_deg=8, #8 - 20 not much effect
-        max_dispersion_deg=4,
-        line_prominence=0.1,
-        height_sigma=0.04, # 0.04 - 0.2 not much effect
-        smooth=True,
-        emission_spectrum=False,
-        state_aware=False,
-        align_states=False,
-        smile_deg=3, # 3  - 8 not much effect
-        rotation_correction=0,
-        detrend=False,
-        roi=roi
-    )
-    
-    # Create report directory
-    report_dir = Path(config.directories.figures) / 'spectroflat_report' / frame_name
-    report_dir.mkdir(exist_ok=True, parents=True)
-    
-    # Run spectroflat
-    analyser = Analyser(dirty_flat, sf_config, str(report_dir))
-    analyser.run()
-    print(f"    ✓ {frame_name.capitalize()} analysis complete")
-    
-    # Extract results (state 0 since all 4 states are identical)
-    return {
-        'dust_flat': analyser.dust_flat[0],
-        'offset_map': analyser.offset_map.get_map()[0],
-        'illumination_pattern': analyser.illumination_pattern[0],
-        'analyser': analyser
-    }
 
 
 def reduce_raw(config):
@@ -426,61 +346,6 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False, auto_reduce_d
             return out_path
 
 
-def _process_single_frame_spectroflat_wrapper(config, data_type, frame_name):
-    """
-    Wrapper to run spectroflat for a single frame and save outputs.
-    
-    Parameters
-    ----------
-    config : Config
-        Configuration object
-    data_type : str
-        'flat' or 'flat_center'
-    frame_name : str
-        'upper' or 'lower'
-        
-    Returns
-    -------
-    ndarray
-        The dust_flat for this frame, or None on failure
-    """
-    print(f'  Running spectroflat for {frame_name} frame...')
-    
-    # Read L0 data
-    data, header = tio.read_any_file(config, data_type, verbose=False, status='l0')
-    
-    if frame_name == 'upper':
-        frame_2d = data[0]['upper'].data
-    else:
-        frame_2d = data[0]['lower'].data
-    
-    # Run spectroflat using existing helper
-    result = _process_single_frame_spectroflat(frame_2d, frame_name, config, data_type)
-    
-    if not result:
-        return None
-    
-    # Save offset map and illumination pattern
-    line = config.dataset['line']
-    seq = config.dataset[data_type]['sequence']
-    seq_str = f"t{seq:03d}"
-    
-    file_set = config.dataset[data_type]['files']
-    if not hasattr(file_set, 'auxiliary'):
-        file_set.auxiliary = {}
-    
-    # Save dust flat as auxiliary file
-    dust_flat_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_dust_flat_{frame_name}.fits'
-    dust_hdu = fits.PrimaryHDU(data=result['dust_flat'])
-    dust_hdu.header['COMMENT'] = f'Dust flat from spectroflat - {frame_name} frame'
-    dust_hdu.header['FRAME'] = frame_name
-    dust_hdu.writeto(str(dust_flat_path), overwrite=True)
-    file_set.auxiliary[f'dust_flat_{frame_name}'] = dust_flat_path
-    print(f'  ✓ Saved dust flat: {dust_flat_path.name}')
-    
-    return result['dust_flat']
-
-
 def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_dark: bool = False):
     """
     Reduce L0 data to L1 level.
@@ -611,91 +476,106 @@ def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_da
         print(f'L0 → L1 REDUCTION FOR FLAT_CENTER')
         print(f'{"="*70}')
         
+        # Read L0 data once for saving temp frames
+        l0_frames, header = tio.read_any_file(config, data_type, verbose=False, status='l0')
+        l0_frame = l0_frames.get(0)
+        if l0_frame is None:
+            print('  Error: No L0 frame found for flat_center')
+            return None
+        
+        line = config.dataset['line']
+        seq = config.dataset[data_type]['sequence']
+        seq_str = f"t{seq:03d}"
+        
+        file_set = config.dataset[data_type]['files']
+        if not hasattr(file_set, 'auxiliary'):
+            file_set.auxiliary = {}
+        
         dust_flats = {}
         
-        # Process each frame half completely before moving to the next
+        # Run external spectroflat for each half to produce dust flats
         for frame_name in ['upper', 'lower']:
-            print(f'\n{"#"*70}')
-            print(f'# PROCESSING {frame_name.upper()} FRAME')
-            print(f'{"#"*70}\n')
+            dust_flat_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_dust_flat_{frame_name}.fits'
+            offset_map_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_offset_map_{frame_name}.fits'
+            illum_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_illumination_pattern_{frame_name}.fits'
             
-            # ============================================================
-            # SPECTROFLAT DUST FOR THIS FRAME
-            # ============================================================
-        
-                # Check if dust flat auxiliary file exists for this frame
             skip_spectroflat = False
-            dust_flat_file = config.dataset[data_type]['files'].auxiliary.get(f'dust_flat_{frame_name}')
-            
-            if dust_flat_file and dust_flat_file.exists():
-                print(f'  Spectroflat outputs already exist:')
-                print(f'    Dust flat: {dust_flat_file.name}')
+            if dust_flat_path.exists():
+                print(f'\n  Dust flat exists for {frame_name}: {dust_flat_path.name}')
                 while True:
                     user_choice = input(f'  Re-run spectroflat for {frame_name}? [y/n]: ').strip().lower()
                     if user_choice in ['y', 'n']:
                         break
+                    print('  Please enter "y" or "n"')
+                if user_choice == 'n':
+                    skip_spectroflat = True
+                    file_set.auxiliary[f'dust_flat_{frame_name}'] = dust_flat_path
+                    print(f'  ✓ Using existing dust flat')
+            
+            if not skip_spectroflat:
+                # Save frame to temporary FITS for external script
+                frame_2d = l0_frame.get_half(frame_name).data.astype('float32')
+                temp_frame_path = Path(config.directories.reduced) / f'temp_{data_type}_{frame_name}_for_spectroflat.fits'
+                fits.PrimaryHDU(data=frame_2d).writeto(str(temp_frame_path), overwrite=True)
+                
+                report_dir = Path(config.directories.figures) / 'spectroflat_report' / frame_name
+                
+                project_root = Path(__file__).resolve().parents[3]
+                script = project_root / 'scripts' / 'run_spectroflat'
+                
+                print(f'\n  Please run the following command in an EXTERNAL terminal:')
+                print(f'  {"-"*68}')
+                print(f'  conda activate atlas-fit')
+                print(f'  python {script} \\')
+                print(f'      {temp_frame_path} \\')
+                print(f'      {offset_map_path} \\')
+                print(f'      {illum_path} \\')
+                print(f'      --report_dir {report_dir} \\')
+                print(f'      --dust_flat_out {dust_flat_path}')
+                print(f'  {"-"*68}')
+                
+                while True:
+                    user_input = input(f'\n  Did run_spectroflat complete successfully for {frame_name}? (y/n): ').strip().lower()
+                    if user_input == 'y':
+                        break
+                    elif user_input == 'n':
+                        if temp_frame_path.exists():
+                            temp_frame_path.unlink()
+                        print(f'\n  L1 reduction aborted for {frame_name}.')
+                        return None
                     else:
                         print('  Please enter "y" or "n"')
                 
-                if user_choice == 'n':
-                    print(f'  Using existing spectroflat outputs')
-                    skip_spectroflat = True
+                # Clean up temp file
+                if temp_frame_path.exists():
+                    temp_frame_path.unlink()
+                
+                # Verify dust flat was created
+                if not dust_flat_path.exists():
+                    print(f'  Error: Dust flat not found: {dust_flat_path}')
+                    return None
+                
+                file_set.auxiliary[f'dust_flat_{frame_name}'] = dust_flat_path
+                if offset_map_path.exists():
+                    file_set.auxiliary[f'offset_map_{frame_name}'] = offset_map_path
+                if illum_path.exists():
+                    file_set.auxiliary[f'illumination_pattern_{frame_name}'] = illum_path
+                print(f'  ✓ Saved dust flat: {dust_flat_path.name}')
             
-            if not skip_spectroflat:
-                # Run spectroflat for this frame
-                dust_flat_result = _process_single_frame_spectroflat_wrapper(config, data_type, frame_name)
-                if dust_flat_result is None:
-                    print(f'\n L1 reduction failed for {frame_name} (spectroflat step).')
-                    return None
-                dust_flats[frame_name] = dust_flat_result
-                print(f'  Generated dust flat for {frame_name}')
-            else:
-                # If skipping, load dust flats using the standard IO helper (status='dust')
-                print(f'  Loading dust flats from auxiliary files via read_any_file(status="dust")...')
-                try:
-                    dust_collection, _ = tio.read_any_file(config, data_type, verbose=False, status='dust')
-                except FileNotFoundError as e:
-                    print(f'  Error: Could not load dust flats from auxiliary files: {e}')
-                    return None
-
-                dust_frame = dust_collection.get(0)
-                if dust_frame is None:
-                    print('  Error: No dust frame found in dust collection')
-                    return None
-
-                half_data = dust_frame.get_half(frame_name).data
-                dust_flats[frame_name] = half_data
-                print(f'  Loaded existing dust flat for {frame_name} from status="dust"')
-
-        # Read L0 averaged frame (index 0) for division by dust flats
-        l0_frames, header = tio.read_any_file(config, data_type, verbose=False, status='l0')
-        l0_frame = l0_frames.get(0)
-        if l0_frame is None:
-            print('  Error: No L0 frame found for flat/flat_center')
-            return None
+            # Load dust flat for L1 division
+            with fits.open(str(dust_flat_path)) as hdul:
+                dust_flats[frame_name] = np.array(hdul[0].data).astype('float32')
+            print(f'  Loaded dust flat for {frame_name}')
         
-        # Create L1 FramesSet with dust flats from both frames
-        if all(df is not None for df in dust_flats.values()):
-            reduced_frames = dct.FramesSet()
-            frame_name_str = f"{data_type}_l1_frame{0:04d}"
-            # L1 corrected flat_center = L0 / dust, per half
-            l1_frame = _dust_correct_frame(l0_frame, frame_name_str, dust_flats, propagate_pol_state=False)
-
-            reduced_frames.add_frame(l1_frame, frame_idx=0)
-
-            extra_keywords = {
-                'SPCTRFLT': ('TRUE', 'Spectroflat dust correction applied (L0/dust)'),
-            }
-        else:
-            # If we skipped spectroflat, L1 file should already exist
-            l1_file = config.dataset[data_type]['files'].get('l1')
-            if l1_file and l1_file.exists():
-                print(f'✓ Using existing L1 file: {l1_file}')
-                return l1_file
-            else:
-                print(f'✗ Cannot create L1 file - dust flats not available')
-                print(f'  Please re-run spectroflat step')
-                return None
+        # Create L1 = L0 / dust per half
+        reduced_frames = dct.FramesSet()
+        frame_name_str = f"{data_type}_l1_frame{0:04d}"
+        l1_frame = _dust_correct_frame(l0_frame, frame_name_str, dust_flats, propagate_pol_state=False)
+        reduced_frames.add_frame(l1_frame, frame_idx=0)
+        
+        extra_keywords = {
+            'SPCTRFLT': ('TRUE', 'Spectroflat dust correction applied (L0/dust)'),
+        }
 
     # -----------------------------------------------------------------
     # Finalize: either return FramesSet/CycleSet or save to disk once

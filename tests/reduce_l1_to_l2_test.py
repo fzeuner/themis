@@ -44,8 +44,13 @@ if __name__ == '__main__':
     # result = lv2.reduce(config, data_type='flat', return_reduced = False)
     # result = lv2.reduce(config, data_type='scan', return_reduced = False)
 #%%    
-    data_old, header = tio.read_any_file(config, 'flat_center', verbose=False, status='l1')
+    data_old, header = tio.read_any_file(config, 'flat_center', verbose=False, status='l2')
     data_plot_old = np.array([data_old.get(0).get_half('upper').data,data_old.get(0).get_half('lower').data ])
+    
+    viewer = display_data( data_plot_old, ['states',  'spatial_x', 'spectral'],
+                       title='scan', 
+                       state_names=['upper',
+                                    'lower'])
     
 #%%
     scan, header = tio.read_any_file(config, 'scan', verbose=False, status='l2')

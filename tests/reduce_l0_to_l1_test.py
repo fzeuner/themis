@@ -55,7 +55,7 @@ if __name__ == '__main__':
     data_plot = np.array([data.get(0).get_half('upper').data,data.get(0).get_half('lower').data,
                           dust.get(0).get_half('upper').data,dust.get(0).get_half('lower').data])
     
-    viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
+    viewer = display_data( data_plot,  ['states',  'spatial_x', 'spectral'],
                        title='flat center l1', 
                        state_names=['upper dust corrected', 'lower dust corrected',
                                     'dust upper', 'dust lower'])
@@ -77,13 +77,60 @@ if __name__ == '__main__':
                                     'self dust corrected upper', 'self dust corrected lower'])
     
     
+#%%
+# test polarimetry    
+    
+    scan_data, _ = tio.read_any_file(config, 'scan', status='l4')
+    result = tt.compute_polarimetry(scan_data)
+ 
+    # Access Stokes V at slit 0, map 0 via difference method
+    I_diff = result.difference.I[0, 0]
+    V_diff = result.difference.V[0, 0]
+    Q_diff = result.difference.Q[0, 0]
+    U_diff = result.difference.U[0, 0]
     
     
+    data_plot = np.array([I_diff[30:-30,30:-30],Q_diff[30:-30,30:-30], U_diff[30:-30,30:-30], V_diff[30:-30,30:-30]])
+    
+    viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
+                       title='scan', 
+                       state_names=['I', 'Q',
+                                    'U', 'V'])
+    
+#%%
+# test polarimetry    
+
+ 
+    # Access Stokes V at slit 0, map 0 via difference method
+    I_diff = result.ratio.I[1, 0]
+    V_diff = result.ratio.V[1, 0]
+    Q_diff = result.ratio.Q[1, 0]
+    U_diff = result.ratio.U[1, 0]
     
     
+    data_plot = np.array([I_diff[30:-30,30:-30],Q_diff[30:-30,30:-30], U_diff[30:-30,30:-30], V_diff[30:-30,30:-30]])
+    
+    viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
+                       title='scan', 
+                       state_names=['I', 'Q',
+                                   'U', 'V'])
+ #%%    
+# test polarimetry    
+
+ 
+    # Access Stokes V at slit 0, map 0 via difference method
+    I_diff = result.ratio.I.mean(axis=1)
+    V_diff = result.ratio.V.mean(axis=1)
+    Q_diff = result.ratio.Q.mean(axis=1)
+    U_diff = result.ratio.U.mean(axis=1)
     
     
+    data_plot = np.array([I_diff[:,30:-30,30:-30],Q_diff[:,30:-30,30:-30], U_diff[:,30:-30,30:-30], V_diff[:,30:-30,30:-30]])
     
+    viewer = display_data( data_plot, ['states','spatial_y',  'spatial_x', 'spectral'],
+                       title='scan', 
+                       state_names=['I', 'Q',
+                                    'U', 'V'])
     
     
     

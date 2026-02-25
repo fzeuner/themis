@@ -37,12 +37,12 @@ if __name__ == '__main__':
     
     lv4 = tdr.reduction_levels["l4"]
     
-    #result = lv4.reduce(config, data_type='flat_center', return_reduced = False)
-    result = lv4.reduce(config, data_type='flat', return_reduced = False)
-    #result = lv3.reduce(config, data_type='scan', return_reduced = False)
+   # result = lv4.reduce(config, data_type='flat_center', return_reduced = False)
+  #  result = lv4.reduce(config, data_type='flat', return_reduced = False)
+  #  result = lv4.reduce(config, data_type='scan', return_reduced = False)
 #%%    
-    data, _ = tio.read_any_file(config, 'flat', verbose=False, status='l4')
-    data_old, _ = tio.read_any_file(config, 'flat', verbose=False, status='l3')
+    data, _ = tio.read_any_file(config, 'flat_center', verbose=False, status='l4')
+    data_old, _ = tio.read_any_file(config, 'flat_center', verbose=False, status='l3')
   #%%    
     data_plot = np.array([(data_old.get(0).get_half('lower').data-
      data_old.get(0).get_half('upper').data ),
@@ -65,9 +65,43 @@ if __name__ == '__main__':
     
 #%%
  
+     #%%
+
+        scan, header = tio.read_any_file(config, 'scan', verbose=False, status='l4')
+        state='U'
+        I = 0.25*(np.array((scan.get_state('p'+state).stack_all('upper'))[0][30:-30,30:-30])+
+                np.array((scan.get_state('m'+state).stack_all('upper'))[0][30:-30,30:-30])+
+                np.array((scan.get_state('m'+state).stack_all('lower'))[0][30:-30,30:-30])+
+                np.array((scan.get_state('p'+state).stack_all('lower')[0][30:-30,30:-30])))
+        Q = 1/I*100*(np.array((scan.get_state('p'+state).stack_all('upper')[0][30:-30,30:-30]))/np.array((scan.get_state('m'+state).stack_all('upper')[0][30:-30,30:-30]))*
+               np.array((scan.get_state('m'+state).stack_all('lower')[0][30:-30,30:-30]))/np.array((scan.get_state('p'+state).stack_all('lower')[0][30:-30,30:-30]))-1)
+        
+        # Q = 100*(np.array((scan.get_state('p'+state).stack_all('upper')[0]))-np.array((scan.get_state('m'+state).stack_all('upper')[0]))+
+        #         -np.array((scan.get_state('m'+state).stack_all('lower')[0]))+np.array((scan.get_state('p'+state).stack_all('lower')[0])))
+        data_plot = np.array([I,
+                            Q
+                             ])
+        
+        viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
+                           title='scan', 
+                           state_names=['I',
+                                        state])    
     
+#%%
+    scan, header = tio.read_any_file(config, 'scan', verbose=False, status='l4')
+    scan_old, header = tio.read_any_file(config, 'scan', verbose=False, status='l1')
     
+    data_plot = np.array([np.array((-scan.get_state('mU').stack_all('upper')[0][30:-30,30:-30]).data)+
+                         np.array((scan.get_state('mU').stack_all('lower')[0][30:-30,30:-30]).data)-
+                         np.array((scan.get_state('pU').stack_all('lower')[0][30:-30,30:-30]).data)+
+                         np.array((scan.get_state('pU').stack_all('upper')[0][30:-30,30:-30]).data),
+                         np.array((scan_old.get_state('mU').stack_all('upper')[0][30:-30,30:-30]).data)-
+                         np.array((scan_old.get_state('mU').stack_all('lower')[0][30:-30,30:-30]).data)])
     
+    viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
+                       title='scan', 
+                       state_names=['l4',
+                                    'l1']) 
     
     
     

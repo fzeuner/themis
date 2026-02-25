@@ -13,8 +13,8 @@ from pathlib import Path
 
 
 # --- Configuration ---
-data_dir = Path('/home/franziskaz/data/themis/pdata/2025-07-07')
-prefix = 'sr_flat_center_t023'
+data_dir = Path('/home/franziskaz/data/themis/pdata/2025-07-05')
+prefix = 'sr_flat_center_t026'
 
 # amend_spectroflat continuum corrections
 amend_frames = {
