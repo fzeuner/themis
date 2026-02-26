@@ -89,7 +89,7 @@ class CameraRegistry:
         return list(self._cameras_by_target.keys())
 
 
-cam1 = Camera(name="Zyla 5", target="sr", pixel_scale=0.065, file_ext='b0505', 
+cam1 = Camera(name="Zyla 5", target="sr", pixel_scale=0.096, file_ext='b0505', 
               wavelength='4607', roi=ROI(lower=((60, 928), (350, 1600)), upper=((1122, 1990), (342, 1592))),
               atlas_fit_config=_project_root() / "configs" / "atlas_fit_config_cam1.yml")
 cam2 = Camera(name="Zyla 6", target="ti", pixel_scale=0.065, file_ext='b0606', 

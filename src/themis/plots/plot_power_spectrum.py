@@ -3,10 +3,11 @@ from themis.ui.style_themis import style_aa
 from matplotlib.ticker import (NullFormatter)
 import numpy as np
 import matplotlib.gridspec as gridspec
-from scipy import windows
+from scipy.signal import windows, medfilt
 
 
-def plot_power_spectrum(data, zoom=1): # data: y, x
+def plot_power_spectrum(data, pixel_scale_x, pixel_scale_y, zoom=1, 
+                        reference_freq_line=None, reference_power_line=None): # data: y, x, pixel scales in arcsec/pixel
 
     print(r'Power spectrum')
     image=1.*data
@@ -43,7 +44,7 @@ def plot_power_spectrum(data, zoom=1): # data: y, x
    
     y,x = np.indices((fs_abs.shape)) # first determine radii of all pixels
     center=[int(np.shape(fs_abs)[0]/2),int(np.shape(fs_abs)[1]/2)]
-    r = np.sqrt((x-center[1])**2+(y-center[0])**2)    
+    r = np.sqrt(((x-center[1])*pixel_scale_x)**2+((y-center[0])*pixel_scale_y)**2)    
 
     # radius of the image.
     r_max = int(np.floor(np.max(r)))
@@ -62,7 +63,7 @@ def plot_power_spectrum(data, zoom=1): # data: y, x
     image_2=1.*data
     fs_ = np.zeros((image_2.shape[0],int(image_2.shape[1]/2)))
     
-    freqs = (np.fft.fftfreq(image_2.shape[1])* 1./(dst.pixel[dst.line]))[:int(image_2.shape[1]/2)]
+    freqs = (np.fft.fftfreq(image_2.shape[1]) / pixel_scale_x)[:int(image_2.shape[1]/2)]
 
     contrast=np.zeros(image_2.shape[0])
     for i in range(image_2.shape[0]):
@@ -94,7 +95,7 @@ def plot_power_spectrum(data, zoom=1): # data: y, x
   
     liney,= axs.plot(freq_axis,fs_,  color='black', marker='.', linestyle='None') #   
     
-    n_filtered = 111 # needs to be odd!!!
+    n_filtered = 11 # needs to be odd!!!
     medi_filtered = medfilt(fs_,n_filtered)
     
     
@@ -107,15 +108,35 @@ def plot_power_spectrum(data, zoom=1): # data: y, x
     #             gradient,
     #                     color='red',linestyle='solid' )
     
-    axs.axvline(x=1/0.58, color='red',
-               linestyle="dashed", alpha=0.8, linewidth=0.8*zoom)
-    axs.axhline(y=2e-7, color='black',
-               linestyle="dashed", alpha=0.8, linewidth=0.8*zoom)
+    # Add optional reference lines
+    if reference_freq_line is not None:
+        axs.axvline(x=reference_freq_line, color='red',
+                   linestyle="dashed", alpha=0.8, linewidth=0.8*zoom)
+    if reference_power_line is not None:
+        axs.axhline(y=reference_power_line, color='black',
+                   linestyle="dashed", alpha=0.8, linewidth=0.8*zoom)
     axs.set_ylabel('Power [a.u]', labelpad=-1)
     axs.set_yscale('log')
     axs.set_ylim(0.00000001,0.01)
-    axs.set_xlim(0.1,2.1)
+    axs.set_xlim(0.1,8.1)
     axs.set_xlabel(r"arcsec$^{-1}$",labelpad=-1)
     #fig.show()
 
     return(fig, fs_)
+
+
+def plot_power_spectrum_legacy(data, zoom=1): 
+    """
+    Legacy wrapper for backward compatibility.
+    
+    Note: This function uses hardcoded pixel scale and is deprecated.
+    Use plot_power_spectrum(data, pixel_scale_x, pixel_scale_y) instead.
+    """
+    # Default pixel scale for legacy compatibility (arcsec/pixel)
+    default_pixel_scale = 0.065
+    # Current reference line values from original code
+    reference_freq_line = 1/0.58  # arcsec^-1
+    reference_power_line = 2e-7   # a.u.
+    
+    return plot_power_spectrum(data, default_pixel_scale, default_pixel_scale, zoom,
+                              reference_freq_line, reference_power_line)
