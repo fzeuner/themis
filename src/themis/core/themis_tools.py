@@ -673,6 +673,32 @@ def binning(data, binning = [1,1,1,1]):
 
     
 
+def dummy_binning(data, binning=[1,1]):
+    """Perform binning by convolution with averaging kernel.
+    
+    Works for both 2D and 3D data.
+    For 3D data: applies binning to each wavelength slice.
+    For 2D data: applies binning to the single image.
+    """
+    from scipy.signal import convolve2d
+    kernel = np.ones((binning[0],binning[1]))/(binning[0]*binning[1])
+    
+    if data.ndim == 3:
+        # 3D data: apply to each wavelength slice
+        data_dummy = np.zeros_like(data)
+        for i in range(data.shape[2]):
+            conv_data = convolve2d(data[:,:,i], kernel, 'valid')
+            data_dummy[:conv_data.shape[0],:conv_data.shape[1],i] = conv_data
+    elif data.ndim == 2:
+        # 2D data: apply to single image
+        conv_data = convolve2d(data, kernel, 'valid')
+        data_dummy = conv_data
+    else:
+        raise ValueError(f"dummy_binning expects 2D or 3D data, got {data.ndim}D")
+    
+    return(data_dummy)
+
+
 def check_continuum_noise(data): # stokes V in continuum only
     
     zoom=2
@@ -691,7 +717,7 @@ def check_continuum_noise(data): # stokes V in continuum only
     ax=fig.add_subplot(gs[0,0]) 
     
     #use standard deviation along slit 
-    initial_noise = np.mean(np.std(data, axis=2))
+    initial_noise = np.std(data)
     
     
     ideal_binned_noise = []
@@ -709,7 +735,7 @@ def check_continuum_noise(data): # stokes V in continuum only
         for p in range(1,data.shape[1]-2):
             binning_x.append((i)*(p))
             ideal_binned_noise.append(initial_noise/np.sqrt((i)*(p)))
-            __dummy = np.mean(np.std(dummy_binning(data, binning=[i,p]), axis=2))
+            __dummy = np.std(dummy_binning(data, binning=[i,p]))
             binned_noise.append(__dummy)
             
     
@@ -719,8 +745,8 @@ def check_continuum_noise(data): # stokes V in continuum only
     sort = np.argsort(binning_x)
     
     # print(binning_x.shape, binned_noise.shape, ideal_binned_noise.shape)
-    ax.plot(binning_x[sort],100*ideal_binned_noise[sort], label = 'theoretical V noise')
-    ax.plot(binning_x[sort],100*binned_noise[sort], label = 'V continuum noise')
+    ax.plot(binning_x[sort],100*ideal_binned_noise[sort], label = 'theoretical noise')
+    ax.plot(binning_x[sort],100*binned_noise[sort], label = 'continuum noise')
     ax.set_xlabel('# pixel binned')
     ax.set_ylabel('noise [%]')
     ax.legend()

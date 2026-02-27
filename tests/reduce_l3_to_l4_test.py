@@ -103,7 +103,24 @@ if __name__ == '__main__':
                        state_names=['l4',
                                     'l1']) 
     
+#%%
+    scan_data, _ = tio.read_any_file(config, 'scan', status='l4')
+    result = tt.compute_polarimetry(scan_data)
     
+    I = result.ratio.I.mean(axis=(0,1))
+    U_d = result.difference.U.mean(axis=(0,1))
+    U_r = result.ratio.U.mean(axis=(0,1))
+    
+    #%%
+    plt.plot(U_d[660,30:-30], label=['difference'])
+    plt.plot(U_r[660,30:-30], label=['ratio'])
+    plt.ylabel('U/I')
+    # plt.plot(U_d[460,30:-30], label=['difference'])
+    # plt.plot(U_r[460,30:-30], label=['ratio'])
+    plt.legend()
+    
+    #%%
+    _ = tt.check_continuum_noise( result.ratio.U[:,0,20:600,811])    
     
     
     

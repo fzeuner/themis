@@ -84,10 +84,10 @@ if __name__ == '__main__':
     result = tt.compute_polarimetry(scan_data)
  
     # Access Stokes V at slit 0, map 0 via difference method
-    I_diff = result.difference.I[0, 0]
-    V_diff = result.difference.V[0, 0]
-    Q_diff = result.difference.Q[0, 0]
-    U_diff = result.difference.U[0, 0]
+    I_diff = result.difference.I.mean(axis=(0,1))
+    V_diff = result.difference.V.mean(axis=(0,1))
+    Q_diff = result.difference.Q.mean(axis=(0,1))
+    U_diff = result.difference.U.mean(axis=(0,1))
     
     
     data_plot = np.array([I_diff[30:-30,30:-30],Q_diff[30:-30,30:-30], U_diff[30:-30,30:-30], V_diff[30:-30,30:-30]])
