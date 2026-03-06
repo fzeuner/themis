@@ -31,9 +31,7 @@ src/themis/ui/VerticalLabel.py
 src/themis/ui/__init__.py
 src/themis/ui/getWidgetColors.py
 src/themis/ui/style_themis.py
-tests/test.py
 tests/test_amend_spectroflat.py
-tests/test_atlas_fit_window.py
 tests/test_blos_inversion.py
 tests/test_desmiling.py
 tests/test_desmiling_quality.py
