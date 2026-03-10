@@ -841,9 +841,10 @@ class StokesResult:
     def __init__(self):
         self.difference = self._MethodResult()
         self.ratio = self._MethodResult()
+        self.uml = self._MethodResult()
     
     def __repr__(self):
-        return f"StokesResult(difference={self.difference}, ratio={self.ratio})"
+        return f"StokesResult(difference={self.difference}, ratio={self.ratio}, uml={self.uml})"
 
 
 def compute_polarimetry(cycle_set):
@@ -903,6 +904,11 @@ def compute_polarimetry(cycle_set):
         method.I = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
         for s in stokes_params:
             setattr(method, s, np.zeros((n_slit, n_map, ny, nx), dtype='float32'))
+    # uml: always allocate I, Q, U, V — missing states stay zero
+    result.uml.I = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
+    result.uml.Q = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
+    result.uml.U = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
+    result.uml.V = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
     
     for slit_idx, map_idx in tqdm(
             [(s, m) for s in slit_indices for m in map_indices],
@@ -910,31 +916,50 @@ def compute_polarimetry(cycle_set):
         si = slit_to_idx[slit_idx]
         mi = map_to_idx[map_idx]
         
+        # --- uml: accumulate from every available frame (p or m state) ---
+        uml_I_accum = np.zeros((ny, nx), dtype='float64')
+        uml_I_count = 0
+
+        for stokes in stokes_params:
+            for sign in ('p', 'm'):
+                frame = cycle_set.get_state_slit_map(f'{sign}{stokes}', slit_idx, map_idx)
+                if frame is None:
+                    continue
+                upper = frame.get_half('upper').data.astype('float64')
+                lower = frame.get_half('lower').data.astype('float64')
+                uml_I_accum += 0.5 * (upper + lower)
+                uml_I_count += 1
+                # uml S: use first available sign (prefer p, fall back to m)
+                uml_S_attr = getattr(result.uml, stokes)
+                if np.all(uml_S_attr[si, mi] == 0):
+                    uml_S_attr[si, mi] = (upper - lower).astype('float32')
+
+        if uml_I_count > 0:
+            result.uml.I[si, mi] = (uml_I_accum / uml_I_count).astype('float32')
+
+        # --- difference / ratio: only when both p and m are present ---
         for stokes in stokes_params:
             p_frame = cycle_set.get_state_slit_map(f'p{stokes}', slit_idx, map_idx)
             m_frame = cycle_set.get_state_slit_map(f'm{stokes}', slit_idx, map_idx)
-            
+
             if p_frame is None or m_frame is None:
-                print(f'    ⚠ Missing p{stokes}/m{stokes} at slit={slit_idx}, map={map_idx}')
+                # leave difference/ratio at zero for this parameter
                 continue
-            
+
             pS_upper = p_frame.get_half('upper').data.astype('float64')
             pS_lower = p_frame.get_half('lower').data.astype('float64')
             mS_upper = m_frame.get_half('upper').data.astype('float64')
             mS_lower = m_frame.get_half('lower').data.astype('float64')
-            
-            # --- Difference method ---
+
             I_diff = 0.25 * (pS_upper + pS_lower + mS_lower + mS_upper)
             with np.errstate(divide='ignore', invalid='ignore'):
                 S_diff = 0.25 * (pS_upper - pS_lower + mS_lower - mS_upper) / I_diff
             S_diff = np.nan_to_num(S_diff, nan=0.0, posinf=0.0, neginf=0.0)
-            
-            # --- Ratio method ---
+
             with np.errstate(divide='ignore', invalid='ignore'):
                 S_ratio = (pS_upper / mS_upper * mS_lower / pS_lower - 1)
             S_ratio = np.nan_to_num(S_ratio, nan=0.0, posinf=0.0, neginf=0.0)
-            
-            # Store
+
             result.difference.I[si, mi] = I_diff.astype('float32')
             result.ratio.I[si, mi] = I_diff.astype('float32')
             getattr(result.difference, stokes)[si, mi] = S_diff.astype('float32')

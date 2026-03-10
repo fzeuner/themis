@@ -8,7 +8,7 @@ Created on Fr Jul 4 11:52:55 2025
 Configuration file
 
 Files supported: scan, dark, flat, flat_center
-Reduction levels supported: raw, l0, l1
+Reduction levels supported: raw, l0, l1, l2, l3, l4, l5
 
 """
 from pathlib import Path

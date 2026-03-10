@@ -2781,6 +2781,306 @@ def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
     return out_path
 
 
+def align_slit_positions(data, max_shift=10.0, upsample_factor=10, ref_wl=None):
+    """Determine cumulative spatial shifts between consecutive slit positions and apply them.
+
+    The anchor slit is the highest-contrast slit within the central half of the scan
+    (measured as std of the spatial profile at ref_wl). Shifts are accumulated outward
+    in both directions from the anchor (shift=0 at the anchor). This gives the most
+    reliable reference and avoids error accumulation from low-contrast slits near the edges.
+
+    For 2D input (n_slits, n_spatial) the whole row is used directly.
+    For 3D input (n_slits, n_spatial, n_wl) the column at ref_wl is used for shift
+    determination; the shift is then applied to all wavelengths.
+
+    Args:
+        data: 2D array (n_slits, n_spatial) or 3D array (n_slits, n_spatial, n_wl).
+        max_shift: Maximum allowed shift in pixels. Shifts exceeding this trigger fallback logic.
+        upsample_factor: Sub-pixel accuracy for phase_cross_correlation.
+        ref_wl: Wavelength pixel index used for shift determination (3D only). Defaults to
+                the middle wavelength if None.
+
+    Returns:
+        shifts: list of float, cumulative shift per slit position (length n_slits).
+                shifts[anchor_idx] == 0; positive = moved in +spatial direction.
+        data_aligned: array of same shape as input with shifts applied.
+    """
+    from skimage.registration import phase_cross_correlation
+    from scipy.ndimage import shift as nd_shift
+
+    n_slits = data.shape[0]
+    is_3d = data.ndim == 3
+
+    if is_3d and ref_wl is None:
+        ref_wl = data.shape[2] // 2
+
+    def _get_shift_1d(ref, mov):
+        """Return shift (float) of mov relative to ref via 2D cross-correlation."""
+        result = phase_cross_correlation(ref[np.newaxis, :], mov[np.newaxis, :],
+                                         upsample_factor=upsample_factor)
+        return float(result[0][1])
+
+    def _probe(slc):
+        """Extract the 1D reference profile from a slit slice."""
+        return slc[:, ref_wl] if is_3d else slc
+
+    # --- find anchor: highest contrast slit in the central half ---
+    lo = n_slits // 4
+    hi = 3 * n_slits // 4
+    contrasts = np.array([np.std(_probe(data[i])) for i in range(lo, hi)])
+    anchor_idx = int(lo + np.argmax(contrasts))
+    print(f"  Anchor slit: {anchor_idx} (std={contrasts[anchor_idx - lo]:.4f})")
+
+    # --- helper: walk one direction, accumulate shifts into shifts_arr ---
+    def _walk(shifts_arr, indices):
+        """Walk through `indices` (ascending or descending), filling shifts_arr."""
+        for j, i in enumerate(indices):
+            prev = indices[j - 1] if j > 0 else anchor_idx
+            delta = _get_shift_1d(_probe(data[prev]), _probe(data[i]))
+
+            if abs(delta) > max_shift:
+                has_prev2 = j >= 2
+                if has_prev2:
+                    prev2 = indices[j - 2]
+                    delta2_abs = _get_shift_1d(_probe(data[prev2]), _probe(data[i]))
+                    delta2 = delta2_abs - (shifts_arr[prev] - shifts_arr[prev2])
+                    if abs(delta2) <= max_shift:
+                        print(f"  slit {i}: used 2nd previous (shift={delta2:.3f}, orig={delta:.3f})")
+                        delta = delta2
+                    else:
+                        ref_mean = 0.5 * (data[prev] + data[prev2])
+                        deltam = _get_shift_1d(_probe(ref_mean), _probe(data[i]))
+                        if abs(deltam) <= max_shift:
+                            print(f"  slit {i}: used mean-of-2 reference (shift={deltam:.3f}, orig={delta:.3f})")
+                            delta = deltam
+                        else:
+                            last_valid = shifts_arr[prev]
+                            print(f"  WARNING slit {i}: all fallbacks exceeded {max_shift}px "
+                                  f"(orig={delta:.3f}, 2nd-prev={delta2:.3f}, mean={deltam:.3f}). "
+                                  f"Keeping last valid shift={last_valid:.3f}.")
+                            shifts_arr[i] = last_valid
+                            continue
+                else:
+                    last_valid = shifts_arr[prev]
+                    print(f"  WARNING slit {i}: shift {delta:.3f}px > {max_shift}px (no prior history). "
+                          f"Keeping last valid shift={last_valid:.3f}.")
+                    shifts_arr[i] = last_valid
+                    continue
+
+            shifts_arr[i] = shifts_arr[prev] + delta
+
+    # anchor shift = 0; walk right (ascending) and left (descending)
+    shifts_arr = np.zeros(n_slits, dtype=float)
+    _walk(shifts_arr, list(range(anchor_idx + 1, n_slits)))   # rightward
+    _walk(shifts_arr, list(range(anchor_idx - 1, -1, -1)))    # leftward
+
+    shifts = shifts_arr.tolist()
+
+    # --- apply shifts to all wavelengths ---
+    data_aligned = np.zeros_like(data)
+    for i, s in enumerate(shifts):
+        if is_3d:
+            for wl in range(data.shape[2]):
+                data_aligned[i, :, wl] = nd_shift(data[i, :, wl], shift=-s, mode='nearest')
+        else:
+            data_aligned[i] = nd_shift(data[i], shift=-s, mode='nearest')
+
+    return shifts, data_aligned
+
+
+def _plot_slit_shifts(shifts, out_path=None, ref_wl=None):
+    """Plot applied cumulative shifts vs slit position."""
+    import matplotlib.pyplot as plt
+    title = f'L5: Applied slit position shifts (ref wl px={ref_wl})' if ref_wl is not None else 'L5: Applied slit position shifts'
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(np.arange(len(shifts)), shifts, 'o-', markersize=3, linewidth=1)
+    ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+    ax.set_xlabel('Slit position index')
+    ax.set_ylabel('Cumulative shift [pixels]')
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if out_path:
+        fig.savefig(out_path, dpi=150)
+        print(f'  ✓ Shift plot saved: {out_path}')
+    plt.show()
+    return fig
+
+
+def reduce_l4_to_l5(config, data_type='scan', return_reduced=False, ref_wl=800):
+    """Level 5 reduction: align slit positions by cross-correlating consecutive spatial slices.
+
+    Each map is processed independently. For each map, Stokes I is computed via
+    compute_polarimetry (uml.I = mean of upper and lower) and used as the reference
+    image. For each consecutive slit pair, a 1D phase cross-correlation at ref_wl
+    determines the spatial shift. The cumulative shift is applied to the upper and
+    lower frames of all polarisation states for that map. Large shifts exceeding
+    max_shift are handled with fallback logic (2nd previous slice, then mean of
+    last two slices; set to 0 if all fail).
+
+    A plot of cumulative shifts vs slit position (one curve per map) is saved to
+    the figures directory.
+
+    Supports data_type='scan' only. Other data types are passed through unchanged.
+
+    Args:
+        config: Dataset configuration object.
+        data_type: Data type to process. Only 'scan' is supported.
+        return_reduced: If True, return the aligned CycleSet instead of saving.
+        ref_wl: Wavelength pixel index used for shift determination (default 800).
+    """
+    import themis.core.themis_io as tio
+
+    if data_type != 'scan':
+        print(f'L5 reduction: no processing for data_type={data_type!r}')
+        return None
+
+    print('=' * 70)
+    print('L5 REDUCTION: SLIT POSITION ALIGNMENT')
+    print('=' * 70)
+
+    # ----------------------------------------------------------------
+    # STEP 1: Load L4 scan
+    # ----------------------------------------------------------------
+    print(f'\n{"-"*70}')
+    print('STEP 1: LOAD L4 SCAN')
+    print(f'{"-"*70}')
+
+    scan, header = tio.read_any_file(config, data_type, status='l4')
+
+    # ----------------------------------------------------------------
+    # STEP 2: Collect grid dimensions
+    # ----------------------------------------------------------------
+    print(f'\n{"-"*70}')
+    print('STEP 2: COLLECT GRID DIMENSIONS')
+    print(f'{"-"*70}')
+
+    keys = sorted(scan.keys())
+    map_indices = sorted(set(k[2] for k in keys))
+    slit_indices = sorted(set(k[1] for k in keys))
+    frame_states = sorted(set(k[0] for k in keys))
+    slit_to_idx = {s: i for i, s in enumerate(slit_indices)}
+
+    print(f'  Frame states: {frame_states}')
+    print(f'  Slit positions: {len(slit_indices)}')
+    print(f'  Map indices: {map_indices}')
+    print(f'  Using reference wavelength pixel: {ref_wl}')
+
+    # ----------------------------------------------------------------
+    # STEP 3: PER-MAP: DETERMINE SHIFTS AND APPLY
+    # ----------------------------------------------------------------
+    print(f'\n{"-"*70}')
+    print('STEP 3: PER-MAP SHIFT DETERMINATION AND APPLICATION')
+    print(f'{"-"*70}')
+
+    from scipy.ndimage import shift as nd_shift
+    import themis.core.data_classes as dct
+    import themis.core.themis_tools as tt
+
+    spatial_margin = 30
+    aligned_frames = dct.CycleSet()
+    all_shifts = {}  # map_idx -> shifts list (for plotting)
+
+    for map_idx in map_indices:
+        print(f'\n  --- Map {map_idx} ---')
+
+        # Build a sub-CycleSet for this map only
+        map_scan = dct.CycleSet()
+        for key in keys:
+            if key[2] == map_idx:
+                map_scan.add_frame(scan[key], key)
+
+        # Compute polarimetry to get uml.I: shape (n_slit, 1, ny, nx)
+        pol = tt.compute_polarimetry(map_scan)
+        # uml.I: (n_slit, n_map=1, ny, nx) -> (n_slit, ny, nx)
+        ref_data = pol.uml.I[:, 0, :, :]  # (n_slit, ny, nx) == (n_slit, n_spatial, n_wl)
+
+        # Trim spatial margin for cleaner cross-correlation
+        ref_trimmed = ref_data[:, spatial_margin:-spatial_margin, :]
+        print(f'  Reference data shape: {ref_trimmed.shape}')
+
+        shifts, _ = align_slit_positions(ref_trimmed, ref_wl=ref_wl)
+        all_shifts[map_idx] = shifts
+        print(f'  Shifts range: {min(shifts):.3f} to {max(shifts):.3f} pixels')
+
+        # Apply shifts to upper and lower of all frame states for this map
+        for key in keys:
+            frame_state, s_idx, m_idx = key
+            if m_idx != map_idx:
+                continue
+
+            frame = scan[key]
+            arr_idx = slit_to_idx[s_idx]
+            shift_val = shifts[arr_idx] if arr_idx < len(shifts) else 0.0
+
+            aligned_frame = dct.Frame(f'{frame_state}_slit{s_idx:02d}_map{map_idx:02d}')
+            for half in ['upper', 'lower']:
+                half_obj = frame.get_half(half)
+                arr = half_obj.data.astype('float32')
+                arr_shifted = np.zeros_like(arr)
+                for wl in range(arr.shape[1]):
+                    arr_shifted[:, wl] = nd_shift(arr[:, wl], shift=-shift_val, mode='nearest')
+                aligned_frame.set_half(half, arr_shifted, half_obj.pol_state)
+
+            aligned_frames.add_frame(aligned_frame, key)
+
+    print(f'\n  ✓ Applied shifts to {len(keys)} frames across {len(map_indices)} map(s)')
+
+    # ----------------------------------------------------------------
+    # STEP 4 (formerly 5): PLOT SHIFTS — one curve per map
+    # ----------------------------------------------------------------
+    import matplotlib.pyplot as plt
+    line = config.dataset['line']
+    seq = config.dataset[data_type]['sequence']
+    plot_path = config.directories.figures / f'{line}_{data_type}_t{seq:03d}_l5_shifts.png'
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for map_idx, shifts in all_shifts.items():
+        ax.plot(np.arange(len(shifts)), shifts, 'o-', markersize=3, linewidth=1,
+                label=f'map {map_idx}')
+    ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+    ax.set_xlabel('Slit position index')
+    ax.set_ylabel('Cumulative shift [pixels]')
+    ax.set_title(f'L5: Applied slit position shifts (ref wl px={ref_wl})')
+    if len(map_indices) > 1:
+        ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(plot_path, dpi=150)
+    print(f'  ✓ Shift plot saved: {plot_path}')
+    plt.show()
+
+    # ----------------------------------------------------------------
+    # STEP 6: SAVE L5
+    # ----------------------------------------------------------------
+    print(f'\n{"-"*70}')
+    print('STEP 6: SAVE L5')
+    print(f'{"-"*70}')
+
+    if return_reduced:
+        return aligned_frames
+
+    extra_keywords = {
+        'SLTALIGN': ('TRUE', 'L5 slit position alignment applied'),
+        'SLTSHIFT': (f'{min(shifts):.3f}:{max(shifts):.3f}', 'L5 shift range min:max [px]'),
+    }
+
+    out_path = tio.save_reduction(
+        config,
+        data_type=data_type,
+        level='l5',
+        frames=aligned_frames,
+        source_header=header,
+        verbose=True,
+        overwrite=True,
+        extra_keywords=extra_keywords,
+    )
+
+    print(f'✓ L5 {data_type} file saved')
+    return out_path
+
+
 reduction_levels = ReductionRegistry()
 
 reduction_levels.add(ReductionLevel("raw", "fts", reduce_raw, {
@@ -2835,4 +3135,12 @@ reduction_levels.add(ReductionLevel("l4", "_l4.fits", reduce_l3_to_l4, {
     "scan": "Apply flat_center wavelength calibration + continuum correction to scan data. Upper: delta offsets + amend_spectroflat continuum. Lower: z3ccspectrum resampling + ratio polyfit continuum.",
     "flat": "Apply flat_center wavelength calibration + continuum correction to flat data. Upper: delta offsets + amend_spectroflat continuum. Lower: z3ccspectrum resampling + ratio polyfit continuum.",
     "flat_center": "Atlas-fit wavelength calibration + delta offsets + amend_spectroflat continuum correction for upper frame. Lower frame: z3ccspectrum wavelength alignment + ratio polyfit continuum correction."
+}))
+
+reduction_levels.add(ReductionLevel("l5", "_l5.fits", reduce_l4_to_l5, {
+    "dark": "Nothing.",
+    "scan": ("Slit position alignment: for each consecutive slit pair, the spatial shift is determined at a reference wavelength"
+             "and applied to all wavelengths of that slit position. A shift plot is saved to the figures directory."),
+    "flat": "Nothing.",
+    "flat_center": "Nothing."
 }))
