@@ -819,11 +819,21 @@ class init:
     
 class StokesResult:
     """Container for Stokes polarimetry results.
-    
-    Access results via method ('difference' or 'ratio') and Stokes parameter.
+
+    Access results via method ('difference', 'ratio', or 'uml') and Stokes
+    parameter.
+
+    - ``difference`` / ``ratio`` require both ``pS`` and ``mS`` frames for a
+      given Stokes state ``S``. If one is missing, that state remains zero.
+    - ``uml`` (upper-minus-lower) is robust for partial/single-state data:
+      ``uml.I`` is the mean of ``(upper + lower)/2`` over all available frames,
+      and ``uml.S`` is ``upper - lower`` from the first available sign
+      (prefer ``pS``, fallback ``mS``). Missing states remain zero.
+
     Arrays are shaped (n_slit, n_map, ny, nx), so numpy slicing works:
         result.difference.I[0, :]       -> all maps at slit 0
         result.ratio.V[0, 0]            -> single 2D frame
+        result.uml.I[:, 0, :, :]        -> all slits at map 0 (uml intensity)
         result.difference.Q[:, 0, :, :] -> all slits at map 0
     """
     class _MethodResult:
@@ -848,9 +858,10 @@ class StokesResult:
 
 
 def compute_polarimetry(cycle_set):
-    """Compute Stokes I, Q, U, V from a CycleSet using difference and ratio methods.
+    """Compute Stokes I, Q, U, V from a CycleSet.
     
-    For each Stokes parameter S in {Q, U, V} at each (slit_idx, map_idx):
+    For each Stokes parameter S in {Q, U, V} at each (slit_idx, map_idx),
+    three result groups are populated:
     
     Difference method:
         S/I = 0.25 * (pS_upper - pS_lower + mS_lower - mS_upper) / I
@@ -859,6 +870,18 @@ def compute_polarimetry(cycle_set):
     Ratio method:
         I = same as difference
         S = pS_upper / mS_upper * mS_lower / pS_lower - 1
+
+    UML method (upper-minus-lower):
+        uml.I = mean of 0.5 * (upper + lower) over all available frames
+                among pQ/mQ/pU/mU/pV/mV
+        uml.S = upper - lower from first available sign for S
+                (prefer pS, fallback mS)
+
+    Notes on missing states:
+        - ``difference`` and ``ratio`` for a state S are computed only if both
+          pS and mS are present. Otherwise they remain zero.
+        - ``uml`` is intended to still work for partial or single-state data
+          (e.g. only pQ present).
     
     Parameters
     ----------
@@ -869,7 +892,7 @@ def compute_polarimetry(cycle_set):
     Returns
     -------
     StokesResult
-        Access via .difference or .ratio, then .I, .Q, .U, .V
+        Access via .difference, .ratio, or .uml, then .I, .Q, .U, .V.
         Each is a numpy array with shape (n_slit, n_map, ny, nx).
     """
     # Collect grid dimensions and available Stokes parameters

@@ -28,6 +28,7 @@ dependencies = [
     "scipy>=1.17.1",
     "spectator @ git+https://github.com/fzeuner/spectator.git",
     "spectroflat==2.1.0",
+    "spyder>=6.1.4",
     "tifffile==2026.1.28",
     "tqdm==4.67.1",
 ]

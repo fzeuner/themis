@@ -12,7 +12,6 @@ Testing the reduction of raw to l0
 from themis.core import themis_tools as tt
 from themis.core import themis_data_reduction as tdr
 from themis.core import themis_io as tio
-from themis.datasets import themis_datasets_2025 as dst
 from themis.datasets.themis_datasets_2025 import get_config
 from themis.plots import plot_power_spectrum
 
@@ -59,33 +58,33 @@ if __name__ == '__main__':
  #   result = lv2.reduce(config, data_type='scan', return_reduced = False)
 #    result = lv3.reduce(config, data_type='scan', return_reduced = False)
  #   result = lv4.reduce(config, data_type='scan', return_reduced = False)
-    result = lv5.reduce(config, data_type='scan', return_reduced = False, ref_wl = 800)
+  #  result = lv5.reduce(config, data_type='scan', return_reduced = False, ref_wl = 800)
     
     #print(lv1.get_description(data_type='flat'))
     #%%
   
 #%%
-scan, _ = tio.read_any_file(config, 'scan', status='l5')
-result = tt.compute_polarimetry(scan)
+# scan, _ = tio.read_any_file(config, 'scan', status='l5')
+# result = tt.compute_polarimetry(scan)
 
-scan4, _ = tio.read_any_file(config, 'scan', status='l4')
-result4 = tt.compute_polarimetry(scan4)
+scan1, _ = tio.read_any_file(config, 'scan', status='l4')
+result1 = tt.compute_polarimetry(scan1)
  
 #%%
    
    
-data_plot = np.array([result.uml.I[:,0,30:-30,30:-30],result4.uml.I[:,0,30:-30,30:-30]])
+data_plot = np.array([result1.uml.I[:,0,30:-30,30:-30],result2.uml.I[:,0,30:-30,30:-30],result4.uml.I[:,0,30:-30,30:-30]])
+
    
-viewer = display_data( data_plot, ['states','spatial_y',  'spatial_x', 'spectral'],
+viewer = display_data( data_plot, ['states','spatial_y', 'spatial_x', 'spectral'],
                       title='scan' 
                       )
 
 
 #%%
-from themis.plots.plot_power_spectrum import plot_power_spectrum
     
 fig, power = plot_power_spectrum(
-    I[:,30:-30,780:810].mean(axis=2),
+    (result4.uml.I[:,30:-30,780:810]).mean(axis=2),
     pixel_scale_x=config.cam.pixel_scale,  # arcsec/pixel along slit (from cam_config)
     pixel_scale_y=config.slit_width,        # arcsec/step along scan (from config params)
     reference_freq_line=1/0.18, reference_power_line=1.2e-6

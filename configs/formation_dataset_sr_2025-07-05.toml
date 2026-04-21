@@ -6,7 +6,11 @@ line = "sr"
 # Observation date (used in directory structure)
 date = "2025-07-05"
 # Sequences for scan/flat/dark
-sequence = 27
+
+# disk center
+#sequence = 27
+# -40
+sequence = 22
 flat_sequence = 26
 flat_center_sequence = 26
 dark_sequence = 1
