@@ -3,27 +3,33 @@ Code for analyzing themis data
 
 ## Installation and setup
 
-- **Create/activate conda env**:
-  - `conda create -n themis python=3.14`
-  - `conda activate themis`
-- **Install dependencies**:
+- **Quick setup (if `uv` is already installed)**:
+  - `git clone <repo-url>`
+  - `cd themis`
+  - `uv sync`
+  - This is sufficient to create/use `.venv`, install dependencies from `uv.lock`, and make `themis` imports callable.
 
-Get https://github.com/fzeuner/spectator, then:
-  pip install -e spectator
+- **Create/activate uv-managed `.venv` for THEMIS**:
+  - `uv python install 3.14`
+  - `uv venv --python 3.14`
+  - `source .venv/bin/activate`
 
-Get https://gitlab.gwdg.de/hoelken/spectroflat:
-  pip install spectroflat
+- **Sync/install dependencies from `pyproject.toml` and `uv.lock`**:
+  - `uv sync`
 
-- **Create/activate conda env**:
+- **Editable install behavior**:
+  - This repo uses `pyproject.toml` with `src/` as package root.
+  - `uv sync` installs the project and dependencies into `.venv`, so imports like `from themis...` work without `sys.path` hacks.
+
+- **Atlas-fit stays on separate conda env (unchanged)**:
   - `conda create -n atlas-fit python=3.10 numpy=1.26`
-  Get https://gitlab.gwdg.de/hoelken/atlas-fit/-/tree/main?ref_type=heads, then:
-  git clone https://gitlab.gwdg.de/hoelken/atlas-fit.git
-  pip install -e atlas-fit
+  - `conda activate atlas-fit`
+  - `git clone https://gitlab.gwdg.de/hoelken/atlas-fit.git`
+  - `pip install -e atlas-fit`
 
-  - `conda env update -n themis -f environment.yml`
-- **Editable install of this package** (so imports like `from themis...` work everywhere and scripts don’t need sys.path hacks):
-  - `pip install -e .`
-  - This uses `pyproject.toml` with `src/` as the package root.
+- **Notes**:
+  - `atlas-fit` is intentionally **not** installed in the THEMIS `.venv`; calls to atlas-fit scripts run in the `atlas-fit` conda env.
+
 
 
 ## Configuration-driven datasets (2025)
