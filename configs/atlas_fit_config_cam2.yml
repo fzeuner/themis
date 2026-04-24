@@ -1,0 +1,66 @@
+# -- Input Config --
+# The label to use in plots etc.
+label: "THEMIS/MTR Camera 2 (Ti)"
+# debug: True
+# Save the generated plots in the working dir
+save_plots: False
+normalized_plot: True
+input:
+  # Path to the Input file to use. Must be fits format.
+  corrected_frame: examples/test.fits.gz
+  # The region of interest to extrac from the input frame, in typical python numpy format.
+  roi: "[400,10:-10]"
+  # Approx. lower wavelength boundary of the input [nm]
+  wl_start: 453.2
+  # Approx. upper wavelength boundary of the input [nm]
+  wl_end: 454.0
+  # The global stray-light level in the spectrograph in percent [%]
+  # 2025-07-07: 6.71
+  # 2025-07-05: 
+  stray_light: 6.71
+  # Stray-light in percent [%] for lower frame (used by themis pipeline, ignored by atlas-fit)
+  stray_light_lower: 4.31
+  # The window [px] for the gauss-fit to operate in around detected line cores
+  line_window: 20
+  # PSF Model to convolve the atlas with
+  # model_psf: examples/modeled_spectral_psf_412nm.txt
+  # The FWHM for the data at the central wl [nm]
+  # 2025-07-07: 0.00336
+  # 2025-07-05: 0.00288
+  fwhm: 0.0036
+
+fitting:
+  # Use the highest quantile as a first order continuum correction
+  high_quantile_continuum: True
+  # Use a low frequency filter to determine pre-filter aberrations, etc.
+  # lowpass_filter: False
+  # Maximal dispersion degree to try
+  dispersion_max_degree: 4
+  # Minimal dispersion degree to try
+  dispersion_min_degree: 1
+  # Order of the lowpass-prefilter to apply. Use Null to deactivate
+  continuum_filter_order: 8
+  # Spline degree for the continuum fit
+  continuum_spline_degree: 5
+  # Spline smoothing factor for the continuum fit
+  continuum_spline_smoothing: 0.12
+  # Number of anchor points to derive the continuum from
+  continuum_points: 70
+  # Max allowed stray light in fit
+  max_stray_light: 10
+  # Mask lines with changing intensity (i.e., tellurics)
+  # stray_light_ignored_lines:
+  #  - 412.02 # example
+
+atlas:
+  # The atlas to use for fitting.
+  # 'fts', 'hhdc' Hamburg Disk-center atlas from Neckel et al. is default.
+  # Also, 'sss' (Stenflo & Gandorfer) is supported.
+  key: 'hhdc'
+  # key: 'delbouille'
+  # key: 'sss'
+  # The FWHM (at wavelength) is unknown for SSS, please configure manually:
+  # fwhm: 0
+  # The window [px] for the gauss-fit to operate in around detected line cores
+  line_window: 16
+  

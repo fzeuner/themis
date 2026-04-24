@@ -32,7 +32,11 @@ if __name__ == '__main__':
 
 # -----------------------------------------------------
     # initialize configuration from datasets
-    config = get_config(config_path='configs/formation_dataset_sr_2025-07-05.toml', # omit to use defaults
+    # config = get_config(config_path='configs/formation_dataset_ti_2025-07-05.toml', # omit to use defaults
+    # auto_discover_files=True,           # pre-fill matching files per level
+    # auto_create_dirs=False              # create directories if missing
+    # )
+    config = get_config(config_path='configs/sample_dataset_ti_2025-07-07.toml', # omit to use defaults
     auto_discover_files=True,           # pre-fill matching files per level
     auto_create_dirs=False              # create directories if missing
     )
@@ -64,16 +68,17 @@ if __name__ == '__main__':
     #%%
   
 #%%
-# scan, _ = tio.read_any_file(config, 'scan', status='l5')
-# result = tt.compute_polarimetry(scan)
-
-scan1, _ = tio.read_any_file(config, 'scan', status='l4')
-result1 = tt.compute_polarimetry(scan1)
+    config1 = get_config(config_path='configs/formation_dataset_sr_2025-07-05.toml', # omit to use defaults
+    auto_discover_files=True,           # pre-fill matching files per level
+    )
+    scan, _ = tio.read_any_file(config1, 'scan', status='l4')
+    result = tt.compute_polarimetry(scan)
+#%%
  
 #%%
    
    
-data_plot = np.array([result1.uml.I[:,0,30:-30,30:-30],result2.uml.I[:,0,30:-30,30:-30],result4.uml.I[:,0,30:-30,30:-30]])
+data_plot = np.array([result1.uml.I[:,0,30:-30,30:-30],result.uml.I[:,0,30:-30,30:-30]])
 
    
 viewer = display_data( data_plot, ['states','spatial_y', 'spatial_x', 'spectral'],

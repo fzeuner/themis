@@ -56,18 +56,18 @@ def main():
     # Configure spectroflat
     sf_config = SpectroflatConfig(roi=roi, iterations=2)
     sf_config.sensor_flat = SensorFlatConfig(
-        spacial_degree=4,
-        sigma_mask=4.5,
+        spacial_degree=13,
+        sigma_mask=2,
         fit_border=1,
-        average_column_response_map=False,
+        average_column_response_map=True,
         ignore_gradient=True,
         roi=roi
     )
     sf_config.smile = SmileConfig(
-        line_distance=11,
-        strong_smile_deg=8,
+        line_distance=10,
+        strong_smile_deg=2,
         max_dispersion_deg=4,
-        line_prominence=0.1,
+        line_prominence=0.05,
         height_sigma=0.04,
         smooth=True,
         emission_spectrum=False,

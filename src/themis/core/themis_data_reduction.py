@@ -2160,20 +2160,17 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
         print(f'  Error: {offset_source} files not found in config')
         return None
     
-    aux_src = getattr(files_src, 'auxiliary', {})
-    offset_maps = {}
+    offset_maps = tio._load_offset_maps(config, data_type=offset_source)
+    if offset_maps is None:
+        for frame_name in ['upper', 'lower']:
+            path = getattr(files_src, 'auxiliary', {}).get(f'offset_map_{frame_name}')
+            if path is None or not Path(path).exists():
+                print(f'  ✗ WARNING: No offset map found for {frame_name}.')
+                print(f'    Run flat_center L2->L3 first to generate offset maps.')
+        return None
+
     for frame_name in ['upper', 'lower']:
-        path = aux_src.get(f'offset_map_{frame_name}')
-        if path is None or not Path(path).exists():
-            print(f'  ✗ WARNING: No offset map found for {frame_name}.')
-            print(f'    Run flat_center L2->L3 first to generate offset maps.')
-            return None
-        with fits.open(path) as hdul:
-            omap = np.array(hdul[0].data)
-            # OffsetMap.dump() saves multi-state (4, ny, nx); take state 0
-            if omap.ndim == 3:
-                omap = omap[0]
-            offset_maps[frame_name] = omap
+        path = getattr(files_src, 'auxiliary', {}).get(f'offset_map_{frame_name}')
         print(f'  Loaded: {Path(path).name}')
     
     # Load L2 data and apply desmiling

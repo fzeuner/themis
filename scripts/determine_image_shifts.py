@@ -210,6 +210,54 @@ def plot_gaussian_slice_fits(image, axis=1, fit_min=None, fit_max=None,
         initial_offset=initial_offset,
     )
 
+    # Reject unreliable points before plotting/fitting:
+    # 1) FWHM > 20 px
+    # 2) centers that deviate by more than local FWHM from the mean center
+    #    of 100 neighboring points (50 on each side)
+    centers = centers.astype(float)
+    fwhm = fwhm.astype(float)
+    sigmas = sigmas.astype(float)
+
+    valid_fwhm = np.isfinite(fwhm) & (fwhm <= 20.0)
+    centers_f = centers.copy()
+    fwhm_f = fwhm.copy()
+    sigmas_f = sigmas.copy()
+
+    centers_f[~valid_fwhm] = np.nan
+    fwhm_f[~valid_fwhm] = np.nan
+    sigmas_f[~valid_fwhm] = np.nan
+
+    n_pts = centers_f.size
+    if n_pts > 0:
+        local_mean = np.full(n_pts, np.nan, dtype=float)
+        half_window = 50
+        min_neighbors = 10
+        for i in range(n_pts):
+            i0 = max(0, i - half_window)
+            i1 = min(n_pts, i + half_window + 1)
+            neigh = centers_f[i0:i1]
+            finite = np.isfinite(neigh)
+            if np.isfinite(centers_f[i]):
+                rel = i - i0
+                if 0 <= rel < finite.size and finite[rel]:
+                    finite[rel] = False
+            if np.count_nonzero(finite) >= min_neighbors:
+                local_mean[i] = np.nanmean(neigh[finite])
+
+        valid_center = np.isfinite(centers_f) & np.isfinite(local_mean)
+        outlier_center = np.zeros(n_pts, dtype=bool)
+        outlier_center[valid_center] = (
+            np.abs(centers_f[valid_center] - local_mean[valid_center])
+            > fwhm_f[valid_center]
+        )
+        centers_f[outlier_center] = np.nan
+        fwhm_f[outlier_center] = np.nan
+        sigmas_f[outlier_center] = np.nan
+
+    centers = centers_f
+    fwhm = fwhm_f
+    sigmas = sigmas_f
+
     img = np.asarray(image)
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
@@ -452,7 +500,7 @@ if __name__ == '__main__':
 
     # Load configuration
     config = get_config(
-        config_path='configs/calibration_data_sr_2025-07-05.toml',
+        config_path='configs/calibration_data_ti_2025-07-05.toml',
         auto_discover_files=True
     )
 
@@ -468,11 +516,14 @@ if __name__ == '__main__':
     
     
     #%%
+    
+    initial_center_ = 510 # sr 515
+    
     fig, (centers_lower, fwhm_lower, center_lower, sigma_lower) = plot_gaussian_slice_fits(
     lower_scan[0],
     axis=1,        # slices along y, fit along x
-    fit_min=498,
-    fit_max=532,initial_sigma=5, initial_width=10.0,
+    fit_min=490, # sr: 498, 532
+    fit_max=520,initial_sigma=5, initial_width=10.0,
                           initial_amplitude=-8000,
                           initial_center=515, initial_offset=8700
     )
@@ -481,10 +532,10 @@ if __name__ == '__main__':
     fig, (centers_upper, fwhm_upper, center_upper, sigma_upper) = plot_gaussian_slice_fits(
     upper_scan[0],
     axis=1,        # slices along y, fit along x
-    fit_min=498,
-    fit_max=532,initial_sigma=5, initial_width=10.0,
+    fit_min=490,  # sr: 498, 532
+    fit_max=520,initial_sigma=5, initial_width=10.0,
                           initial_amplitude=-8000,
-                          initial_center=515, initial_offset=8700
+                          initial_center=initial_center_, initial_offset=8700
     )
     plt.show()
 
@@ -501,7 +552,7 @@ if __name__ == '__main__':
         return np.repeat(x_shift[None, :], int(ny), axis=0)
 
 
-    def xshift_fade_from_y(x_shift_at_y, ny, y_ref=515, length=485, direction='up'):
+    def xshift_fade_from_y(x_shift_at_y, ny, y_ref=initial_center_, length=485, direction='up'):
         x_shift_at_y = np.asarray(x_shift_at_y, dtype=float)
         if x_shift_at_y.ndim != 1:
             raise ValueError(f"x_shift_at_y must be 1D (nx,), got shape {x_shift_at_y.shape}")
@@ -529,17 +580,25 @@ if __name__ == '__main__':
 
     #%%
 
-    config_test = get_config(config_path='configs/sample_dataset_sr_2025-07-07.toml')
+    #config_test = get_config(config_path='configs/sample_dataset_sr_2025-07-07.toml')
+    config_test = get_config(config_path='configs/sample_dataset_ti_2025-07-07.toml')
 
     #%%
     scan, header = tio.read_any_file(config_test, 'scan', verbose=False, status='l1')
 
     upper = scan.get_state('pQ').stack_all('upper')[0]
     lower = scan.get_state('pQ').stack_all('lower')[0]
+#%%
+    # data_plot = np.array([upper,lower, upper-lower])
 
+   
+    # viewer = display_data( data_plot, ['states','spatial_x',  'spectral'],
+    #                   title='scan' 
+    #                   )
+#%%
     lower_shift_map = xshift_to_2d_map(lower_shifts, ny=lower.shape[0])
     upper_shift_map = xshift_to_2d_map(upper_shifts, ny=upper.shape[0])
-
+#%%
     lower_shifted = tdr._apply_yshift_map_to_half(lower, lower_shift_map)
     upper_shifted = tdr._apply_yshift_map_to_half(upper, upper_shift_map)
 

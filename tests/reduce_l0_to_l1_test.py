@@ -33,7 +33,7 @@ if __name__ == '__main__':
 
 # -----------------------------------------------------
     # initialize configuration from datasets
-    config = get_config(config_path='configs/sample_dataset_sr_2025-07-07.toml', # omit to use defaults
+    config = get_config(config_path='configs/formation_dataset_ti_2025-07-05.toml', # omit to use defaults
     auto_discover_files=True,           # pre-fill matching files per level
     auto_create_dirs=False              # create directories if missing
     )

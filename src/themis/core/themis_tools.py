@@ -842,6 +842,7 @@ class StokesResult:
             self.Q = None
             self.U = None
             self.V = None
+            self.I_rms_contrast_final = None  # np.ndarray (n_slit, n_map)
         
         def __repr__(self):
             params = [s for s in ['I', 'Q', 'U', 'V'] if getattr(self, s) is not None]
@@ -852,6 +853,7 @@ class StokesResult:
         self.difference = self._MethodResult()
         self.ratio = self._MethodResult()
         self.uml = self._MethodResult()
+        self.I_rms_contrast_input = {}  # dict[state] -> np.ndarray (n_slit, n_map)
     
     def __repr__(self):
         return f"StokesResult(difference={self.difference}, ratio={self.ratio}, uml={self.uml})"
@@ -899,11 +901,13 @@ def compute_polarimetry(cycle_set):
     slit_indices = set()
     map_indices = set()
     stokes_params = set()
+    frame_states = set()
     for key in cycle_set.keys():
         frame_state, slit_idx, map_idx = key
         slit_indices.add(slit_idx)
         map_indices.add(map_idx)
         stokes_params.add(frame_state[1:])
+        frame_states.add(frame_state)
     
     slit_indices = sorted(slit_indices)
     map_indices = sorted(map_indices)
@@ -918,13 +922,42 @@ def compute_polarimetry(cycle_set):
     first_frame = cycle_set[first_key]
     ny, nx = first_frame.get_half('upper').data.shape
     
-    print(f'  Stokes parameters found: {stokes_params}')
-    print(f'  Grid: {n_slit} slit x {n_map} map, frame shape: ({ny}, {nx})')
+
+    y0 = max(0, int(0.25 * ny))
+    y1 = min(ny, int(0.75 * ny))
+    x_left0 = max(0, int(0.08 * nx))
+    x_left1 = min(nx, int(0.18 * nx))
+    x_right0 = max(0, int(0.82 * nx))
+    x_right1 = min(nx, int(0.92 * nx))
+
+    def _intensity_rms_contrast(img2d):
+        if img2d is None:
+            return np.nan
+        roi_parts = []
+        if y1 > y0 and x_left1 > x_left0:
+            roi_parts.append(img2d[y0:y1, x_left0:x_left1])
+        if y1 > y0 and x_right1 > x_right0:
+            roi_parts.append(img2d[y0:y1, x_right0:x_right1])
+        if not roi_parts:
+            yc0, yc1 = max(0, int(0.30 * ny)), min(ny, int(0.70 * ny))
+            xc0, xc1 = max(0, int(0.30 * nx)), min(nx, int(0.70 * nx))
+            roi = img2d[yc0:yc1, xc0:xc1]
+        else:
+            roi = np.concatenate([r.ravel() for r in roi_parts])
+        vals = np.asarray(roi, dtype='float64').ravel()
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return np.nan
+        mean_i = np.mean(vals)
+        if mean_i == 0:
+            return np.nan
+        return float(np.std(vals) / mean_i)
     
     # Pre-allocate arrays
     result = StokesResult()
     for method in [result.difference, result.ratio]:
         method.I = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
+        method.I_rms_contrast_final = np.full((n_slit, n_map), np.nan, dtype='float32')
         for s in stokes_params:
             setattr(method, s, np.zeros((n_slit, n_map, ny, nx), dtype='float32'))
     # uml: always allocate I, Q, U, V — missing states stay zero
@@ -932,10 +965,11 @@ def compute_polarimetry(cycle_set):
     result.uml.Q = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
     result.uml.U = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
     result.uml.V = np.zeros((n_slit, n_map, ny, nx), dtype='float32')
+    result.uml.I_rms_contrast_final = np.full((n_slit, n_map), np.nan, dtype='float32')
+    for state in sorted(frame_states):
+        result.I_rms_contrast_input[state] = np.full((n_slit, n_map), np.nan, dtype='float32')
     
-    for slit_idx, map_idx in tqdm(
-            [(s, m) for s in slit_indices for m in map_indices],
-            desc='Computing polarimetry'):
+    for slit_idx, map_idx in [(s, m) for s in slit_indices for m in map_indices]:
         si = slit_to_idx[slit_idx]
         mi = map_to_idx[map_idx]
         
@@ -945,11 +979,14 @@ def compute_polarimetry(cycle_set):
 
         for stokes in stokes_params:
             for sign in ('p', 'm'):
-                frame = cycle_set.get_state_slit_map(f'{sign}{stokes}', slit_idx, map_idx)
+                state = f'{sign}{stokes}'
+                frame = cycle_set.get_state_slit_map(state, slit_idx, map_idx)
                 if frame is None:
                     continue
                 upper = frame.get_half('upper').data.astype('float64')
                 lower = frame.get_half('lower').data.astype('float64')
+                input_i = 0.5 * (upper + lower)
+                result.I_rms_contrast_input[state][si, mi] = _intensity_rms_contrast(input_i)
                 uml_I_accum += 0.5 * (upper + lower)
                 uml_I_count += 1
                 # uml S: use first available sign (prefer p, fall back to m)
@@ -959,6 +996,7 @@ def compute_polarimetry(cycle_set):
 
         if uml_I_count > 0:
             result.uml.I[si, mi] = (uml_I_accum / uml_I_count).astype('float32')
+            result.uml.I_rms_contrast_final[si, mi] = _intensity_rms_contrast(result.uml.I[si, mi])
 
         # --- difference / ratio: only when both p and m are present ---
         for stokes in stokes_params:
@@ -985,10 +1023,29 @@ def compute_polarimetry(cycle_set):
 
             result.difference.I[si, mi] = I_diff.astype('float32')
             result.ratio.I[si, mi] = I_diff.astype('float32')
+            contrast_final = _intensity_rms_contrast(I_diff)
+            result.difference.I_rms_contrast_final[si, mi] = contrast_final
+            result.ratio.I_rms_contrast_final[si, mi] = contrast_final
             getattr(result.difference, stokes)[si, mi] = S_diff.astype('float32')
             getattr(result.ratio, stokes)[si, mi] = S_ratio.astype('float32')
-    
-    print(f'  ✓ Polarimetry computed: {n_slit} slit x {n_map} map, {len(stokes_params)} Stokes parameters')
+
+    if result.I_rms_contrast_input:
+        for state in sorted(result.I_rms_contrast_input.keys()):
+            vals = result.I_rms_contrast_input[state]
+            vals = vals[np.isfinite(vals)]
+            if vals.size > 0:
+                print(f'RMS intensity contrast input ({state}): {np.mean(vals):.5f}')
+
+    for method_name, method_obj in [
+        ('uml', result.uml),
+        ('difference', result.difference),
+        ('ratio', result.ratio),
+    ]:
+        vals = method_obj.I_rms_contrast_final
+        vals = vals[np.isfinite(vals)]
+        if vals.size > 0:
+            print(f'RMS intensity contrast final ({method_name}): {np.mean(vals):.5f}')
+
     return result
 
 

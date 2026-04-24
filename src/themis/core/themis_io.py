@@ -528,6 +528,46 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     return collection, header
 
 
+def _load_offset_maps(config, data_type='flat_center'):
+    """
+    Load desmiling offset maps from auxiliary files.
+
+    For historical consistency in the pipeline, offset maps are sourced from
+    ``flat_center`` auxiliary files, even when desmiling ``flat`` or ``scan``.
+    Offset maps written by ``OffsetMap.dump()`` may be 3D (state, y, x);
+    in that case state 0 is used.
+
+    Parameters
+    ----------
+    config : Config
+        Configuration object.
+    data_type : str
+        Source data type for auxiliary files. Defaults to ``flat_center``.
+
+    Returns
+    -------
+    dict or None
+        Dictionary with 2D offset maps for 'upper' and 'lower', or ``None``
+        if required files are missing.
+    """
+    files_src = config.dataset.get(data_type, {}).get('files')
+    if files_src is None:
+        return None
+
+    aux_src = getattr(files_src, 'auxiliary', {})
+    offset_maps = {}
+    for frame_name in ['upper', 'lower']:
+        path = aux_src.get(f'offset_map_{frame_name}')
+        if path is None or not Path(path).exists():
+            return None
+        with fits.open(path) as hdul:
+            omap = np.array(hdul[0].data)
+            if omap.ndim == 3:
+                omap = omap[0]
+            offset_maps[frame_name] = omap.astype('float32')
+    return offset_maps
+
+
 # NON THEMIS DATA IO
 # GLOBAL VARIABLES
 

@@ -455,8 +455,9 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
                     matches.append(f)
             else:
                 # Only accept the new naming pattern: <line>_<data_type>_tNNN<level_ext>
+                has_line = name.startswith(f"{line}_")
                 new_pattern = (f"_{data_t}_" in name)
-                if has_seq and has_suffix and new_pattern:
+                if has_seq and has_suffix and has_line and new_pattern:
                     matches.append(f)
 
         # Prefer files marked with _fx if available

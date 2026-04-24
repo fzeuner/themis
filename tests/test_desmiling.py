@@ -7,7 +7,6 @@ and verifies that _apply_desmiling actually applies the offset correction.
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from astropy.io import fits
 from themis.datasets.themis_datasets_2025 import get_config
 from themis.core import themis_io as tio
 from themis.core.themis_data_reduction import _apply_desmiling
@@ -49,23 +48,19 @@ def test_desmiling(data_type='flat', config_path='configs/sample_dataset_sr_2025
         return
     
     aux_fc = getattr(files_fc, 'auxiliary', {})
-    
-    offset_maps = {}
-    for frame_name in ['upper', 'lower']:
-        key = f'offset_map_{frame_name}'
-        path = aux_fc.get(key)
-        if path is None or not Path(path).exists():
-            print(f"  WARNING: offset map not found for {frame_name}")
-            print(f"    Looking for key: {key}")
-            print(f"    Available keys: {list(aux_fc.keys())}")
-            continue
-        
-        with fits.open(path) as hdul:
-            offset_maps[frame_name] = np.array(hdul[0].data)
-        print(f"  Loaded offset map for {frame_name}: {Path(path).name}")
-        print(f"    Shape: {offset_maps[frame_name].shape}")
-        print(f"    Min: {offset_maps[frame_name].min():.4f}, Max: {offset_maps[frame_name].max():.4f}")
-        print(f"    Mean: {offset_maps[frame_name].mean():.4f}, Std: {offset_maps[frame_name].std():.4f}")
+    offset_maps = tio._load_offset_maps(config, data_type='flat_center')
+    if offset_maps is None:
+        print("  WARNING: offset maps could not be loaded from flat_center auxiliary files")
+        print(f"    Available keys: {list(aux_fc.keys())}")
+        offset_maps = {}
+    else:
+        for frame_name in ['upper', 'lower']:
+            path = aux_fc.get(f'offset_map_{frame_name}')
+            omap = offset_maps[frame_name]
+            print(f"  Loaded offset map for {frame_name}: {Path(path).name}")
+            print(f"    Shape: {omap.shape}")
+            print(f"    Min: {omap.min():.4f}, Max: {omap.max():.4f}")
+            print(f"    Mean: {omap.mean():.4f}, Std: {omap.std():.4f}")
     
     if not offset_maps:
         print("\nNo offset maps found. Cannot continue test.")
@@ -262,7 +257,7 @@ def test_desmiling(data_type='flat', config_path='configs/sample_dataset_sr_2025
         axes[1, 1].set_xlabel('Wavelength [px]')
         axes[1, 1].set_ylabel('Intensity')
         axes[1, 1].legend(fontsize=8)
-        axes[1, 1].set_xlim(0, 100)  # Zoom to first 100 pixels
+        axes[1, 1].set_xlim(500, 700)  # Zoom to first 100 pixels
         
         # Show offset values along a column
         x_pos = original.shape[1] // 2
@@ -372,4 +367,4 @@ def test_desmiling(data_type='flat', config_path='configs/sample_dataset_sr_2025
 
 
 if __name__ == '__main__':
-    test_desmiling(data_type='flat_center')
+    test_desmiling(data_type='flat_center', config_path='configs/sample_dataset_ti_2025-07-07.toml')

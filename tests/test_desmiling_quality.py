@@ -401,7 +401,7 @@ def test_desmiling_quality(config_path='configs/sample_dataset_sr_2025-07-07.tom
 
 
 if __name__ == "__main__":
-    results = test_desmiling_quality()
+    results = test_desmiling_quality(config_path='configs/sample_dataset_ti_2025-07-07.toml')
     
     if results:
         print("\n" + "="*70)

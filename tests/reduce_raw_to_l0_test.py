@@ -23,6 +23,32 @@ import numpy as np
 import gc
 
 #%%
+
+def _build_scan_plot_data(cycle_set, slit_idx=0, map_idx=0):
+    keys = sorted(cycle_set.keys())
+    frame_states = sorted({k[0] for k in keys if k[1] == slit_idx and k[2] == map_idx})
+
+    arrays = []
+    labels = []
+    for frame_state in frame_states:
+        frame = cycle_set.get_state_slit_map(frame_state, slit_idx, map_idx)
+        if frame is None:
+            continue
+        for half_name in ['upper', 'lower']:
+            half = frame.get_half(half_name)
+            if half is None:
+                continue
+            arrays.append(half.data)
+            pol = half.pol_state if half.pol_state is not None else half_name
+            labels.append(f'{frame_state},{pol}')
+
+    if not arrays:
+        raise ValueError(f'No scan data found for slit={slit_idx}, map={map_idx}')
+
+    return np.stack(arrays, axis=0), labels
+
+
+#%%
 #----------------------------------------------------------------------
 """
 MAIN: 
@@ -33,7 +59,7 @@ if __name__ == '__main__':
 
 # -----------------------------------------------------
     # initialize configuration from datasets
-    config = get_config(config_path='configs/spot_dataset_sr_2025-07-07.toml', # omit to use defaults
+    config = get_config(config_path='configs/formation_dataset_ti_2025-07-05.toml', # omit to use defaults
     auto_discover_files=True,           # pre-fill matching files per level
     auto_create_dirs=False              # create directories if missing
     )
@@ -52,11 +78,14 @@ if __name__ == '__main__':
     
     # upper = data.stack_all('upper')
     # lower = data.stack_all('lower')
-      
-    # data_plot = np.array([upper.mean(axis=0),lower.mean(axis=0)])
-    # viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
-    #                  title='dark raw', 
-    #                  state_names=['upper', 'lower'])
+    
+    # data_plot = np.array([upper.mean(axis=0), lower.mean(axis=0)])
+    
+    data, header = tio.read_any_file(config, 'flat_center', verbose=False, status='l0')
+    data_plot=np.array([data[0]['lower'].data,data[0]['upper'].data])
+    viewer = display_data(data_plot, ['states', 'spatial_x', 'spectral'],
+                         title='flat center l0',
+                         state_names=['upper', 'lower'])
 #%%     
     
    # result = lv0.reduce(config, data_type='dark', return_reduced = False)
@@ -73,8 +102,8 @@ if __name__ == '__main__':
     #                  title='dark raw single - l0', 
     #                  state_names=['upper', 'lower'])
     
-    # raw_frame, header = tio.read_any_file(config, 'dark', verbose=False, status='raw')
-    # ax=plot_frame_statistics(raw_frame, stat='std')
+    raw_frame, header = tio.read_any_file(config, 'dark', verbose=False, status='raw')
+    ax = plot_frame_statistics(raw_frame, stat='std')
    
 #%%      
     
@@ -88,8 +117,8 @@ if __name__ == '__main__':
 
     raw_frame, header = tio.read_any_file(config, 'flat', verbose=False, status='raw')
     ax=plot_frame_statistics(raw_frame, stat='mean')
-    ax=plot_frame_statistics(raw_frame, stat='max')
-    ax=plot_frame_statistics(raw_frame, ax=ax,stat='min')
+    # ax=plot_frame_statistics(raw_frame, stat='max')
+    # ax=plot_frame_statistics(raw_frame, ax=ax,stat='min')
     #result = lv0.reduce(config, data_type='flat', return_reduced = True)
     #data_plot = np.array([result.get(0).get_half('upper').data,result.get(0).get_half('lower').data ])
     # viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
@@ -101,27 +130,16 @@ if __name__ == '__main__':
     
 #%%
 
-    # raw_frame, header = tio.read_any_file(config, 'scan', verbose=False, status='raw')
-    # data_plot = np.array([
-    # raw_frame.get_data('mQ', 0, 0, 'mQ'),  # frame_state='mQ', pol_state='mQ'
-    # raw_frame.get_data('mQ', 0, 0, 'pQ'),   # frame_state='mQ', pol_state='pQ'
-    # raw_frame.get_data('pQ', 0, 0, 'mQ'),  # frame_state='pQ', pol_state='mQ'
-    # raw_frame.get_data('pQ', 0, 0, 'pQ')   # frame_state='pQ', pol_state='pQ'
-    # ])
-    # viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
-    #                    title='scan raw ', 
-    #                    state_names=['mQ,mQ', 'mQ,pQ','pQ,mQ', 'pQ,pQ'])
-    
     #result = lv0.reduce(config, data_type='scan', return_reduced = False)
     result, header = tio.read_any_file(config, 'scan', verbose=False, status='l0')
     print(header['HISTORY'])
-    data_plot = np.array([
-    result.get_data('mQ', 0, 0, 'mQ'),  # frame_state='mQ', pol_state='mQ'
-    result.get_data('mQ', 0, 0, 'pQ'),   # frame_state='mQ', pol_state='pQ'
-    result.get_data('pQ', 0, 0, 'mQ'),  # frame_state='pQ', pol_state='mQ'
-    result.get_data('pQ', 0, 0, 'pQ')   # frame_state='pQ', pol_state='pQ'
-    ])
-    viewer = display_data( data_plot, 'states',  'spatial', 'spectral',
-                       title='scan l0', 
-                       state_names=['mQ,mQ', 'mQ,pQ','pQ,mQ', 'pQ,pQ'])
+    data_plot, state_names = _build_scan_plot_data(result, slit_idx=0, map_idx=0)
+    viewer = display_data(data_plot, 'states', 'spatial', 'spectral',
+                       title='flat l0', 
+                       state_names=state_names)
 #%%    
+    raw_frame, header = tio.read_any_file(config, 'scan', verbose=False, status='raw')
+    data_plot, state_names = _build_scan_plot_data(raw_frame, slit_idx=0, map_idx=0)
+    viewer = display_data(data_plot, ['states', 'spatial_x', 'spectral'],
+                          title='scan raw',
+                          state_names=state_names)
