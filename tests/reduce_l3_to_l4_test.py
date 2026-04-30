@@ -110,6 +110,11 @@ if __name__ == '__main__':
     I = result.ratio.I.mean(axis=(0,1))
     U_d = result.difference.U.mean(axis=(0,1))
     U_r = result.ratio.U.mean(axis=(0,1))
+    data_plot=[I, U_d, U_r]
+    viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
+                       title='scan', 
+                       state_names=['I',
+                                    'U_diff', 'U_ratio']) 
     
     #%%
     plt.plot(U_d[660,30:-30], label=['difference'])
