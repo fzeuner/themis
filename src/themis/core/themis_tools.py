@@ -777,7 +777,8 @@ class init:
     def __init__(self):
         self.directories = dst.directories
         self.dataset = dst.dataset
-        self.cam = cc.cam[self.dataset['line']]
+        self.line = dst.line
+        self.cam = cc.cam[self.line]
         self.data_types = dst.data_types
         self.reduction_levels = tdr.reduction_levels
         self.slit_width = dst.slit_width
@@ -789,7 +790,7 @@ class init:
     def __repr__(self):
      lines = [
         f"<Init Configuration>",
-        f"  Line:       {self.dataset['line']}",
+        f"  Line:       {self.line}",
         f"  Camera:     {self.cam}",
         f"  Slit Width: {self.slit_width} arcsec",
         f"  Polarization States: {', '.join(self.polarization_states)}",

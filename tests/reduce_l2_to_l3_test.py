@@ -33,7 +33,7 @@ if __name__ == '__main__':
 
 # -----------------------------------------------------
     # initialize configuration from datasets
-    config = get_config(config_path='configs/sample_dataset_sr_2025-07-07.toml')
+    config = get_config(line='sr', config_path='configs/sample_dataset_2025-07-07.toml')
     
     lv3 = tdr.reduction_levels["l3"]
     

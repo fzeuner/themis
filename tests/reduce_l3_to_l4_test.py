@@ -33,7 +33,7 @@ if __name__ == '__main__':
 
 # -----------------------------------------------------
     # initialize configuration from datasets
-    config = get_config(config_path='configs/sample_dataset_sr_2025-07-07.toml')
+    config = get_config(line='sr', config_path='configs/sample_dataset_2025-07-07.toml')
     
     lv4 = tdr.reduction_levels["l4"]
     
@@ -67,22 +67,22 @@ if __name__ == '__main__':
  
      #%%
 
-        scan, header = tio.read_any_file(config, 'scan', verbose=False, status='l4')
-        state='U'
-        I = 0.25*(np.array((scan.get_state('p'+state).stack_all('upper'))[0][30:-30,30:-30])+
+    scan, header = tio.read_any_file(config, 'scan', verbose=False, status='l4')
+    state='U'
+    I = 0.25*(np.array((scan.get_state('p'+state).stack_all('upper'))[0][30:-30,30:-30])+
                 np.array((scan.get_state('m'+state).stack_all('upper'))[0][30:-30,30:-30])+
                 np.array((scan.get_state('m'+state).stack_all('lower'))[0][30:-30,30:-30])+
                 np.array((scan.get_state('p'+state).stack_all('lower')[0][30:-30,30:-30])))
-        Q = 1/I*100*(np.array((scan.get_state('p'+state).stack_all('upper')[0][30:-30,30:-30]))/np.array((scan.get_state('m'+state).stack_all('upper')[0][30:-30,30:-30]))*
+    Q = 1/I*100*(np.array((scan.get_state('p'+state).stack_all('upper')[0][30:-30,30:-30]))/np.array((scan.get_state('m'+state).stack_all('upper')[0][30:-30,30:-30]))*
                np.array((scan.get_state('m'+state).stack_all('lower')[0][30:-30,30:-30]))/np.array((scan.get_state('p'+state).stack_all('lower')[0][30:-30,30:-30]))-1)
         
         # Q = 100*(np.array((scan.get_state('p'+state).stack_all('upper')[0]))-np.array((scan.get_state('m'+state).stack_all('upper')[0]))+
         #         -np.array((scan.get_state('m'+state).stack_all('lower')[0]))+np.array((scan.get_state('p'+state).stack_all('lower')[0])))
-        data_plot = np.array([I,
+    data_plot = np.array([I,
                             Q
                              ])
         
-        viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
+    viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
                            title='scan', 
                            state_names=['I',
                                         state])    
@@ -110,7 +110,7 @@ if __name__ == '__main__':
     I = result.ratio.I.mean(axis=(0,1))
     U_d = result.difference.U.mean(axis=(0,1))
     U_r = result.ratio.U.mean(axis=(0,1))
-    data_plot=[I, U_d, U_r]
+    data_plot=np.array([I[100:-10,10:-150], U_d[100:-10,10:-150], U_r[100:-10,10:-150]])
     viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
                        title='scan', 
                        state_names=['I',

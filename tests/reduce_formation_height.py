@@ -32,11 +32,13 @@ if __name__ == '__main__':
 
 # -----------------------------------------------------
     # initialize configuration from datasets
-    # config = get_config(config_path='configs/formation_dataset_ti_2025-07-05.toml', # omit to use defaults
+    # config = get_config(line='ti',
+    # config_path='configs/formation_dataset_2025-07-05.toml', # omit to use defaults
     # auto_discover_files=True,           # pre-fill matching files per level
     # auto_create_dirs=False              # create directories if missing
     # )
-    config = get_config(config_path='configs/sample_dataset_ti_2025-07-07.toml', # omit to use defaults
+    config = get_config(line='ti',
+    config_path='configs/sample_dataset_2025-07-07.toml', # omit to use defaults
     auto_discover_files=True,           # pre-fill matching files per level
     auto_create_dirs=False              # create directories if missing
     )
@@ -46,7 +48,7 @@ if __name__ == '__main__':
     lv2 = tdr.reduction_levels["l2"]
     lv3 = tdr.reduction_levels["l3"]
     lv4 = tdr.reduction_levels["l4"]
-    lv5 = tdr.reduction_levels["l5"]
+    #lv5 = tdr.reduction_levels["l5"]
     
     #result = lv0.reduce(config, data_type='dark', return_reduced = False)
     #result = lv1.reduce(config, data_type='dark', return_reduced = False)
@@ -68,12 +70,15 @@ if __name__ == '__main__':
     #%%
   
 #%%
-    config1 = get_config(config_path='configs/formation_dataset_sr_2025-07-05.toml', # omit to use defaults
+    config1 = get_config(line='sr',
+    config_path='configs/formation_dataset_2025-07-05.toml', # omit to use defaults
     auto_discover_files=True,           # pre-fill matching files per level
     )
     scan, _ = tio.read_any_file(config1, 'scan', status='l4')
     result = tt.compute_polarimetry(scan)
 #%%
+    scan, _ = tio.read_any_file(config, 'scan', status='l4')
+    result = tt.compute_polarimetry(scan)
  
 #%%
    

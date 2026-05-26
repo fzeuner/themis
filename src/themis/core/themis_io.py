@@ -28,7 +28,7 @@ def _build_output_path(config, *, data_type: str, level: str) -> Path:
     level_ext = config.reduction_levels[level].file_ext
 
     # Compose filename: 
-    fname = f"{config.dataset['line']}_{data_type}_{seq_str}{level_ext}"
+    fname = f"{config.line}_{data_type}_{seq_str}{level_ext}"
     out_dir = config.directories.reduced
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir / fname

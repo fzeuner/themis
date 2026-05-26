@@ -500,7 +500,8 @@ if __name__ == '__main__':
 
     # Load configuration
     config = get_config(
-        config_path='configs/calibration_data_ti_2025-07-05.toml',
+        line='ti',
+        config_path='configs/calibration_data_2025-07-05.toml',
         auto_discover_files=True
     )
 
@@ -580,8 +581,8 @@ if __name__ == '__main__':
 
     #%%
 
-    #config_test = get_config(config_path='configs/sample_dataset_sr_2025-07-07.toml')
-    config_test = get_config(config_path='configs/sample_dataset_ti_2025-07-07.toml')
+    #config_test = get_config(line='sr', config_path='configs/sample_dataset_2025-07-07.toml')
+    config_test = get_config(line='ti', config_path='configs/sample_dataset_2025-07-07.toml')
 
     #%%
     scan, header = tio.read_any_file(config_test, 'scan', verbose=False, status='l1')
@@ -656,7 +657,7 @@ if __name__ == '__main__':
     #%%
     # IF YOU ARE HAPPY WITH THE ABOVE
     # Save shifts as NumPy files and register as auxiliary files for flat_center
-    line = config.dataset['line']
+    line = config.line
     seq_fc = config.dataset['flat_center']['sequence']
     seq_fc_str = f"t{seq_fc:03d}"
 

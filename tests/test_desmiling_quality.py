@@ -13,7 +13,7 @@ from themis.core import themis_io as tio
 from themis.core.themis_data_reduction import _apply_desmiling as apply_desmiling
 
 
-def test_desmiling_quality(config_path='configs/sample_dataset_sr_2025-07-07.toml'):
+def test_desmiling_quality(config_path='configs/sample_dataset_2025-07-07.toml'):
     """
     Compare upper and lower flat_center frames before and after desmiling.
     
@@ -25,7 +25,9 @@ def test_desmiling_quality(config_path='configs/sample_dataset_sr_2025-07-07.tom
     The amended maps have refined offsets from atlas line fitting.
     """
     # Load configuration
+    line = 'sr' if 'sr' in config_path else 'ti'
     config = get_config(
+        line=line,
         config_path=config_path,
         auto_discover_files=True,
         auto_create_dirs=False
@@ -401,7 +403,7 @@ def test_desmiling_quality(config_path='configs/sample_dataset_sr_2025-07-07.tom
 
 
 if __name__ == "__main__":
-    results = test_desmiling_quality(config_path='configs/sample_dataset_ti_2025-07-07.toml')
+    results = test_desmiling_quality(config_path='configs/sample_dataset_2025-07-07.toml')
     
     if results:
         print("\n" + "="*70)

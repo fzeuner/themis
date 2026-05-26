@@ -115,8 +115,9 @@ def _trim_segment(arr, row_start, row_end, trim_top=0, trim_bottom=0):
     return arr[trim_top : arr.shape[0] - trim_bottom, :], new_start, new_end
 
 
-def run_split_spectroflat_ti_upper(config_path="configs/sample_dataset_ti_2025-07-07.toml"):
+def run_split_spectroflat_ti_upper(config_path="configs/sample_dataset_2025-07-07.toml"):
     config = get_config(
+        line='ti',
         config_path=config_path,
         auto_discover_files=True,
         auto_create_dirs=False,
@@ -262,4 +263,4 @@ def run_split_spectroflat_ti_upper(config_path="configs/sample_dataset_ti_2025-0
 
 
 if __name__ == "__main__":
-    run_split_spectroflat_ti_upper(config_path="configs/formation_dataset_ti_2025-07-05.toml")
+    run_split_spectroflat_ti_upper(config_path="configs/formation_dataset_2025-07-05.toml")

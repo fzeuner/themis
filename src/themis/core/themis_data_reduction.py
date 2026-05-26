@@ -483,7 +483,7 @@ def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_da
             print('  Error: No L0 frame found for flat_center')
             return None
         
-        line = config.dataset['line']
+        line = config.line
         seq = config.dataset[data_type]['sequence']
         seq_str = f"t{seq:03d}"
         
@@ -1079,7 +1079,7 @@ def _generate_wavelength_calibration(config, data_type='flat_center'):
     )
     
     # Determine output path
-    line = config.dataset['line']
+    line = config.line
     seq = config.dataset[data_type]['sequence']
     seq_str = f"t{seq:03d}"
     wl_calib_path = Path(config.directories.reduced) / f'{line}_{data_type}_{seq_str}_wavelength_calibration.fits'
@@ -1231,7 +1231,7 @@ def _process_amend_spectroflat(config, data_type, frame_name, frame_data_overrid
             f.write(config_text)
     
     # Output path for delta offsets
-    line = config.dataset['line']
+    line = config.line
     seq = config.dataset[data_type]['sequence']
     delta_offsets_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_delta_offsets_{frame_name}.fits'
     
@@ -1331,7 +1331,7 @@ def _run_amend_spectroflat(config, data_type, frame_2d, frame_name='upper'):
         return None
     
     # Check if amended illumination pattern already exists
-    line = config.dataset['line']
+    line = config.line
     seq = config.dataset[data_type]['sequence']
     amended_illum_path = reduced_dir / f'{line}_{data_type}_t{seq:03d}_amended_illumination_{frame_name}.fits'
     
@@ -1612,7 +1612,7 @@ def _process_lower_frame_alignment(config, data_type, upper_l4, lower_l3):
     print(f'  Mean wl shift: {np.mean(wl_lower - wl_upper):.6f} nm')
     
     # --- Save wavelength grid as FITS ---
-    line = config.dataset['line']
+    line = config.line
     seq = config.dataset[data_type]['sequence']
     z3cc_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_z3cc_offsets_lower.fits'
     
@@ -1704,7 +1704,7 @@ def _generate_upper_reference_atlas(config, data_type, upper_l4):
     file_data = np.column_stack([wl_angstrom, avg_normalized, continuum])
     
     # --- Save ---
-    line = config.dataset['line']
+    line = config.line
     seq = config.dataset[data_type]['sequence']
     ref_atlas_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_upper_reference_atlas.txt'
     np.savetxt(ref_atlas_path, file_data, fmt='%.8e',
@@ -1735,7 +1735,7 @@ def _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config):
     
     nx = upper_l4.shape[1]
     ny = upper_l4.shape[0]
-    edge = max(10, nx // 50)  # ignore ~2% on each side
+    edge = max(10, 200)#nx // 10)  # ignore ~2% on each side
     margin = max(5, ny // 10)
     rows = {
         'near-top': margin,
@@ -1924,7 +1924,7 @@ def _process_single_frame_atlas_fit(config, data_type, frame_name,
         f.write(config_text)
     
     # Determine output filename
-    line = config.dataset['line']
+    line = config.line
     seq = config.dataset[data_type]['sequence']
     base_filename = f'{line}_{data_type}_t{seq:03d}'
     lines_file = config.directories.reduced / f'{base_filename}_{frame_name}_atlas_lines.yaml'
@@ -2078,7 +2078,7 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
         if not hasattr(file_set, 'auxiliary'):
             file_set.auxiliary = {}
         
-        line = config.dataset['line']
+        line = config.line
         seq = config.dataset[data_type]['sequence']
         seq_str = f"t{seq:03d}"
         
@@ -2721,7 +2721,7 @@ def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
         print(f'  ✓ Applied continuum correction to lower frame')
         
         # Save continuum correction as FITS for diagnostics
-        line = config.dataset['line']
+        line = config.line
         seq = config.dataset[data_type]['sequence']
         cont_corr_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_continuum_correction_lower.fits'
         hdu_primary = fits.PrimaryHDU(data=cont_norm_lower.astype('float32'))
@@ -3027,7 +3027,7 @@ def reduce_l4_to_l5(config, data_type='scan', return_reduced=False, ref_wl=800):
     # STEP 4 (formerly 5): PLOT SHIFTS — one curve per map
     # ----------------------------------------------------------------
     import matplotlib.pyplot as plt
-    line = config.dataset['line']
+    line = config.line
     seq = config.dataset[data_type]['sequence']
     plot_path = config.directories.figures / f'{line}_{data_type}_t{seq:03d}_l5_shifts.png'
     plot_path.parent.mkdir(parents=True, exist_ok=True)

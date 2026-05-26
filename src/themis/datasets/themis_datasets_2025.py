@@ -251,9 +251,8 @@ def _resolve_config_path(config_path_str: str) -> Optional[Path]:
     return None
 
 
-def _make_dataset_dict(line: str, sequence: int, flat_sequence: int, flat_center_sequence: int, dark_sequence: int) -> dict:
+def _make_dataset_dict(sequence: int, flat_sequence: int, flat_center_sequence: int, dark_sequence: int) -> dict:
     return {
-        'line': line,
         file_types[0]: {
             'data_type': file_types[0],
             'sequence': sequence,
@@ -339,6 +338,7 @@ class FileSet:
 class Config:
     directories: DirectoryPaths
     dataset: dict
+    line: str
     cam: object
     data_types: DataTypeRegistry
     reduction_levels: tdr.ReductionRegistry
@@ -376,7 +376,7 @@ class Config:
         
         lines.append("  # -------------------- DATASET --------------------")
         lines.append("  dataset={")
-        lines.append(f"    'line': '{self.dataset['line']}',")
+        lines.append(f"    'line': '{self.line}',")
         
         # Show each data type with full file info
         for data_type in ['scan', 'flat', 'flat_center', 'dark']:
@@ -569,14 +569,30 @@ def _build_file_set(directories: DirectoryPaths, dataset_entry: dict, data_types
     return file_set
 
 
-def get_config(auto_discover_files: bool = True,
+def get_config(line: str,
+               auto_discover_files: bool = True,
                config_path: Optional[str] = None,
                auto_create_dirs: bool = False) -> Config:
     """
     Build and return a configuration object for the current dataset selection.
 
-    Returns a lightweight dataclass holding directory paths, dataset metadata,
-    camera configuration, reduction registry, and pre-discovered file paths per level.
+    Parameters
+    ----------
+    line : str
+        Spectral line identifier (e.g., 'sr', 'ti', 'fe'). Used to select camera
+        configuration from themis.core.cam_config.cam.
+    auto_discover_files : bool
+        If True, automatically discover and populate file paths for each reduction level.
+    config_path : Optional[str]
+        Path to TOML configuration file. If None, uses hardcoded defaults.
+    auto_create_dirs : bool
+        If True, create directories if they don't exist.
+
+    Returns
+    -------
+    Config
+        Configuration object with directory paths, dataset metadata, camera config,
+        reduction registry, and pre-discovered file paths per level.
     """
     # Load user configuration if provided, else use defaults
     user_cfg = None
@@ -591,7 +607,6 @@ def get_config(auto_discover_files: bool = True,
     merged = _merge_defaults(user_cfg)
 
     # Unpack merged configuration
-    line = merged['dataset']['line']
     date = merged['dataset']['date']
     sequence = int(merged['dataset']['sequence'])
     dark_sequence = int(merged['dataset']['dark_sequence'])
@@ -609,7 +624,7 @@ def get_config(auto_discover_files: bool = True,
     directories = DirectoryPaths(date=date, base=base, figures=figures,
                                  inversion=inversion, auto_create=auto_create_dirs)
 
-    dataset = _make_dataset_dict(line=line, sequence=sequence,
+    dataset = _make_dataset_dict(sequence=sequence,
                                  flat_sequence=flat_sequence, 
                                  flat_center_sequence=flat_center_sequence,
                                  dark_sequence=dark_sequence)
@@ -617,7 +632,8 @@ def get_config(auto_discover_files: bool = True,
     cfg = Config(
         directories=directories,
         dataset=dataset,
-        cam=cc.cam[dataset['line']],
+        line=line,
+        cam=cc.cam[line],
         data_types=data_types,
         reduction_levels=tdr.reduction_levels,
         slit_width=slit_width,
@@ -635,7 +651,7 @@ def get_config(auto_discover_files: bool = True,
                 cfg.data_types,
                 cfg.reduction_levels,
                 cfg.cam,
-                cfg.dataset['line'],
+                cfg.line,
                 yshift_calibration_date=cfg.yshift_calibration_date,
             )
         # Validate basic compatibility between files (easy to extend later)

@@ -1,8 +1,6 @@
 # Example THEMIS dataset configuration (TOML)
 
 [dataset]
-# Spectral line key used to select camera config from themis.core.cam_config.cam
-line = "sr"
 # Observation date (used in directory structure)
 date = "2025-07-07"
 # Sequences for scan/flat/dark

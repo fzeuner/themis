@@ -12,7 +12,7 @@ from themis.core import themis_io as tio
 from themis.core.themis_data_reduction import _apply_desmiling
 
 
-def test_desmiling(data_type='flat', config_path='configs/sample_dataset_sr_2025-07-07.toml'):
+def test_desmiling(data_type='flat', config_path='configs/sample_dataset_2025-07-07.toml'):
     """
     Test that desmiling is working correctly.
     
@@ -29,7 +29,10 @@ def test_desmiling(data_type='flat', config_path='configs/sample_dataset_sr_2025
     print("="*70)
     
     # Load configuration
-    config = get_config(config_path=config_path)
+    # Note: line must be specified based on the config file being used
+    # For sample_dataset_sr_2025-07-07.toml use 'sr', for ti configs use 'ti'
+    line = 'sr' if 'sr' in config_path else 'ti'
+    config = get_config(line=line, config_path=config_path)
     
     figures_dir = Path(config.directories.figures) / 'desmiling_test'
     figures_dir.mkdir(exist_ok=True, parents=True)
@@ -367,4 +370,4 @@ def test_desmiling(data_type='flat', config_path='configs/sample_dataset_sr_2025
 
 
 if __name__ == '__main__':
-    test_desmiling(data_type='flat_center', config_path='configs/sample_dataset_ti_2025-07-07.toml')
+    test_desmiling(data_type='flat_center', config_path='configs/sample_dataset_2025-07-07.toml')

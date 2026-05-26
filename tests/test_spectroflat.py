@@ -32,7 +32,8 @@ def test_spectroflat_with_report():
     
     # Load configuration
     config = get_config(
-        config_path='configs/sample_dataset_sr_2025-07-07.toml',
+        line='sr',
+        config_path='configs/sample_dataset_2025-07-07.toml',
         auto_discover_files=True,
         auto_create_dirs=False
     )
@@ -138,7 +139,8 @@ def test_spectroflat_with_more_states():
     
     # Load configuration
     config = get_config(
-        config_path='configs/sample_dataset_sr_2025-07-07.toml',
+        line='sr',
+        config_path='configs/sample_dataset_2025-07-07.toml',
         auto_discover_files=True,
         auto_create_dirs=False
     )
@@ -212,7 +214,8 @@ def test_processing():
     
     # Load configuration
     config = get_config(
-        config_path='configs/sample_dataset_sr_2025-07-07.toml',
+        line='sr',
+        config_path='configs/sample_dataset_2025-07-07.toml',
         auto_discover_files=True,
         auto_create_dirs=False
     )

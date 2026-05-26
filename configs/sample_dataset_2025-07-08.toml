@@ -1,8 +1,6 @@
 # Example THEMIS dataset configuration (TOML)
 
 [dataset]
-# Spectral line key used to select camera config from themis.core.cam_config.cam
-line = "ti"
 # Observation date (used in directory structure)
 date = "2025-07-07"
 # Sequences for scan/flat/dark
@@ -24,8 +22,6 @@ figures = "/home/franziskaz/figures/themis/"
 # [arcsec] slit width
 slit_width = 0.33
 yshift_calibration_date = "2025-07-05"
-
-
 
 #from themis.datasets import themis_datasets_2025 as ds
 

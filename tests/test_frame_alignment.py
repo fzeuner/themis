@@ -354,7 +354,8 @@ if __name__ == "__main__":
     
     # Load configuration
     config = get_config(
-        config_path='configs/sample_dataset_sr_2025-07-07.toml',
+        line='sr',
+        config_path='configs/sample_dataset_2025-07-07.toml',
         auto_discover_files=True
     )
     
@@ -594,7 +595,7 @@ plt.plot(0.5*(flat_res['lower_final'][150,:]+grad2(flat_res['lower_final'])) , c
 
 plt.plot(0.5*np.roll(flat_res['upper_final'][150,:]+grad2(flat_res['upper_final']),8) , color='blue')
 
-plt.plot(0.5*np.roll(flat_res['upper_final'][150,:]+grad2(flat_res['upper_final']),8)-
+plt.plot(0.5*(np.roll(flat_res['upper_final'][150,:]+grad2(flat_res['upper_final']),8)-
          0.5*(flat_res['lower_final'][150,:]+grad2(flat_res['lower_final']))+grad2(flat_res['upper_final']),8),color='red')
 
 
