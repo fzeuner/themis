@@ -1583,12 +1583,14 @@ def _process_lower_frame_alignment(config, data_type, upper_l4, lower_l3):
     if col_end is not None:
         upper_spec_trimmed = upper_spec[col_start:col_end]
         wl_upper_trimmed = wl_upper[col_start:col_end]
+        lower_spec_trimmed = lower_spec[col_start:col_end]
     else:
         upper_spec_trimmed = upper_spec[col_start:]
         wl_upper_trimmed = wl_upper[col_start:]
+        lower_spec_trimmed = lower_spec[col_start:]
     
     print(f'  Upper L4 spectrum: {len(upper_spec_trimmed)} px (reference)')
-    print(f'  Lower L3 spectrum: {len(lower_spec)} px (to calibrate)')
+    print(f'  Lower L3 spectrum: {len(lower_spec_trimmed)} px (to calibrate)')
     print(f'  Wavelength range: {wl_upper_trimmed[0]:.4f} - {wl_upper_trimmed[-1]:.4f} nm')
     
     # --- Run z3ccspectrum ---
@@ -1596,12 +1598,12 @@ def _process_lower_frame_alignment(config, data_type, upper_l4, lower_l3):
     # Use narrow scaling range since upper/lower are from the same instrument
     print(f'  Running z3ccspectrum...')
     wl_lower, idealfac = z3ccspectrum(
-        lower_spec.copy(),
+        lower_spec_trimmed.copy(),
         wl_upper_trimmed.copy(),
         (upper_spec_trimmed / upper_spec_trimmed.max()).copy(),
         FACL=0.95, FACH=1.05, FACS=0.001,
         CUT=[col_start, abs(col_end) if col_end is not None and col_end < 0 else 10],
-        SHOW=1,
+        SHOW=0,
     )
     
     if not isinstance(wl_lower, np.ndarray) or len(wl_lower) == 0:
@@ -1609,7 +1611,16 @@ def _process_lower_frame_alignment(config, data_type, upper_l4, lower_l3):
         return None
     
     print(f'  z3ccspectrum result: {wl_lower[0]:.4f} - {wl_lower[-1]:.4f} nm')
-    print(f'  Mean wl shift: {np.mean(wl_lower - wl_upper):.6f} nm')
+    print(f'  Mean wl shift: {np.mean(wl_lower - wl_upper_trimmed):.6f} nm')
+    
+    # --- Extrapolate trimmed wavelength grid to full frame ---
+    # z3ccspectrum returns wavelength for trimmed region, need to extrapolate to full frame
+    from scipy.interpolate import interp1d
+    f_wl = interp1d(wl_upper_trimmed, wl_lower, kind='linear', 
+                    bounds_error=False, fill_value='extrapolate')
+    wl_lower_full = f_wl(wl_upper)
+    
+    print(f'  Extrapolated wl range: {wl_lower_full[0]:.4f} - {wl_lower_full[-1]:.4f} nm')
     
     # --- Save wavelength grid as FITS ---
     line = config.line
@@ -1619,8 +1630,10 @@ def _process_lower_frame_alignment(config, data_type, upper_l4, lower_l3):
     hdu_primary = fits.PrimaryHDU()
     hdu_primary.header['METHOD'] = ('z3ccspectrum', 'Cross-correlation against upper L4')
     hdu_primary.header['ROI_ROW'] = (roi_row, 'Row used for cross-correlation')
+    hdu_primary.header['COL_START'] = (col_start, 'Column start for trimming')
+    hdu_primary.header['COL_END'] = (col_end, 'Column end for trimming')
     hdu_primary.header['IDEALFAC'] = (idealfac, 'z3ccspectrum scaling factor')
-    hdu_wl = fits.ImageHDU(data=wl_lower.astype('float64'), name='WAVELENGTH')
+    hdu_wl = fits.ImageHDU(data=wl_lower_full.astype('float64'), name='WAVELENGTH')
     hdul = fits.HDUList([hdu_primary, hdu_wl])
     hdul.writeto(z3cc_path, overwrite=True)
     
@@ -1717,10 +1730,13 @@ def _generate_upper_reference_atlas(config, data_type, upper_l4):
     return ref_atlas_path
 
 
-def _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config):
+def _plot_upper_lower_comparison(upper_l4, lower_z3cc_shifted, lower_l4, file_set, config):
     """
-    Diagnostic plot comparing corrected upper and lower L4 spectra
-    at three spatial positions: near-top, center, near-bottom.
+    Diagnostic plot comparing upper and lower L4 spectra at three spatial positions.
+    
+    Left column: wavelength-corrected upper vs wavelength-corrected lower (no continuum)
+    Right column: wavelength-corrected upper vs wavelength-corrected + continuum-corrected lower
+    
     Edges are excluded from both the plot and the RMS calculation.
     """
     import matplotlib.pyplot as plt
@@ -1735,7 +1751,7 @@ def _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config):
     
     nx = upper_l4.shape[1]
     ny = upper_l4.shape[0]
-    edge = max(10, 200)#nx // 10)  # ignore ~2% on each side
+    edge = max(10, nx // 5)  # ignore ~20% on each side
     margin = max(5, ny // 10)
     rows = {
         'near-top': margin,
@@ -1743,27 +1759,42 @@ def _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config):
         'near-bottom': ny - margin - 1,
     }
     
-    fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+    fig, axes = plt.subplots(3, 2, figsize=(14, 16), sharex=True)
     
-    for ax, (label, row) in zip(axes, rows.items()):
+    for row_idx, (label, row) in enumerate(rows.items()):
+        # Left column: wavelength correction only
+        ax_left = axes[row_idx, 0]
         upper_spec = upper_l4[row, edge:-edge]
-        lower_spec = lower_l4[row, edge:-edge]
+        lower_spec_z3cc = lower_z3cc_shifted[row, edge:-edge]
         wl_trimmed = wl[edge:-edge]
         
-        # Normalise for comparison
         upper_norm = upper_spec / np.mean(upper_spec)
-        lower_norm = lower_spec / np.mean(lower_spec)
+        lower_norm_z3cc = lower_spec_z3cc / np.mean(lower_spec_z3cc)
         
-        ax.plot(wl_trimmed, upper_norm, label=f'Upper L4 (row {row})', alpha=0.8)
-        ax.plot(wl_trimmed, lower_norm, label=f'Lower L4 (row {row})', alpha=0.8, ls='--')
+        ax_left.plot(wl_trimmed, upper_norm, label='Upper L4', alpha=0.8, color='blue')
+        ax_left.plot(wl_trimmed, lower_norm_z3cc, label='Lower L4 (wl-corrected only)', alpha=0.8, ls='--', color='orange')
         
-        residual_rms = np.std(upper_norm - lower_norm)
-        ax.set_title(f'{label} (row {row}) — RMS residual: {residual_rms:.5f}')
-        ax.set_ylabel('Normalised intensity')
-        ax.legend(loc='lower left')
+        residual_rms = np.std(upper_norm - lower_norm_z3cc)
+        ax_left.set_title(f'{label} (row {row}) — Wavelength only: RMS={residual_rms:.5f}')
+        ax_left.set_ylabel('Normalised intensity')
+        ax_left.legend(loc='lower left', fontsize=9)
+        
+        # Right column: wavelength + continuum correction
+        ax_right = axes[row_idx, 1]
+        lower_spec_cont = lower_l4[row, edge:-edge]
+        lower_norm_cont = lower_spec_cont / np.mean(lower_spec_cont)
+        
+        ax_right.plot(wl_trimmed, upper_norm, label='Upper L4', alpha=0.8, color='blue')
+        ax_right.plot(wl_trimmed, lower_norm_cont, label='Lower L4 (wl + continuum corrected)', alpha=0.8, ls='--', color='green')
+        
+        residual_rms_cont = np.std(upper_norm - lower_norm_cont)
+        ax_right.set_title(f'{label} (row {row}) — Wavelength + Continuum: RMS={residual_rms_cont:.5f}')
+        ax_right.set_ylabel('Normalised intensity')
+        ax_right.legend(loc='lower left', fontsize=9)
     
-    axes[-1].set_xlabel('Wavelength [nm]')
-    fig.suptitle(f'L4 Upper vs Lower — wavelength alignment check (edges ±{edge} px excluded)', fontsize=14)
+    axes[-1, 0].set_xlabel('Wavelength [nm]')
+    axes[-1, 1].set_xlabel('Wavelength [nm]')
+    fig.suptitle(f'L4 Upper vs Lower — Wavelength vs Wavelength+Continuum Correction (edges ±{edge} px excluded)', fontsize=14)
     plt.tight_layout()
     
     plot_path = config.directories.reduced / 'l4_upper_lower_comparison.png'
@@ -2420,7 +2451,7 @@ def _apply_flat_center_corrections_to_l3(config, data_type, return_reduced=False
         sample_frame = list(corrected_frames.values())[0]
         upper_l4 = sample_frame.get_half('upper').data
         lower_l4 = sample_frame.get_half('lower').data
-        _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config)
+        _plot_upper_lower_comparison(upper_l4, lower_l4, lower_l4, file_set, config)
     
     # Save L4
     reduced_frames = corrected_frames
@@ -2672,66 +2703,187 @@ def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
         print(f'STEP 5: CONTINUUM CORRECTION (LOWER) — RATIO FIT')
         print(f'{"-"*70}')
         
-        # Compute ratio: upper_l4 / lower_z3cc_shifted
-        # This captures the continuum difference between upper and lower
-        with np.errstate(divide='ignore', invalid='ignore'):
-            ratio = upper_l4 / lower_z3cc_shifted
-            ratio[~np.isfinite(ratio)] = 1.0
-        
-        print(f'  Ratio (upper_l4 / lower_shifted) shape: {ratio.shape}')
-        print(f'  Ratio range: {np.nanmin(ratio):.4f} – {np.nanmax(ratio):.4f}')
-        
-        # Fit a low-order 2D polynomial surface through the ratio
-        ny, nx = ratio.shape
-        y_coords, x_coords = np.mgrid[0:ny, 0:nx]
-        
-        # Flatten for fitting
-        x_flat = x_coords.ravel().astype('float64')
-        y_flat = y_coords.ravel().astype('float64')
-        z_flat = ratio.ravel().astype('float64')
-        
-        # Remove outliers (clip to median ± 3*std)
-        med = np.median(z_flat)
-        std = np.std(z_flat)
-        mask = np.abs(z_flat - med) < 3 * std
-        x_fit = x_flat[mask]
-        y_fit = y_flat[mask]
-        z_fit = z_flat[mask]
-        print(f'  Fitting with {mask.sum()}/{len(mask)} pixels (3-sigma clipping)')
-        
-        # Build 2D polynomial design matrix (order 3: 1, x, y, x², xy, y², x³, x²y, xy², y³)
-        poly_order = 5
-        from numpy.polynomial.polynomial import polyvander2d
-        deg = [poly_order, poly_order]
-        V = polyvander2d(x_fit / nx, y_fit / ny, deg)  # normalise coords to [0,1]
-        
-        # Least squares fit
-        coeffs, residuals, rank, sv = np.linalg.lstsq(V, z_fit, rcond=None)
-        print(f'  2D polynomial fit: order {poly_order}, {len(coeffs)} coefficients')
-        
-        # Evaluate fitted surface on full grid
-        V_full = polyvander2d(x_flat / nx, y_flat / ny, deg)
-        cont_surface = (V_full @ coeffs).reshape(ny, nx)
-        
-        cont_norm_lower = cont_surface
-        print(f'  Continuum correction range: {cont_norm_lower.min():.6f} – {cont_norm_lower.max():.6f}')
-        
-        # Apply continuum correction
-        lower_l4 = lower_z3cc_shifted * cont_norm_lower
-        print(f'  ✓ Applied continuum correction to lower frame')
-        
-        # Save continuum correction as FITS for diagnostics
+        # Check if this is Ti line - use special ratio-based continuum correction
         line = config.line
-        seq = config.dataset[data_type]['sequence']
-        cont_corr_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_continuum_correction_lower.fits'
-        hdu_primary = fits.PrimaryHDU(data=cont_norm_lower.astype('float32'))
-        hdu_primary.header['METHOD'] = ('ratio_polyfit', 'upper_l4 / lower_shifted, 2D poly fit')
-        hdu_primary.header['POLYORD'] = (poly_order, 'Polynomial order')
-        hdu_ratio = fits.ImageHDU(data=ratio.astype('float32'), name='RATIO')
-        hdul_out = fits.HDUList([hdu_primary, hdu_ratio])
-        hdul_out.writeto(cont_corr_path, overwrite=True)
-        file_set.auxiliary['continuum_correction_lower'] = cont_corr_path
-        print(f'  ✓ Saved continuum correction: {cont_corr_path.name}')
+        if line == 'ti':
+            print(f'  Ti line detected: using ratio-based continuum correction with spatial interpolation')
+            
+            # Load wavelength grid
+            delta_offsets_upper_file = file_set.auxiliary.get('delta_offsets_upper')
+            with fits.open(delta_offsets_upper_file) as hdul:
+                wl_upper = np.array(hdul['WAVELENGTH'].data)  # in nm
+            
+            # Define three spatial rows for linear fit calculation
+            ny = upper_l4.shape[0]
+            margin = max(5, ny // 10)
+            center_row = ny // 2
+            row_positions = {
+                'near-top': margin,
+                'center': center_row,
+                'near-bottom': ny - margin - 1,
+            }
+            
+            # Find peaks around 453.50 and 453.68 nm in upper spectrum
+            wl_targets = [453.50, 453.68]
+            
+            # Store linear fit parameters for each row
+            row_slopes = []
+            row_intercepts = []
+            row_indices = []
+            
+            for label, row in row_positions.items():
+                upper_row = upper_l4[row, :]
+                lower_row = lower_z3cc_shifted[row, :]
+                
+                ratios = []
+                
+                for wl_target in wl_targets:
+                    # Find pixel closest to target wavelength
+                    idx = np.argmin(np.abs(wl_upper - wl_target))
+                    # Find local maximum in small window
+                    window = 5
+                    start = max(0, idx - window)
+                    end = min(len(upper_row), idx + window + 1)
+                    
+                    upper_window = upper_row[start:end]
+                    lower_window = lower_row[start:end]
+                    
+                    upper_peak = np.max(upper_window)
+                    lower_peak = np.max(lower_window)
+                    
+                    # Calculate ratio upper/lower
+                    ratio = upper_peak / lower_peak if lower_peak != 0 else 1.0
+                    ratios.append(ratio)
+                    
+                    print(f'  {label} (row {row}) - Peak at {wl_target:.2f} nm: upper={upper_peak:.2f}, lower={lower_peak:.2f}, ratio={ratio:.4f}')
+                
+                # Fit linear function: ratio = a * wavelength + b
+                if len(ratios) == 2 and len(wl_targets) == 2:
+                    a = (ratios[1] - ratios[0]) / (wl_targets[1] - wl_targets[0])
+                    b = ratios[0] - a * wl_targets[0]
+                    
+                    row_slopes.append(a)
+                    row_intercepts.append(b)
+                    row_indices.append(row)
+                    
+                    print(f'  {label} (row {row}) - Linear fit: ratio = {a:.6f} * wavelength + {b:.6f}')
+            
+            # Interpolate slope and intercept across all rows
+            if len(row_slopes) == 3:
+                from scipy.interpolate import interp1d
+                
+                # Create interpolation functions for slope and intercept
+                f_slope = interp1d(row_indices, row_slopes, kind='linear', 
+                                  bounds_error=False, fill_value='extrapolate')
+                f_intercept = interp1d(row_indices, row_intercepts, kind='linear',
+                                      bounds_error=False, fill_value='extrapolate')
+                
+                # Interpolate to all rows
+                all_rows = np.arange(ny)
+                slope_map = f_slope(all_rows)
+                intercept_map = f_intercept(all_rows)
+                
+                print(f'  Slope range: {slope_map.min():.6f} – {slope_map.max():.6f}')
+                print(f'  Intercept range: {intercept_map.min():.6f} – {intercept_map.max():.6f}')
+                
+                # Apply spatially-varying linear correction
+                # For each row, calculate ratio = slope[row] * wavelength + intercept[row]
+                cont_norm_lower = np.empty_like(upper_l4)
+                for row in range(ny):
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        cont_norm_lower[row, :] = slope_map[row] * wl_upper + intercept_map[row]
+                        cont_norm_lower[row, ~np.isfinite(cont_norm_lower[row, :])] = 1.0
+                
+                print(f'  Continuum correction range: {cont_norm_lower.min():.6f} – {cont_norm_lower.max():.6f}')
+                
+                # Apply continuum correction
+                lower_l4 = lower_z3cc_shifted * cont_norm_lower
+                print(f'  ✓ Applied spatially-interpolated linear ratio-based continuum correction')
+                
+                # Save continuum correction as FITS
+                seq = config.dataset[data_type]['sequence']
+                cont_corr_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_continuum_correction_lower.fits'
+                hdu_primary = fits.PrimaryHDU(data=cont_norm_lower.astype('float32'))
+                hdu_primary.header['METHOD'] = ('ratio_linear_spatial', 'Ti line: linear fit with spatial interpolation')
+                hdu_primary.header['PEAK1_WL'] = (wl_targets[0], 'Wavelength of first peak [nm]')
+                hdu_primary.header['PEAK2_WL'] = (wl_targets[1], 'Wavelength of second peak [nm]')
+                hdu_primary.header['SLOPE_TOP'] = (row_slopes[0], 'Slope at near-top row')
+                hdu_primary.header['SLOPE_CENTER'] = (row_slopes[1], 'Slope at center row')
+                hdu_primary.header['SLOPE_BOTTOM'] = (row_slopes[2], 'Slope at near-bottom row')
+                hdu_primary.header['INTERCEPT_TOP'] = (row_intercepts[0], 'Intercept at near-top row')
+                hdu_primary.header['INTERCEPT_CENTER'] = (row_intercepts[1], 'Intercept at center row')
+                hdu_primary.header['INTERCEPT_BOTTOM'] = (row_intercepts[2], 'Intercept at near-bottom row')
+                hdul_out = fits.HDUList([hdu_primary])
+                hdul_out.writeto(cont_corr_path, overwrite=True)
+                file_set.auxiliary['continuum_correction_lower'] = cont_corr_path
+                print(f'  ✓ Saved continuum correction: {cont_corr_path.name}')
+            else:
+                print(f'  ⚠ Could not calculate linear fits at all three rows, falling back to wavelength-only correction')
+                lower_l4 = lower_z3cc_shifted
+                cont_norm_lower = np.ones_like(lower_l4)
+        else:
+            # Non-Ti lines: use 2D polynomial ratio fit
+            print(f'  {line.upper()} line: using 2D polynomial ratio fit')
+            
+            # Compute ratio: upper_l4 / lower_z3cc_shifted
+            # This captures the continuum difference between upper and lower
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ratio = upper_l4 / lower_z3cc_shifted
+                ratio[~np.isfinite(ratio)] = 1.0
+            
+            print(f'  Ratio (upper_l4 / lower_shifted) shape: {ratio.shape}')
+            print(f'  Ratio range: {np.nanmin(ratio):.4f} – {np.nanmax(ratio):.4f}')
+            
+            # Fit a low-order 2D polynomial surface through the ratio
+            ny, nx = ratio.shape
+            y_coords, x_coords = np.mgrid[0:ny, 0:nx]
+            
+            # Flatten for fitting
+            x_flat = x_coords.ravel().astype('float64')
+            y_flat = y_coords.ravel().astype('float64')
+            z_flat = ratio.ravel().astype('float64')
+            
+            # Remove outliers (clip to median ± 3*std)
+            med = np.median(z_flat)
+            std = np.std(z_flat)
+            mask = np.abs(z_flat - med) < 3 * std
+            x_fit = x_flat[mask]
+            y_fit = y_flat[mask]
+            z_fit = z_flat[mask]
+            print(f'  Fitting with {mask.sum()}/{len(mask)} pixels (3-sigma clipping)')
+            
+            # Build 2D polynomial design matrix (order 3: 1, x, y, x², xy, y², x³, x²y, xy², y³)
+            poly_order = 5
+            from numpy.polynomial.polynomial import polyvander2d
+            deg = [poly_order, poly_order]
+            V = polyvander2d(x_fit / nx, y_fit / ny, deg)  # normalise coords to [0,1]
+            
+            # Least squares fit
+            coeffs, residuals, rank, sv = np.linalg.lstsq(V, z_fit, rcond=None)
+            print(f'  2D polynomial fit: order {poly_order}, {len(coeffs)} coefficients')
+            
+            # Evaluate fitted surface on full grid
+            V_full = polyvander2d(x_flat / nx, y_flat / ny, deg)
+            cont_surface = (V_full @ coeffs).reshape(ny, nx)
+            
+            cont_norm_lower = cont_surface
+            print(f'  Continuum correction range: {cont_norm_lower.min():.6f} – {cont_norm_lower.max():.6f}')
+            
+            # Apply continuum correction
+            lower_l4 = lower_z3cc_shifted * cont_norm_lower
+            print(f'  ✓ Applied continuum correction to lower frame')
+            
+            # Save continuum correction as FITS for diagnostics
+            seq = config.dataset[data_type]['sequence']
+            cont_corr_path = config.directories.reduced / f'{line}_{data_type}_t{seq:03d}_continuum_correction_lower.fits'
+            hdu_primary = fits.PrimaryHDU(data=cont_norm_lower.astype('float32'))
+            hdu_primary.header['METHOD'] = ('ratio_polyfit', 'upper_l4 / lower_shifted, 2D poly fit')
+            hdu_primary.header['POLYORD'] = (poly_order, 'Polynomial order')
+            hdu_ratio = fits.ImageHDU(data=ratio.astype('float32'), name='RATIO')
+            hdul_out = fits.HDUList([hdu_primary, hdu_ratio])
+            hdul_out.writeto(cont_corr_path, overwrite=True)
+            file_set.auxiliary['continuum_correction_lower'] = cont_corr_path
+            print(f'  ✓ Saved continuum correction: {cont_corr_path.name}')
     
     if lower_l4 is None:
         lower_l4 = lower_l3
@@ -2745,7 +2897,7 @@ def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
     print(f'{"-"*70}')
     
     # Diagnostic plot: compare corrected upper vs lower at 3 spatial positions
-    _plot_upper_lower_comparison(upper_l4, lower_l4, file_set, config)
+    _plot_upper_lower_comparison(upper_l4, lower_z3cc_shifted, lower_l4, file_set, config)
     
     # Save L4
     reduced_frames = dct.FramesSet()

@@ -75,7 +75,7 @@ if __name__ == '__main__':
     auto_discover_files=True,           # pre-fill matching files per level
     )
     scan, _ = tio.read_any_file(config1, 'scan', status='l4')
-    result = tt.compute_polarimetry(scan)
+    result1 = tt.compute_polarimetry(scan)
 #%%
     scan, _ = tio.read_any_file(config, 'scan', status='l4')
     result = tt.compute_polarimetry(scan)
@@ -83,7 +83,7 @@ if __name__ == '__main__':
 #%%
    
    
-data_plot = np.array([result1.uml.I[:,0,30:-30,30:-30],result.uml.I[:,0,30:-30,30:-30]])
+data_plot = np.array([result.uml.I[:,0,30:-30,30:-30],result.uml.I[:,0,30:-30,30:-30]])
 
    
 viewer = display_data( data_plot, ['states','spatial_y', 'spatial_x', 'spectral'],
