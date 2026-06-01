@@ -132,11 +132,12 @@ if __name__ == '__main__':
     # improve ti lower to upper level alignment
     config = get_config(line='ti', config_path='configs/sample_dataset_2025-07-07.toml')
     data_type='flat_center'
-    
+
     # upper L4 frame (corrected)
     data4, _ = tio.read_any_file(config, data_type, verbose=False, status='l4')
     upper = data4.get(0).get_half('upper').data
     lower = data4.get(0).get_half('lower').data
+    #%%
     data_plot=np.array([upper[100:-100,100:-100], lower[100:-100,100:-100], upper[100:-100,100:-100]- lower[100:-100,100:-100]])
     viewer = display_data( data_plot, ['states',  'spatial_x', 'spectral'],
                        title='flat center', 
@@ -151,6 +152,7 @@ if __name__ == '__main__':
     from astropy.io import fits
     import matplotlib.pyplot as plt
     from scipy.interpolate import interp1d
+    from themis.core.line_fit import LineFit
     
     # Load wavelength grid
     file_set = config.dataset[data_type]['files']
@@ -160,44 +162,77 @@ if __name__ == '__main__':
     
     # Extract row 400 spectrum
     row = 400
-    upper_spec = upper[row, 100:-100]
-    lower_spec = lower[row, 100:-100]
-    
+    upper_spec = upper[row, 100:-100]/upper[row, 100:-100].mean()
+    lower_spec = lower[row, 100:-100]/lower[row, 100:-100].mean()
+    #%%
     # Wavelengths for line fitting
-    wl_line_targets = [453.51, 453.57, 453.59, 453.60, 453.65]  # nm
-    wl_window = 0.02  # nm window for line fitting
+    wl_line_targets = [453.478, 453.5575, 453.593, 453.605, 453.648]  # nm
+    #wl_line_targets = [453.515, 453.5575, 453.593, 453.605, 453.65]  # nm
+    wl_window = 0.002  # nm window for line fitting
     
     upper_line_centers = []
     lower_line_centers = []
     shifts_pixels = []
+    fit_results = []  # Store fit objects for plotting
     
     for wl_target in wl_line_targets:
         # Find pixels within wavelength window
         mask = np.abs(wl_upper - wl_target) < wl_window
-        if np.sum(mask) > 5:  # Need enough pixels for parabolic fit
+        if np.sum(mask) > 3:  # Need enough pixels for parabolic fit
             wl_window_vals = wl_upper[mask]
             upper_window_vals = upper_spec[mask]
             lower_window_vals = lower_spec[mask]
             
-            # Fit parabola to upper: I = a*x^2 + b*x + c
-            # Use pixel indices as x
-            pixel_indices = np.where(mask)[0]
+            # Use LineFit from themis.core for upper spectrum
             try:
-                coeffs_upper = np.polyfit(pixel_indices, upper_window_vals, 2)
-                coeffs_lower = np.polyfit(pixel_indices, lower_window_vals, 2)
+                lf_upper = LineFit(wl_window_vals, upper_window_vals, center_guess=wl_target, error_threshold=0.5)
+                lf_upper.run()
                 
-                # Find peak: derivative = 2*a*x + b = 0 => x = -b/(2*a)
-                pixel_peak_upper = -coeffs_upper[1] / (2 * coeffs_upper[0])
-                pixel_peak_lower = -coeffs_lower[1] / (2 * coeffs_lower[0])
+                # Use LineFit for lower spectrum
+                lf_lower = LineFit(wl_window_vals, lower_window_vals, center_guess=wl_target, error_threshold=0.5)
+                lf_lower.run()
                 
-                upper_line_centers.append(pixel_peak_upper)
-                lower_line_centers.append(pixel_peak_lower)
-                shift = pixel_peak_lower - pixel_peak_upper
-                shifts_pixels.append(shift)
+                # Create fine wavelength grid for sub-pixel precision
+                wl_fine = np.linspace(wl_window_vals.min(), wl_window_vals.max(), 1000)
                 
-                print(f'Line at {wl_target:.2f} nm: upper={pixel_peak_upper:.2f} px, lower={pixel_peak_lower:.2f} px, shift={shift:.4f} px')
-            except Exception as e:
-                print(f'⚠ Could not fit parabola at {wl_target:.2f} nm: {e}')
+                # Evaluate fitted models on fine grid
+                upper_fit_fine = lf_upper.eval(wl_fine)
+                lower_fit_fine = lf_lower.eval(wl_fine)
+                
+                # Find minima on fine grid (absorption line cores)
+                idx_upper_fine = np.argmin(upper_fit_fine)
+                idx_lower_fine = np.argmin(lower_fit_fine)
+                wl_peak_upper = wl_fine[idx_upper_fine]
+                wl_peak_lower = wl_fine[idx_lower_fine]
+                
+                # Convert wavelength positions to sub-pixel indices in the full spectrum
+                # Use linear interpolation to get fractional pixel positions
+                pixel_peak_upper = np.interp(wl_peak_upper, wl_upper, np.arange(len(wl_upper)))
+                pixel_peak_lower = np.interp(wl_peak_lower, wl_upper, np.arange(len(wl_upper)))
+                
+                upper_line_centers.append(wl_peak_upper)
+                lower_line_centers.append(wl_peak_lower)
+                
+                # Shift in pixels: how many pixels to shift lower to match upper (sub-pixel precision)
+                shift_pixels = pixel_peak_lower - pixel_peak_upper
+                shifts_pixels.append(shift_pixels)
+                
+                # Store fit results for plotting
+                fit_results.append({
+                    'wl_target': wl_target,
+                    'wl_window': wl_window_vals,
+                    'upper_data': upper_window_vals,
+                    'lower_data': lower_window_vals,
+                    'upper_fit': lf_upper,
+                    'lower_fit': lf_lower,
+                    'wl_fine': wl_fine,
+                    'upper_fit_fine': upper_fit_fine,
+                    'lower_fit_fine': lower_fit_fine
+                })
+                
+                print(f'Line at {wl_target:.3f} nm: upper={wl_peak_upper:.4f} nm (px {pixel_peak_upper:.2f}), lower={wl_peak_lower:.4f} nm (px {pixel_peak_lower:.2f}), shift={shift_pixels:.4f} px')
+            except RuntimeError as e:
+                print(f'⚠ LineFit failed at {wl_target:.2f} nm: {e}')
         else:
             print(f'⚠ Not enough pixels at {wl_target:.2f} nm')
     
@@ -222,7 +257,7 @@ if __name__ == '__main__':
         lower_spec_shifted = f_interp(np.arange(len(wl_upper)))
         
         # Plot
-        fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+        fig, axes = plt.subplots(3, 1, figsize=(14, 14), sharex=True)
         
         # Top panel: original spectra with line centers marked
         ax1 = axes[0]
@@ -232,27 +267,51 @@ if __name__ == '__main__':
         # Mark line centers
         for i, wl_target in enumerate(wl_line_targets):
             if i < len(upper_line_centers):
-                ax1.axvline(wl_upper[int(upper_line_centers[i])], color='blue', alpha=0.3, linestyle=':')
-                ax1.axvline(wl_upper[int(lower_line_centers[i])], color='orange', alpha=0.3, linestyle=':')
-                ax1.plot(wl_target, upper_spec[int(upper_line_centers[i])], 'bo', markersize=8)
-                ax1.plot(wl_target, lower_spec[int(lower_line_centers[i])], 'o', color='orange', markersize=8)
+                wl_upper_center = upper_line_centers[i]
+                wl_lower_center = lower_line_centers[i]
+                ax1.axvline(wl_upper_center, color='blue', alpha=0.3, linestyle=':')
+                ax1.axvline(wl_lower_center, color='orange', alpha=0.3, linestyle=':')
+                # Plot markers at the fitted wavelength positions with actual intensity at those wavelengths
+                # Use interpolation to get intensity at exact wavelength
+                f_upper = interp1d(wl_upper, upper_spec, kind='cubic', bounds_error=False, fill_value='extrapolate')
+                f_lower = interp1d(wl_upper, lower_spec, kind='cubic', bounds_error=False, fill_value='extrapolate')
+                ax1.plot(wl_upper_center, f_upper(wl_upper_center), 'bo', markersize=8)
+                ax1.plot(wl_lower_center, f_lower(wl_lower_center), 'o', color='orange', markersize=8)
         
         ax1.set_ylabel('Intensity')
-        ax1.set_title(f'Row {row}: Original Spectra with Line Centers Marked')
+        ax1.set_title(f'Row {row}: Original Spectra with Line Centers Marked (using lmfit VoigtModel)')
         ax1.legend()
         
-        # Bottom panel: shifted lower spectrum
+        # Middle panel: fitted Voigt profiles
         ax2 = axes[1]
-        ax2.plot(wl_upper, upper_spec, label='Upper L4', alpha=0.8, color='blue')
-        ax2.plot(wl_upper, lower_spec_shifted, label='Lower L4 (shifted)', alpha=0.8, color='green', ls='--')
+        for fit_data in fit_results:
+            wl_win = fit_data['wl_window']
+            # Plot data points
+            ax2.plot(wl_win, fit_data['upper_data'], 'o', color='blue', alpha=0.5, markersize=4)
+            ax2.plot(wl_win, fit_data['lower_data'], 'o', color='orange', alpha=0.5, markersize=4)
+            # Plot fitted profiles
+            ax2.plot(wl_win, fit_data['upper_fit'].fitted_profile, '-', color='blue', linewidth=2, alpha=0.8)
+            ax2.plot(wl_win, fit_data['lower_fit'].fitted_profile, '-', color='orange', linewidth=2, alpha=0.8)
+            # Mark fitted centers
+            ax2.axvline(fit_data['upper_fit'].max_location, color='blue', alpha=0.3, linestyle=':')
+            ax2.axvline(fit_data['lower_fit'].max_location, color='orange', alpha=0.3, linestyle=':')
         
-        ax2.set_xlabel('Wavelength [nm]')
         ax2.set_ylabel('Intensity')
-        ax2.set_title(f'Row {row}: Lower Spectrum Shifted by Parabolic Function')
-        ax2.legend()
+        ax2.set_title('Voigt Profile Fits (data points + fitted curves)')
+        ax2.legend(['Upper data', 'Lower data', 'Upper fit', 'Lower fit'])
+        
+        # Bottom panel: shifted lower spectrum
+        ax3 = axes[2]
+        ax3.plot(wl_upper, upper_spec, label='Upper L4', alpha=0.8, color='blue')
+        ax3.plot(wl_upper, lower_spec_shifted, label='Lower L4 (shifted)', alpha=0.8, color='green', ls='--')
+        
+        ax3.set_xlabel('Wavelength [nm]')
+        ax3.set_ylabel('Intensity')
+        ax3.set_title(f'Row {row}: Lower Spectrum Shifted by Parabolic Function')
+        ax3.legend()
         
         plt.tight_layout()
-        plot_path = config.directories.reduced / 'wavelength_shift_refinement_test.png'
+        plot_path = config.directories.figures / 'wavelength_shift_refinement_test.png'
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.show()
         print(f'✓ Saved plot: {plot_path.name}')
