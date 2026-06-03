@@ -2448,7 +2448,8 @@ def _apply_flat_center_corrections_to_l3(config, data_type, return_reduced=False
     
     # Diagnostic plot (only for single frame data like flat)
     if not is_cycle_set and len(corrected_frames) > 0:
-        sample_frame = list(corrected_frames.values())[0]
+        # For FramesSet, get the first frame from the frames dict
+        sample_frame = corrected_frames.frames[corrected_frames.keys()[0]]
         upper_l4 = sample_frame.get_half('upper').data
         lower_l4 = sample_frame.get_half('lower').data
         _plot_upper_lower_comparison(upper_l4, lower_l4, lower_l4, file_set, config)

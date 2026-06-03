@@ -38,7 +38,7 @@ if __name__ == '__main__':
     # auto_create_dirs=False              # create directories if missing
     # )
     config = get_config(line='ti',
-    config_path='configs/sample_dataset_2025-07-07.toml', # omit to use defaults
+    config_path='configs/formation_dataset_2025-07-05.toml', # omit to use defaults
     auto_discover_files=True,           # pre-fill matching files per level
     auto_create_dirs=False              # create directories if missing
     )
@@ -59,35 +59,31 @@ if __name__ == '__main__':
     #result = lv3.reduce(config, data_type='flat_center', return_reduced = False)
     #result = lv4.reduce(config, data_type='flat_center', return_reduced = False)
     
-#    result = lv0.reduce(config, data_type='scan', return_reduced = False)
-#    result = lv1.reduce(config, data_type='scan', return_reduced = False)
- #   result = lv2.reduce(config, data_type='scan', return_reduced = False)
-#    result = lv3.reduce(config, data_type='scan', return_reduced = False)
- #   result = lv4.reduce(config, data_type='scan', return_reduced = False)
+    # result = lv0.reduce(config, data_type='scan', return_reduced = False)
+    # result = lv1.reduce(config, data_type='scan', return_reduced = False)
+    # result = lv2.reduce(config, data_type='scan', return_reduced = False)
+    # result = lv3.reduce(config, data_type='scan', return_reduced = False)
+    # result = lv4.reduce(config, data_type='scan', return_reduced = False)
   #  result = lv5.reduce(config, data_type='scan', return_reduced = False, ref_wl = 800)
     
     #print(lv1.get_description(data_type='flat'))
     #%%
   
 #%%
-    config1 = get_config(line='sr',
-    config_path='configs/formation_dataset_2025-07-05.toml', # omit to use defaults
-    auto_discover_files=True,           # pre-fill matching files per level
-    )
-    scan, _ = tio.read_any_file(config1, 'scan', status='l4')
+    scan, _ = tio.read_any_file(config, 'scan', status='l4')
     result1 = tt.compute_polarimetry(scan)
 #%%
     scan, _ = tio.read_any_file(config, 'scan', status='l4')
     result = tt.compute_polarimetry(scan)
  
 #%%
+I_single = (scan.get_state('pQ').stack_all('upper'))[:,100:-100,100:-100]
    
-   
-data_plot = np.array([result.uml.I[:,0,30:-30,30:-30],result.uml.I[:,0,30:-30,30:-30]])
+data_plot = np.array([result.uml.I[:,0,100:-100,100:-100],np.array(I_single)])
 
    
-viewer = display_data( data_plot, ['states','spatial_y', 'spatial_x', 'spectral'],
-                      title='scan' 
+viewer = display_data( data_plot, ['states', 'spatial_y', 'spatial_x', 'spectral'],
+                      title='scan seq 18' 
                       )
 
 
