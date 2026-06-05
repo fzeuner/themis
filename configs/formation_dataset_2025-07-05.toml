@@ -17,8 +17,14 @@ date = "2025-07-05"
 #sequence = 50
 #flat_sequence = 49
 # 40
-sequence = 36
-flat_sequence = 37
+#sequence = 36
+#flat_sequence = 37
+# 45
+#sequence = 38
+#flat_sequence = 37
+# -45
+sequence = 48
+flat_sequence = 43
 flat_center_sequence = 26
 dark_sequence = 1
 # Polarization states order (modify as needed) - only for scan data!

@@ -500,7 +500,7 @@ if __name__ == '__main__':
 
     # Load configuration
     config = get_config(
-        line='ti',
+        line='fe',
         config_path='configs/calibration_data_2025-07-05.toml',
         auto_discover_files=True
     )
@@ -518,25 +518,30 @@ if __name__ == '__main__':
     
     #%%
     
-    initial_center_ = 510 # sr 515
-    
+    initial_center_ = 142 # sr 515 # ti 510
+    fit_min_= 135 #sr:498, ti:490
+    fit_max_=149 #sr:532, ti:520
+    initial_sigma_ = 2 #sr,ti: 5
+    initial_width_= 5 #sr,ti:10
+    initial_amplitude_= -1200 # sr,ti: -8000
+    initial_offset_= 1500 #sr,ti:8700
     fig, (centers_lower, fwhm_lower, center_lower, sigma_lower) = plot_gaussian_slice_fits(
     lower_scan[0],
     axis=1,        # slices along y, fit along x
-    fit_min=490, # sr: 498, 532
-    fit_max=520,initial_sigma=5, initial_width=10.0,
-                          initial_amplitude=-8000,
-                          initial_center=515, initial_offset=8700
+    fit_min=fit_min_ ,
+    fit_max=fit_max_,initial_sigma=initial_sigma_, initial_width=initial_width_,
+                          initial_amplitude=initial_amplitude_,
+                          initial_center=initial_center_, initial_offset=initial_offset_
     )
     plt.show()
 
     fig, (centers_upper, fwhm_upper, center_upper, sigma_upper) = plot_gaussian_slice_fits(
     upper_scan[0],
     axis=1,        # slices along y, fit along x
-    fit_min=490,  # sr: 498, 532
-    fit_max=520,initial_sigma=5, initial_width=10.0,
-                          initial_amplitude=-8000,
-                          initial_center=initial_center_, initial_offset=8700
+    fit_min=fit_min_, 
+    fit_max=fit_max_,initial_sigma=initial_sigma_, initial_width=initial_width_,
+                          initial_amplitude=initial_amplitude_,
+                          initial_center=initial_center_, initial_offset=initial_offset_
     )
     plt.show()
 
@@ -582,7 +587,8 @@ if __name__ == '__main__':
     #%%
 
     #config_test = get_config(line='sr', config_path='configs/sample_dataset_2025-07-07.toml')
-    config_test = get_config(line='ti', config_path='configs/sample_dataset_2025-07-07.toml')
+    #config_test = get_config(line='ti', config_path='configs/sample_dataset_2025-07-07.toml')
+    config_test = get_config(line='fe', config_path='configs/sample_dataset_2025-07-07.toml')
 
     #%%
     scan, header = tio.read_any_file(config_test, 'scan', verbose=False, status='l1')
@@ -597,8 +603,8 @@ if __name__ == '__main__':
     #                   title='scan' 
     #                   )
 #%%
-    lower_shift_map = xshift_to_2d_map(lower_shifts, ny=lower.shape[0])
-    upper_shift_map = xshift_to_2d_map(upper_shifts, ny=upper.shape[0])
+    lower_shift_map = xshift_to_2d_map(lower_shifts, ny=lower_scan.shape[1])
+    upper_shift_map = xshift_to_2d_map(upper_shifts, ny=upper_scan.shape[1])
 #%%
     lower_shifted = tdr._apply_yshift_map_to_half(lower, lower_shift_map)
     upper_shifted = tdr._apply_yshift_map_to_half(upper, upper_shift_map)
@@ -657,6 +663,7 @@ if __name__ == '__main__':
     #%%
     # IF YOU ARE HAPPY WITH THE ABOVE
     # Save shifts as NumPy files and register as auxiliary files for flat_center
+    total_shift_map_lower = lower_shift_map # for Fe!!!!
     line = config.line
     seq_fc = config.dataset['flat_center']['sequence']
     seq_fc_str = f"t{seq_fc:03d}"

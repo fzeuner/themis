@@ -96,8 +96,8 @@ cam2 = Camera(name="Zyla 6", target="ti", pixel_scale=0.065, file_ext='b0606',
               wavelength='4536', roi=ROI(lower=((53, 921), (320, 1570)), upper=((1128, 1996), (310, 1560))),
               atlas_fit_config=_project_root() / "configs" / "atlas_fit_config_cam2.yml")  
 cam3 = Camera(name="iXon 2", target="fe", pixel_scale=0.235, file_ext='b0202', 
-              wavelength='6302', roi=ROI(lower=((8, 252), (113, 300)), upper=((254, 498), (113, 300))),
-              atlas_fit_config=None)  # TODO: Create atlas_fit_config_cam3.yml
+              wavelength='6302', roi=ROI(lower=((12, 248), (113, 300)), upper=((264, 500), (113, 300))),
+              atlas_fit_config=_project_root() / "configs" / "atlas_fit_config_cam3.yml")  
 #ROI(lower=((8, 252), (113, 300)), upper=((254, 498), (113, 300))
 #ROI(lower=((0, -1), (0, -1)), upper=((0, -1), (0, -1))
 # Register them

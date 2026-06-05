@@ -37,7 +37,7 @@ if __name__ == '__main__':
     # auto_discover_files=True,           # pre-fill matching files per level
     # auto_create_dirs=False              # create directories if missing
     # )
-    config = get_config(line='ti',
+    config = get_config(line='sr',
     config_path='configs/formation_dataset_2025-07-05.toml', # omit to use defaults
     auto_discover_files=True,           # pre-fill matching files per level
     auto_create_dirs=False              # create directories if missing

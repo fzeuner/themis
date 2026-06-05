@@ -346,12 +346,34 @@ def reduce_raw_to_l0(config, data_type=None, return_reduced=False, auto_reduce_d
             return out_path
 
 
-def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_dark: bool = False):
+def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_dark: bool = False, roi_margin: int = None):
     """
     Reduce L0 data to L1 level.
     
     For flat and flat_center: performs wavelength calibration using atlas-fit bin/prepare.
+    
+    Parameters
+    ----------
+    config : Config
+        Configuration object
+    data_type : str
+        Data type to reduce
+    return_reduced : bool
+        If True, return reduced frames instead of saving
+    auto_reduce_dark : bool
+        If True, auto-reduce dark frames
+    roi_margin : int
+        ROI margin in pixels for spectroflat (default: auto-detected from config.line)
     """
+    # Auto-detect ROI margin from camera/line if not specified
+    if roi_margin is None:
+        line = config.line.lower() if hasattr(config, 'line') else 'ti'
+        if line == 'fe':
+            roi_margin = 1
+            print(f'  Auto-detected Fe camera: using ROI margin = {roi_margin} px')
+        else:  # ti, sr, or others
+            roi_margin = 20
+            print(f'  Auto-detected {line.upper()} camera: using ROI margin = {roi_margin} px')
     
     def _load_flat_center_dust_flats(cfg):
         """Load flat_center dust flats (status='dust') and return dict per half."""
@@ -531,7 +553,8 @@ def reduce_l0_to_l1(config, data_type=None, return_reduced=False, auto_reduce_da
                 print(f'      {offset_map_path} \\')
                 print(f'      {illum_path} \\')
                 print(f'      --report_dir {report_dir} \\')
-                print(f'      --dust_flat_out {dust_flat_path}')
+                print(f'      --dust_flat_out {dust_flat_path} \\')
+                print(f'      --roi_margin {roi_margin}')
                 print(f'  {"-"*68}')
                 
                 while True:
@@ -1751,7 +1774,7 @@ def _plot_upper_lower_comparison(upper_l4, lower_z3cc_shifted, lower_l4, file_se
     
     nx = upper_l4.shape[1]
     ny = upper_l4.shape[0]
-    edge = max(10, nx // 5)  # ignore ~20% on each side
+    edge = max(5, nx // 10)  # ignore ~10% on each side
     margin = max(5, ny // 10)
     rows = {
         'near-top': margin,
@@ -1797,7 +1820,7 @@ def _plot_upper_lower_comparison(upper_l4, lower_z3cc_shifted, lower_l4, file_se
     fig.suptitle(f'L4 Upper vs Lower — Wavelength vs Wavelength+Continuum Correction (edges ±{edge} px excluded)', fontsize=14)
     plt.tight_layout()
     
-    plot_path = config.directories.reduced / 'l4_upper_lower_comparison.png'
+    plot_path = config.directories.figures / 'l4_upper_lower_comparison.png'
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.show()
     print(f'  ✓ Saved diagnostic plot: {plot_path.name}')
@@ -2064,7 +2087,7 @@ def _remove_outdated_auxiliary_files(config, data_type):
         print(f'  Removed auxiliary key: {key}')
 
 
-def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
+def reduce_l2_to_l3(config, data_type=None, return_reduced=False, roi_margin: int = None):
     """L2 -> L3 reduction: smile correction via offset maps.
     
     For flat_center: runs spectroflat on L2 (y-shift corrected) data to produce
@@ -2081,6 +2104,8 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
         One of 'scan', 'flat', 'flat_center'.
     return_reduced : bool
         If True, return the reduced frames instead of saving to disk.
+    roi_margin : int
+        ROI margin in pixels for spectroflat (default: auto-detected from config.line)
     
     Returns
     -------
@@ -2088,6 +2113,15 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
         Path to saved L3 file, or reduced frames if return_reduced=True,
         or None on failure.
     """
+    # Auto-detect ROI margin from camera/line if not specified
+    if roi_margin is None:
+        line = config.line.lower() if hasattr(config, 'line') else 'ti'
+        if line == 'fe':
+            roi_margin = 1
+            print(f'  Auto-detected Fe camera: using ROI margin = {roi_margin} px')
+        else:  # ti, sr, or others
+            roi_margin = 20
+            print(f'  Auto-detected {line.upper()} camera: using ROI margin = {roi_margin} px')
     if data_type is None:
         print('No processing - provide a specific data type.')
         return None
@@ -2151,7 +2185,8 @@ def reduce_l2_to_l3(config, data_type=None, return_reduced=False):
                 print(f'      {temp_frame_path} \\')
                 print(f'      {offset_map_path} \\')
                 print(f'      {illum_path} \\')
-                print(f'      --report_dir {report_dir}')
+                print(f'      --report_dir {report_dir} \\')
+                print(f'      --roi_margin {roi_margin}')
                 print(f'  {"-"*68}')
                 
                 while True:
@@ -2854,7 +2889,7 @@ def reduce_l3_to_l4(config, data_type=None, return_reduced=False):
             print(f'  Fitting with {mask.sum()}/{len(mask)} pixels (3-sigma clipping)')
             
             # Build 2D polynomial design matrix (order 3: 1, x, y, x², xy, y², x³, x²y, xy², y³)
-            poly_order = 5
+            poly_order = 5 # 2 for fe
             from numpy.polynomial.polynomial import polyvander2d
             deg = [poly_order, poly_order]
             V = polyvander2d(x_fit / nx, y_fit / ny, deg)  # normalise coords to [0,1]

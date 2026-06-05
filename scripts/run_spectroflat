@@ -38,6 +38,8 @@ def main():
                          help='Directory for spectroflat report plots')
     aparser.add_argument('--dust_flat_out', type=str, default=None,
                          help='Output path for dust flat FITS (optional)')
+    aparser.add_argument('--roi_margin', type=int, default=20,
+                         help='ROI margin in pixels (default: 20 for Ti/Sr, use 1 for Fe)')
     args = aparser.parse_args()
 
     # Load 2D frame
@@ -50,8 +52,11 @@ def main():
     dirty_flat = np.stack([frame_2d, frame_2d, frame_2d, frame_2d], axis=0)
     print(f'  Stacked shape: {dirty_flat.shape} [state, spatial, wavelength]')
 
-    # Define ROI
-    roi = parse_shape(f'[20:{dirty_flat.shape[1]-20},20:{dirty_flat.shape[2]-20}]')
+    # Define ROI with configurable margin
+    margin = args.roi_margin
+    roi = parse_shape(f'[{margin}:{dirty_flat.shape[1]-margin},{margin}:{dirty_flat.shape[2]-margin}]')
+    print(f'  ROI margin: {margin} px')
+    print(f'  ROI: [{margin}:{dirty_flat.shape[1]-margin},{margin}:{dirty_flat.shape[2]-margin}]')
 
     # Configure spectroflat
     sf_config = SpectroflatConfig(roi=roi, iterations=2)

@@ -136,7 +136,7 @@ if __name__ == '__main__':
     result, header = tio.read_any_file(config, 'scan', verbose=False, status='l0')
     print(header['HISTORY'])
     data_plot, state_names = _build_scan_plot_data(result, slit_idx=0, map_idx=0)
-    viewer = display_data(data_plot, 'states', 'spatial', 'spectral',
+    viewer = display_data(data_plot, ['states', 'spatial_x', 'spectral'],
                        title='flat l0', 
                        state_names=state_names)
 #%%    
