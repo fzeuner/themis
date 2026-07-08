@@ -256,42 +256,41 @@ def read_any_file(config, data_type, status='raw', verbose=False):
     """
     gc.collect()
     
-    # Special handling for status='wl': return wavelength calibration from auxiliary files
+    # Special handling for status='wl': return wavelength from delta_offsets_upper.fits
     if status == 'wl' and data_type in ('scan', 'flat', 'flat_center'):
-        wl_calib = tdr._load_wavelength_calibration(config, data_type)
-        if wl_calib is None:
+        # Wavelength is stored in flat_center's delta_offsets_upper.fits
+        from pathlib import Path
+        source_type = 'flat_center'
+        files_src = config.dataset.get(source_type, {}).get('files')
+        if files_src is None:
             raise FileNotFoundError(
-                f"Wavelength calibration not found for data_type '{data_type}'. "
-                f"Run L3 reduction with atlas-fit for flat_center first."
+                f"flat_center dataset not found in config. "
+                f"Cannot load wavelength calibration."
             )
-        
-        # Build a FramesSet with wavelength arrays for upper/lower
-        collection = dct.FramesSet()
-        frame_name_str = f"{data_type}_wl_calib"
-        frame = dct.Frame(frame_name_str)
-        
-        for half in ['upper', 'lower']:
-            frame.set_half(half, wl_calib[half]['wavelength'].astype('float64'))
-        
-        collection.add_frame(frame, 0)
-        
-        # Create a header with wavelength metadata
-        header = fits.Header()
-        header['DATATYPE'] = data_type
-        header['STATUS'] = 'wl'
-        for half in ['upper', 'lower']:
-            prefix = half[0].upper()  # 'U' or 'L'
-            header[f'{prefix}_MINWL'] = (wl_calib[half]['min_wl'], f'{half} min wavelength [nm]')
-            header[f'{prefix}_MAXWL'] = (wl_calib[half]['max_wl'], f'{half} max wavelength [nm]')
-            header[f'{prefix}_DISP'] = (wl_calib[half]['dispersion'], f'{half} dispersion [nm/px]')
-            header[f'{prefix}_NPIX'] = (wl_calib[half]['n_pixels'], f'{half} number of pixels')
-        
+
+        aux = getattr(files_src, 'auxiliary', {})
+        delta_offsets_file = aux.get('delta_offsets_upper')
+
+        if delta_offsets_file is None or not Path(delta_offsets_file).exists():
+            raise FileNotFoundError(
+                f"Delta offsets file not found for flat_center. "
+                f"Run L3→L4 reduction for flat_center first."
+            )
+
+        # Load wavelength from delta_offsets_upper.fits
+        with fits.open(delta_offsets_file) as hdul:
+            if 'WAVELENGTH' not in hdul:
+                raise FileNotFoundError(
+                    f"WAVELENGTH HDU not found in {Path(delta_offsets_file).name}. "
+                    f"File may be corrupted or from an old reduction version."
+                )
+            wl = np.array(hdul['WAVELENGTH'].data)
+
         if verbose:
-            print(f"Reading wavelength calibration for data_type '{data_type}' from flat_center auxiliary files")
-            print(f"  Upper: {wl_calib['upper']['min_wl']:.4f} - {wl_calib['upper']['max_wl']:.4f} nm")
-            print(f"  Lower: {wl_calib['lower']['min_wl']:.4f} - {wl_calib['lower']['max_wl']:.4f} nm")
-        
-        return collection, header
+            print(f"Reading wavelength calibration for data_type '{data_type}' from flat_center delta_offsets_upper.fits")
+            print(f"  Wavelength range: {wl.min():.4f} - {wl.max():.4f} nm")
+
+        return wl, None
     
     # For status='dust' we use the L1 file only to obtain a header; data
     # themselves come from auxiliary dust_flat_* files.

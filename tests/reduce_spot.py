@@ -45,11 +45,11 @@ if __name__ == '__main__':
     lv3 = tdr.reduction_levels["l3"]
     lv4 = tdr.reduction_levels["l4"]
     
-    result = lv0.reduce(config, data_type='scan', return_reduced = False)
-    result = lv1.reduce(config, data_type='scan', return_reduced = False)
-    result = lv2.reduce(config, data_type='scan', return_reduced = False)
-    result = lv3.reduce(config, data_type='scan', return_reduced = False)
-    result = lv4.reduce(config, data_type='scan', return_reduced = False)
+    #result = lv0.reduce(config, data_type='scan', return_reduced = False)
+    ##result = lv1.reduce(config, data_type='scan', return_reduced = False)
+    #result = lv2.reduce(config, data_type='scan', return_reduced = False)
+    #result = lv3.reduce(config, data_type='scan', return_reduced = False)
+    #result = lv4.reduce(config, data_type='scan', return_reduced = False)
     
     #print(lv1.get_description(data_type='flat'))
     #%%
