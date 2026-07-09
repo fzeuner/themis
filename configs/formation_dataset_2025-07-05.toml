@@ -6,10 +6,10 @@ date = "2025-07-05"
 # Sequences for scan/flat/dark
 
 #### disk center
-#sequence = 27
+sequence = 27
 #### -40
 #sequence = 24
-#flat_sequence = 26
+flat_sequence = 26
 ##### -30
 #sequence = 18
 #flat_sequence = 16
@@ -29,8 +29,8 @@ date = "2025-07-05"
 #sequence = 92
 #flat_sequence = 91
 ##### 55
-sequence = 86
-flat_sequence = 85
+#sequence = 86
+#flat_sequence = 85
 flat_center_sequence = 26
 dark_sequence = 1
 # Polarization states order (modify as needed) - only for scan data!
