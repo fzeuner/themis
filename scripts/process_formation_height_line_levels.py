@@ -48,7 +48,6 @@ from spectator.controllers.app_controller import display_data # from spectator
 import matplotlib.pyplot as plt
 import numpy as np
 import gc
-import pickle
 from pathlib import Path
 from datetime import datetime
 from astropy.io import fits
