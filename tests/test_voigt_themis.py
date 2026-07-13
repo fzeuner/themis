@@ -74,8 +74,8 @@ def initialize_parameter(params, ti_center_wl, continuum):
     params['C_sigma'].value= 0.03
     params['C_gamma'].value= 1
     
-    params['D_amplitude'].value= -0.05
-    params['D_center'].value = 4536.09
+    params['D_amplitude'].value= -0.09
+    params['D_center'].value = 4535.9
     params['D_sigma'].value= 0.03
     params['D_gamma'].value= 1
     
@@ -156,7 +156,7 @@ class line():
         self.idx_center = np.argmin(abs(self.wvl - wvl_min_parabola)) - idx_left
         
         # adding  more pixel to get the minimum right
-        pixel_overlap = 2
+        pixel_overlap = 5
         self.profile_red = self.profile[idx_left+self.idx_center-pixel_overlap:]
         self.wvl_red = self.wvl[idx_left+self.idx_center-pixel_overlap:]
 
@@ -205,12 +205,12 @@ intmeth = 'none' # imshow integration method
 
 # -----------------------------
 spectra = SpectrumContainer.load_all()
-res = spectra['ti']['disk_center'].residual.data[70:,20:200,0]
-r_w = spectra['ti']['disk_center'].residual.wvl[70:]
-li = spectra['ti']['disk_center'].line.data[:,20:200,0]
+res = spectra['ti']['disk_center'].residual.data[0:,300,20:100]
+r_w = spectra['ti']['disk_center'].residual.wvl[0:]
+li = spectra['ti']['disk_center'].line.data[:,300,20:100]
 l_w =  spectra['ti']['disk_center'].line.wvl
 
-continuum = np.nanmean(spectra['ti']['disk_center'].continuum.data[:,20:200,0], axis=0)
+continuum = np.nanmean(spectra['ti']['disk_center'].continuum.data[:,300,20:100], axis=0)
 si=np.concatenate((res,li))
 
 # -----------------------------
@@ -239,8 +239,11 @@ line_color4 = 'indigo'
 
 # data processing
 
-intergranule = line( wavelengthscale, si[175,:], ti_center_wl,  spec_region_width, continuum=continuum[175])
-granule = line( wavelengthscale, si[60,:], ti_center_wl,  spec_region_width, continuum=continuum[60])
+intergranule_idx = 39
+granule_idx = 17
+
+intergranule = line( wavelengthscale, si[intergranule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[intergranule_idx])
+granule = line( wavelengthscale, si[granule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[granule_idx])
 
 
 # components_intergranule = out_intergranule.eval_components(x=wavelengthscale)
@@ -268,7 +271,7 @@ ax.get_yaxis().set_visible(True)
   
 im=ax.imshow(si, cmap='gray',origin='lower',\
               interpolation=intmeth,vmin=i_gscale[0], vmax=i_gscale[1], 
-              extent=[wavelengthscale[0],wavelengthscale[-1],0,image_sz[1]], aspect='auto')#  
+              extent=[wavelengthscale[0],wavelengthscale[-1],0,image_sz[0]], aspect='auto')#  
 pos=ax.get_position()
 cbaxes = f.add_axes([pos.x1, pos.y0, zoom*0.01*(pos.x1-pos.x0), (pos.y1-pos.y0)])
 cb = plt.colorbar(im,orientation='vertical',cax=cbaxes,ticks=[i_gscale[0],i_gscale[1]])
@@ -306,8 +309,8 @@ ax1.plot( intergranule.wvl_blue[:-2], intergranule.component_ti_blue[:-2], '-', 
 ax1.plot( intergranule.wvl_red[2:], intergranule.component_ti_red[2:],'-',  marker='.', color='magenta')
 # ax1.plot(wavelengthscale, si[0,:].mean(axis=0), color='black', label = 'Spatial mean') 
 
-ax.axhline(y=175, color=line_color2, linewidth=1, linestyle='dotted')
-ax.axhline(y=60, color=line_color4, linewidth=1, linestyle='dotted')
+ax.axhline(y=intergranule_idx, color=line_color2, linewidth=1, linestyle='dotted')
+ax.axhline(y=granule_idx, color=line_color4, linewidth=1, linestyle='dotted')
 
 ax1.axvline(x=ti_center_wl-spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
 ax1.axvline(x=ti_center_wl+spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted', label='Ti I')
@@ -319,6 +322,75 @@ ax1.set_ylabel(r'Counts [a.u.]')
 
 
 plt.savefig('/home/franziskaz/figures/themis/test_voigt_themis.png'
+          , dpi=my_dpi, metadata={'Software': __file__})
+
+
+#%%
+  # --------------------------------------------------------
+  # PLOT STARTS: is there a blend in Ti in intergranules?
+  # -------------------------------------------------------
+f=plt.figure(num=2) 
+f.set_size_inches(fig_size,forward=True)
+plt.clf()
+
+gs = gridspec.GridSpec(2,1)#, width_ratios=[1,1,1,1] , height_ratios=[1,1,1,1] )
+gs.update(top=0.94, bottom=0.11,left=0.09, right=0.9, wspace=0.15, hspace=0.2)
+
+  #--------------------------------------------------------
+
+ax=f.add_subplot(gs[0,0])
+
+ax.get_yaxis().set_visible(True)
+ 
+
+  # ------------- Stokes I image
+  
+im=ax.imshow(si, cmap='gray',origin='lower',\
+              interpolation=intmeth,vmin=i_gscale[0], vmax=i_gscale[1], 
+              extent=[wavelengthscale[0],wavelengthscale[-1],0,image_sz[0]], aspect='auto')#  
+pos=ax.get_position()
+cbaxes = f.add_axes([pos.x1, pos.y0, zoom*0.01*(pos.x1-pos.x0), (pos.y1-pos.y0)])
+cb = plt.colorbar(im,orientation='vertical',cax=cbaxes,ticks=[i_gscale[0],i_gscale[1]])
+cb.set_label('$I/I_c$ [a.u.]')
+
+
+ax.axvline(x=ti_center_wl-spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
+ax.axvline(x=ti_center_wl+spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
+
+
+# ax.axvline(x=cont_center_wl-spec_region_width/2., color=line_color3, linewidth=1, linestyle='dotted')
+# ax.axvline(x=cont_center_wl+spec_region_width/2., color=line_color3, linewidth=1, linestyle='dotted')
+ax.set_title('MTR@THEMIS, 2025, disk center')
+ax.set_ylabel(r'X along slit [pixel]')
+ax.get_xaxis().set_visible(False)
+
+  # ------------- Stokes I spectrum
+  
+ax1=f.add_subplot(gs[1,0])  
+
+ax1.plot( granule.wvl, granule.profile, color='magenta', marker='+',linestyle='solid', label = 'Granule') 
+# ax1.plot(wavelengthscale, components_granule_red['A_']+components_granule['c_'], '-', color='blue', label='best fit granule, Ti')
+# ax1.plot(wavelengthscale, components_granule_blue['A_']+components_granule['c_'], '-', color='magenta', label='best fit granule, Ti')
+
+
+
+ax1.plot(intergranule.wvl, intergranule.profile, color='black', marker='+',linestyle='solid', label = 'Intergranule') 
+
+# ax1.plot(wavelengthscale, si[0,:].mean(axis=0), color='black', label = 'Spatial mean') 
+
+ax.axhline(y=granule_idx, color='magenta', linewidth=1, linestyle='dotted')
+ax.axhline(y=intergranule_idx, color='black', linewidth=1, linestyle='dotted')
+
+ax1.axvline(x=ti_center_wl-spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
+ax1.axvline(x=ti_center_wl+spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted', label='Ti I')
+ax1.legend()
+
+
+ax1.set_xlabel(r'Wavelength $[\AA]$')  
+ax1.set_ylabel(r'Counts [a.u.]')
+
+
+plt.savefig('/home/franziskaz/figures/themis/test_voigt_themis-blend.png'
           , dpi=my_dpi, metadata={'Software': __file__})
 
 
