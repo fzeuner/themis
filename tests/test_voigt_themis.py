@@ -33,6 +33,8 @@ import line_tools as lt
 
 from scipy.special import voigt_profile
 from lmfit.models import VoigtModel, ConstantModel , SkewedVoigtModel
+from lmfit import Model
+from lmfit.lineshapes import voigt as voigt_lineshape
 
 from themis.core import themis_tools as tt
 from themis.core import themis_data_reduction as tdr
@@ -86,6 +88,209 @@ def initialize_parameter(params, ti_center_wl, continuum):
 
     return(params)
 
+def initialize_piecewise_parameter(params, center, continuum):
+   
+    params['ti_r_amplitude'].value= -0.08
+    params['ti_b_amplitude'].value= -0.08
+    params['ti_r_center'].value = center
+    params['ti_r_center'].vary = True
+    params['ti_b_center'].expr = 'ti_r_center'
+    params['ti_r_sigma'].value= 0.03
+    params['ti_b_sigma'].value= 0.03
+    params['ti_b_gamma'].value= 0.03
+    params['ti_r_gamma'].value= 0.03
+    params['ti_r_gamma'].min = 0.001
+    params['ti_r_gamma'].max = 0.09
+    params['ti_b_gamma'].min = 0.001
+    params['ti_b_gamma'].max = 0.09
+    # Initialize y to the center for each component
+    params['ti_y'].expr = 'ti_r_center'
+
+  
+    params['B_r_amplitude'].value= -0.09
+    params['B_b_amplitude'].value= -0.09
+    params['B_r_center'].value = 4536.268
+    params['B_r_center'].vary = True
+    params['B_b_center'].expr = 'B_r_center'
+    params['B_r_sigma'].value= 0.03
+    params['B_b_sigma'].value= 0.03
+    params['B_r_gamma'].value= 0.03
+    params['B_b_gamma'].value= 0.03
+    params['B_r_gamma'].min = 0.001
+    params['B_r_gamma'].max = 0.09
+    params['B_b_gamma'].min = 0.001
+    params['B_b_gamma'].max = 0.09
+    params['B_y'].expr = 'B_r_center'
+    
+    params['C_r_amplitude'].value= -0.09
+    params['C_b_amplitude'].value= -0.09
+    params['C_r_center'].value = 4536.050
+    params['C_r_center'].vary = True
+    params['C_b_center'].expr = 'C_r_center'
+    params['C_r_sigma'].value= 0.03
+    params['C_b_sigma'].value= 0.03
+    params['C_r_gamma'].value= 0.03
+    params['C_b_gamma'].value= 0.03
+    params['C_y'].expr = 'C_r_center'
+    
+    params['D_r_amplitude'].value= -0.09
+    params['D_b_amplitude'].value= -0.09
+    params['D_r_center'].value = 4535.9
+    params['D_r_center'].vary = True
+    params['D_b_center'].expr = 'D_r_center'
+    params['D_r_sigma'].value= 0.03
+    params['D_b_sigma'].value= 0.03
+    params['D_r_gamma'].value= 0.03
+    params['D_b_gamma'].value= 0.03
+    params['D_y'].expr = 'D_r_center'
+    
+    params['c_c'].value= continuum
+    params['c_c'].vary = False
+    params['c_c'].min = continuum*0.9
+    params['c_c'].max = continuum*1.1
+
+    return(params)
+
+
+def _piecewise_voigt_func(x, y, r_amplitude, r_center, r_sigma, r_gamma,
+                           b_amplitude, b_center, b_sigma, b_gamma):
+    # Two independent Voigt profiles, selected pointwise by wavelength x
+    # relative to the split point y (blue side: x < y, red side: x >= y)
+    voigt_r = voigt_lineshape(x, r_amplitude, r_center, r_sigma, r_gamma)
+    voigt_b = voigt_lineshape(x, b_amplitude, b_center, b_sigma, b_gamma)
+    return np.where(x < y, voigt_b, voigt_r)
+
+def piecewise_voigt(prefix='line'): # fit y, the point where the split should appear
+    model = Model(_piecewise_voigt_func, independent_vars=['x'], prefix=prefix+'_',
+                  param_names=['y', 'r_amplitude', 'r_center', 'r_sigma', 'r_gamma',
+                               'b_amplitude', 'b_center', 'b_sigma', 'b_gamma'])
+    return model
+
+
+def piecewise_model():
+    
+    voigt_ti = piecewise_voigt(prefix='ti')  # Ti I 
+    pars = voigt_ti.make_params()
+    voigtB = piecewise_voigt(prefix='B')
+    pars.update(voigtB.make_params())
+    voigtC = piecewise_voigt(prefix='C')
+    pars.update(voigtC.make_params())
+    voigtD = piecewise_voigt(prefix='D')
+    pars.update(voigtD.make_params())
+    
+    const = ConstantModel(prefix='c_')
+    pars.update(const.make_params())
+    
+    model = voigt_ti + voigtB + voigtC + voigtD + const
+    
+    return model, pars
+
+def get_initial_piecewise_fit(wvl, center, continuum):
+    """Generate the initial piecewise model fit (before optimization)."""
+    model, pars = piecewise_model()
+    pars = initialize_piecewise_parameter(pars, center, continuum)
+    initial_fit = model.eval(pars, x=wvl)
+    return initial_fit
+
+def refine_center_with_parabola(wvl, profile, center_guess, half_width=5):
+    """Refine the center by fitting a parabola around the approximate minimum."""
+    idx_center_approx = np.argmin(np.abs(wvl - center_guess))
+    idx_parabola_left = max(0, idx_center_approx - half_width)
+    idx_parabola_right = min(len(wvl), idx_center_approx + half_width)
+    
+    wvl_parabola = wvl[idx_parabola_left:idx_parabola_right]
+    profile_parabola = profile[idx_parabola_left:idx_parabola_right]
+    
+    # Fit 2nd degree polynomial: p(wvl) = a*wvl^2 + b*wvl + c
+    # The minimum is at wvl = -b/(2*a)
+    poly_coefs = np.polyfit(wvl_parabola, profile_parabola, 2)
+    a, b, c = poly_coefs
+    if a > 0:  # parabola opens upward, minimum exists
+        wvl_min_parabola = -b / (2 * a)
+    else:
+        # Fallback to approximate minimum if parabola doesn't have a minimum
+        wvl_min_parabola = wvl[idx_center_approx]
+    
+    return wvl_min_parabola
+
+def add_continuity_pseudo_data(wvl, profile, params, model, continuity_weight=10, epsilon=1e-4):
+    """Add pseudo-data points to penalize discontinuities at split points.
+    
+    For each component, adds two pseudo-points very close to the split point y:
+    - One slightly below y (evaluates blue side)
+    - One slightly above y (evaluates red side)
+    Both have the same target value (the average), forcing continuity.
+    """
+    pseudo_x = []
+    pseudo_y = []
+    pseudo_weights = []
+    
+    # Get constant background value
+    const_value = params['c_c'].value
+    
+    for prefix in ['ti', 'B', 'C', 'D']:
+        y_split = params[prefix+'_y'].value
+        
+        # Evaluate both Voigt profiles at the split point
+        voigt_r = voigt_lineshape(y_split, 
+                                   params[prefix+'_r_amplitude'].value,
+                                   params[prefix+'_r_center'].value,
+                                   params[prefix+'_r_sigma'].value,
+                                   params[prefix+'_r_gamma'].value)
+        voigt_b = voigt_lineshape(y_split,
+                                   params[prefix+'_b_amplitude'].value,
+                                   params[prefix+'_b_center'].value,
+                                   params[prefix+'_b_sigma'].value,
+                                   params[prefix+'_b_gamma'].value)
+        
+        # Target is the average plus constant - encourages both sides to converge to the same value
+        target_value = (voigt_r + voigt_b) / 2 + const_value
+        
+        # Add pseudo-point slightly below y (will evaluate blue side)
+        pseudo_x.append(y_split - epsilon)
+        pseudo_y.append(target_value)
+        pseudo_weights.append(continuity_weight)
+        
+        # Add pseudo-point slightly above y (will evaluate red side)
+        pseudo_x.append(y_split + epsilon)
+        pseudo_y.append(target_value)
+        pseudo_weights.append(continuity_weight)
+    
+    # Extend data with pseudo-points
+    x_extended = np.concatenate([wvl, np.array(pseudo_x)])
+    y_extended = np.concatenate([profile, np.array(pseudo_y)])
+    weights_extended = np.concatenate([np.ones_like(wvl), np.array(pseudo_weights)])
+    
+    return x_extended, y_extended, weights_extended
+
+def two_models():
+    # fit blue and red part of profile with two different models
+    # voigt model has four Parameters: amplitude, center, sigma, and gamma, skewed:  skew
+    # skew is not helping too much..
+            voigtA = VoigtModel(prefix='A_')  # Ti I
+            pars = voigtA.make_params()
+            # voigtAParasite = VoigtModel(prefix='A_parasite_')  # Ti I
+            # pars.update(voigtAParasite.make_params())
+
+            voigtB = VoigtModel(prefix='B_')
+            pars.update(voigtB.make_params())
+            voigtC = VoigtModel(prefix='C_')
+            pars.update(voigtC.make_params())
+            voigtD = VoigtModel(prefix='D_')
+            pars.update(voigtD.make_params())
+
+            const = ConstantModel(prefix='c_')
+            pars.update(const.make_params())
+
+
+            # build model, but only fit it for specific wavelength without red wing of T
+            model_blue = voigtA  + voigtB + voigtC +  voigtD + const #+ voigtAParasite
+
+            # build model, but only fit it for specific wavelength in red wing of T
+            model_red = voigtA + const #+ voigtAParasite
+            
+            return model_blue, model_red, pars
+
 class line():
     
     def __init__(self, wvl, profile, center, width, continuum=None):
@@ -100,31 +305,9 @@ class line():
             continuum = np.nanmean(profile)  # fallback if continuum is NaN/inf
         self.continuum = continuum
 
-# fit blue and red part of profile with two different models
-# voigt model has four Parameters: amplitude, center, sigma, and gamma, skewed:  skew
-# skew is not helping too much..
-        voigtA = VoigtModel(prefix='A_')  # Ti I
-        pars = voigtA.make_params()
-        # voigtAParasite = VoigtModel(prefix='A_parasite_')  # Ti I
-        # pars.update(voigtAParasite.make_params())
-
-        voigtB = VoigtModel(prefix='B_')
-        pars.update(voigtB.make_params())
-        voigtC = VoigtModel(prefix='C_')
-        pars.update(voigtC.make_params())
-        voigtD = VoigtModel(prefix='D_')
-        pars.update(voigtD.make_params())
-
-        const = ConstantModel(prefix='c_')
-        pars.update(const.make_params())
-
+        model_blue, model_red, pars = two_models()
+        
         pars = initialize_parameter(pars, center, self.continuum)
-
-        # build model, but only fit it for specific wavelength without red wing of T
-        model_blue = voigtA  + voigtB + voigtC +  voigtD + const #+ voigtAParasite
-
-        # build model, but only fit it for specific wavelength in red wing of T
-        model_red = voigtA + const #+ voigtAParasite
 
         # find wavelength points which belong to the line
         idx_left = np.argmin(abs(self.wvl - (center-width/2.)))
@@ -190,6 +373,67 @@ class line():
         self.component_ti_red =  components_red['A_']+components_red['c_']
         
         
+class line_piecewise():
+    
+    def __init__(self, wvl, profile, center, width, continuum=None):
+        
+        self.wvl = wvl
+        
+        self.profile = profile
+        
+        if continuum is None:
+            continuum = profile[-1]  # fallback to last point of profile
+        if not np.isfinite(continuum):
+            continuum = np.nanmean(profile)  # fallback if continuum is NaN/inf
+        self.continuum = continuum
+
+        # Initialize y parameter close to center
+        model, pars = piecewise_model()
+        
+        pars = initialize_piecewise_parameter(pars, center, self.continuum)
+
+        # First fit: allow all parameters to vary with continuity penalty
+        print("--- First fit (all parameters free) ---")
+        # x_ext, y_ext, w_ext = add_continuity_pseudo_data(self.wvl, self.profile, pars, model, continuity_weight=5, epsilon=1e-5)
+        # self.out_first = model.fit(y_ext, pars, x=x_ext, weights=w_ext)
+        # print(self.out_first.fit_report())
+        
+        # # Extract centers from first fit and refine with parabola
+        # # Note: b_center is tied to r_center via expr constraint (shared center,
+        # # matching the IDL strategy), so only r_center needs to be refined/fixed.
+        # for prefix in ['ti', 'B', 'C', 'D']:
+        #     r_center_first = self.out_first.params[prefix+'_r_center'].value
+            
+        #     # Refine center using parabolic fitting around the profile minimum
+        #     r_center_refined = refine_center_with_parabola(self.wvl, self.profile, r_center_first)
+            
+        #     # Fix r_center for second fit; b_center follows automatically via expr
+        #     pars[prefix+'_r_center'].value = r_center_refined
+        #     pars[prefix+'_r_center'].vary = False
+        #     pars[prefix+'_y'].value = r_center_refined
+        #     pars[prefix+'_y'].vary = False
+            
+        #     print(f"{prefix}: r_center={r_center_refined:.4f}")
+        
+        # Second fit: with fixed centers and continuity penalty
+       # print("--- Second fit (centers fixed) ---")
+       # x_ext2, y_ext2, w_ext2 = add_continuity_pseudo_data(self.wvl, self.profile, pars, model, continuity_weight=5, epsilon=1e-3)
+        self.out = model.fit(self.profile, pars, x=self.wvl)#, weights=w_ext2)
+        print(self.out.fit_report())
+        
+        # Evaluate the best fit on the original wavelength array (without pseudo-points)
+        self.best_fit = model.eval(self.out.params, x=self.wvl)
+        
+        # Extract components (each prefix already combines blue+red internally)
+        components = self.out.eval_components(x=self.wvl)
+        
+        # Ti component
+        self.component_ti = components['ti_']+ components['c_']
+        
+        # Parasitic components
+        self.component_residual = components['B_'] + components['C_'] + components['D_']+ components['c_']
+        
+        
 
 ###########################
 #
@@ -241,14 +485,18 @@ line_color4 = 'indigo'
 
 intergranule_idx = 39
 granule_idx = 17
-
+#%%
 intergranule = line( wavelengthscale, si[intergranule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[intergranule_idx])
 granule = line( wavelengthscale, si[granule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[granule_idx])
-
-
+#%%
+intergranule =  line_piecewise( wavelengthscale, si[intergranule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[intergranule_idx])
+granule =  line_piecewise( wavelengthscale, si[granule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[granule_idx])
 # components_intergranule = out_intergranule.eval_components(x=wavelengthscale)
 # components_granule = out_granule.eval_components(x=wavelengthscale)
-
+#%%
+# Evaluate the initial model guess (before fitting) for diagnostic plotting
+initial_guess = get_initial_piecewise_fit(wavelengthscale, ti_center_wl, continuum[intergranule_idx])
+plt.plot(wavelengthscale,initial_guess)
 #%%
   # --------------------------------------------------------
   # PLOT STARTS
@@ -292,21 +540,29 @@ ax.get_xaxis().set_visible(False)
   
 ax1=f.add_subplot(gs[1,0])  
 
-ax1.plot( granule.wvl, granule.profile, color=line_color4, marker='+',linestyle='None', label = 'Granule') 
-ax1.plot( granule.wvl_blue[:-2], granule.out_blue.best_fit[:-2], '-', color='blue', label='best fit granule blue')
-ax1.plot( granule.wvl_red[2:], granule.out_red.best_fit[2:], '-', color='red', label='best fit granule red')
-ax1.plot( granule.wvl_blue[:-2], granule.component_ti_blue[:-2], '-', marker='.', color='blue', label='best fit granule, Ti')
-ax1.plot( granule.wvl_red[2:], granule.component_ti_red[2:],'-',  marker='.', color='red')
+ax1.plot( granule.wvl, granule.profile, color=line_color4, marker='+',linestyle='None', label = 'granule data') 
+# ax1.plot( granule.wvl_blue[:-2], granule.out_blue.best_fit[:-2], '-', color='blue', label='best fit granule blue')
+# ax1.plot( granule.wvl_red[2:], granule.out_red.best_fit[2:], '-', color='red', label='best fit granule red')
+ax1.plot( granule.wvl, granule.best_fit, '-', color=line_color4, label='best fit granule')
+ax1.plot( granule.wvl, initial_guess, '--', color='gray', label='initial guess')
+
 # ax1.plot(wavelengthscale, components_granule_red['A_']+components_granule['c_'], '-', color='blue', label='best fit granule, Ti')
 # ax1.plot(wavelengthscale, components_granule_blue['A_']+components_granule['c_'], '-', color='magenta', label='best fit granule, Ti')
 
+ax1.plot( granule.wvl, granule.component_ti, '-', marker='.', color='red', label='best fit granule, Ti')
+ax1.plot( granule.wvl, granule.component_residual,'-', color='red', alpha=0.2,label='best fit granule, residuals')
+
+ax1.plot(intergranule.wvl, intergranule.profile, color=line_color2, marker='+',linestyle='None', label = 'intergranule, data') 
+ax1.plot( intergranule.wvl, intergranule.best_fit, '-', color=line_color2, label='best fit intergranule')
+
+ax1.plot( intergranule.wvl, intergranule.component_ti, '-', marker='.', color='magenta', label='best fit intergranule, Ti')
+ax1.plot( intergranule.wvl, intergranule.component_residual,'-', color='magenta', alpha=0.2,label='best fit intergranule, residuals')
 
 
-ax1.plot(intergranule.wvl, intergranule.profile, color=line_color2, marker='+',linestyle='None', label = 'Intergranule') 
-ax1.plot( intergranule.wvl_blue[:-2], intergranule.out_blue.best_fit[:-2], '-', color='blue', label='best fit intergranule blue')
-ax1.plot( intergranule.wvl_red[2:], intergranule.out_red.best_fit[2:], '-', color='red', label='best fit intergranule red')
-ax1.plot( intergranule.wvl_blue[:-2], intergranule.component_ti_blue[:-2], '-', marker='.', color='green', label='best fit intergranule, Ti')
-ax1.plot( intergranule.wvl_red[2:], intergranule.component_ti_red[2:],'-',  marker='.', color='magenta')
+# ax1.plot( intergranule.wvl_blue[:-2], intergranule.out_blue.best_fit[:-2], '-', color='blue', label='best fit intergranule blue')
+# ax1.plot( intergranule.wvl_red[2:], intergranule.out_red.best_fit[2:], '-', color='red', label='best fit intergranule red')
+# ax1.plot( intergranule.wvl_blue[:-2], intergranule.component_ti_blue[:-2], '-', marker='.', color='green', label='best fit intergranule, Ti')
+# ax1.plot( intergranule.wvl_red[2:], intergranule.component_ti_red[2:],'-',  marker='.', color='magenta')
 # ax1.plot(wavelengthscale, si[0,:].mean(axis=0), color='black', label = 'Spatial mean') 
 
 ax.axhline(y=intergranule_idx, color=line_color2, linewidth=1, linestyle='dotted')
