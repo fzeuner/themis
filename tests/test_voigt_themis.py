@@ -153,17 +153,26 @@ def initialize_piecewise_parameter(params, center, continuum):
 
 
 def _piecewise_voigt_func(x, y, r_amplitude, r_center, r_sigma, r_gamma,
-                           b_amplitude, b_center, b_sigma, b_gamma):
+                           b_amplitude, b_center, b_sigma, b_gamma,
+                           transition_width=0.005):
     # Two independent Voigt profiles, selected pointwise by wavelength x
     # relative to the split point y (blue side: x < y, red side: x >= y)
     voigt_r = voigt_lineshape(x, r_amplitude, r_center, r_sigma, r_gamma)
     voigt_b = voigt_lineshape(x, b_amplitude, b_center, b_sigma, b_gamma)
     return np.where(x < y, voigt_b, voigt_r)
 
+    # Smooth (sigmoid) blend alternative, kept for reference:
+    # A tanh blend (instead of a hard np.where cutoff) avoids introducing
+    # a discontinuity when the blue/red amplitude, sigma, or gamma differ,
+    # which otherwise shows up as visible "kinks" when summing components.
+    # frac_red = 0.5 * (1 + np.tanh((x - y) / transition_width))
+    # return (1 - frac_red) * voigt_b + frac_red * voigt_r
+
 def piecewise_voigt(prefix='line'): # fit y, the point where the split should appear
     model = Model(_piecewise_voigt_func, independent_vars=['x'], prefix=prefix+'_',
                   param_names=['y', 'r_amplitude', 'r_center', 'r_sigma', 'r_gamma',
-                               'b_amplitude', 'b_center', 'b_sigma', 'b_gamma'])
+                               'b_amplitude', 'b_center', 'b_sigma', 'b_gamma'],
+                  )
     return model
 
 
@@ -192,76 +201,17 @@ def get_initial_piecewise_fit(wvl, center, continuum):
     initial_fit = model.eval(pars, x=wvl)
     return initial_fit
 
-def refine_center_with_parabola(wvl, profile, center_guess, half_width=5):
-    """Refine the center by fitting a parabola around the approximate minimum."""
-    idx_center_approx = np.argmin(np.abs(wvl - center_guess))
-    idx_parabola_left = max(0, idx_center_approx - half_width)
-    idx_parabola_right = min(len(wvl), idx_center_approx + half_width)
-    
-    wvl_parabola = wvl[idx_parabola_left:idx_parabola_right]
-    profile_parabola = profile[idx_parabola_left:idx_parabola_right]
-    
-    # Fit 2nd degree polynomial: p(wvl) = a*wvl^2 + b*wvl + c
-    # The minimum is at wvl = -b/(2*a)
-    poly_coefs = np.polyfit(wvl_parabola, profile_parabola, 2)
-    a, b, c = poly_coefs
-    if a > 0:  # parabola opens upward, minimum exists
-        wvl_min_parabola = -b / (2 * a)
-    else:
-        # Fallback to approximate minimum if parabola doesn't have a minimum
-        wvl_min_parabola = wvl[idx_center_approx]
-    
-    return wvl_min_parabola
-
-def add_continuity_pseudo_data(wvl, profile, params, model, continuity_weight=10, epsilon=1e-4):
-    """Add pseudo-data points to penalize discontinuities at split points.
-    
-    For each component, adds two pseudo-points very close to the split point y:
-    - One slightly below y (evaluates blue side)
-    - One slightly above y (evaluates red side)
-    Both have the same target value (the average), forcing continuity.
+def add_overlap_weights(wvl, params, base_weight=1.0, boost=3, boost_width=0.008): # keep boost_width small
+    """Build a weights array that upweights the region around each component's
+    split point y, where blue/red wings and neighboring components overlap
+    the most. Use as `weights=` in model.fit().
     """
-    pseudo_x = []
-    pseudo_y = []
-    pseudo_weights = []
-    
-    # Get constant background value
-    const_value = params['c_c'].value
-    
+    weights = np.full_like(wvl, base_weight, dtype=float)
     for prefix in ['ti', 'B', 'C', 'D']:
         y_split = params[prefix+'_y'].value
-        
-        # Evaluate both Voigt profiles at the split point
-        voigt_r = voigt_lineshape(y_split, 
-                                   params[prefix+'_r_amplitude'].value,
-                                   params[prefix+'_r_center'].value,
-                                   params[prefix+'_r_sigma'].value,
-                                   params[prefix+'_r_gamma'].value)
-        voigt_b = voigt_lineshape(y_split,
-                                   params[prefix+'_b_amplitude'].value,
-                                   params[prefix+'_b_center'].value,
-                                   params[prefix+'_b_sigma'].value,
-                                   params[prefix+'_b_gamma'].value)
-        
-        # Target is the average plus constant - encourages both sides to converge to the same value
-        target_value = (voigt_r + voigt_b) / 2 + const_value
-        
-        # Add pseudo-point slightly below y (will evaluate blue side)
-        pseudo_x.append(y_split - epsilon)
-        pseudo_y.append(target_value)
-        pseudo_weights.append(continuity_weight)
-        
-        # Add pseudo-point slightly above y (will evaluate red side)
-        pseudo_x.append(y_split + epsilon)
-        pseudo_y.append(target_value)
-        pseudo_weights.append(continuity_weight)
-    
-    # Extend data with pseudo-points
-    x_extended = np.concatenate([wvl, np.array(pseudo_x)])
-    y_extended = np.concatenate([profile, np.array(pseudo_y)])
-    weights_extended = np.concatenate([np.ones_like(wvl), np.array(pseudo_weights)])
-    
-    return x_extended, y_extended, weights_extended
+        mask = np.abs(wvl - y_split) <= boost_width
+        weights[mask] = np.maximum(weights[mask], boost)
+    return weights
 
 def two_models():
     # fit blue and red part of profile with two different models
@@ -392,40 +342,15 @@ class line_piecewise():
         
         pars = initialize_piecewise_parameter(pars, center, self.continuum)
 
-        # First fit: allow all parameters to vary with continuity penalty
-        print("--- First fit (all parameters free) ---")
-        # x_ext, y_ext, w_ext = add_continuity_pseudo_data(self.wvl, self.profile, pars, model, continuity_weight=5, epsilon=1e-5)
-        # self.out_first = model.fit(y_ext, pars, x=x_ext, weights=w_ext)
-        # print(self.out_first.fit_report())
-        
-        # # Extract centers from first fit and refine with parabola
-        # # Note: b_center is tied to r_center via expr constraint (shared center,
-        # # matching the IDL strategy), so only r_center needs to be refined/fixed.
-        # for prefix in ['ti', 'B', 'C', 'D']:
-        #     r_center_first = self.out_first.params[prefix+'_r_center'].value
-            
-        #     # Refine center using parabolic fitting around the profile minimum
-        #     r_center_refined = refine_center_with_parabola(self.wvl, self.profile, r_center_first)
-            
-        #     # Fix r_center for second fit; b_center follows automatically via expr
-        #     pars[prefix+'_r_center'].value = r_center_refined
-        #     pars[prefix+'_r_center'].vary = False
-        #     pars[prefix+'_y'].value = r_center_refined
-        #     pars[prefix+'_y'].vary = False
-            
-        #     print(f"{prefix}: r_center={r_center_refined:.4f}")
-        
-        # Second fit: with fixed centers and continuity penalty
-       # print("--- Second fit (centers fixed) ---")
-       # x_ext2, y_ext2, w_ext2 = add_continuity_pseudo_data(self.wvl, self.profile, pars, model, continuity_weight=5, epsilon=1e-3)
-        self.out = model.fit(self.profile, pars, x=self.wvl)#, weights=w_ext2)
+        # Upweight the region around each component's split point y, where
+        # blue/red wings and neighboring components overlap the most.
+        weights = add_overlap_weights(self.wvl, pars)
+        self.out = model.fit(self.profile, pars, x=self.wvl, weights=weights)
         print(self.out.fit_report())
         
-        # Evaluate the best fit on the original wavelength array (without pseudo-points)
+        # Evaluate the best fit and components on the original wavelength array
         self.best_fit = model.eval(self.out.params, x=self.wvl)
-        
-        # Extract components (each prefix already combines blue+red internally)
-        components = self.out.eval_components(x=self.wvl)
+        components = model.eval_components(params=self.out.params, x=self.wvl)
         
         # Ti component
         self.component_ti = components['ti_']+ components['c_']
@@ -449,19 +374,16 @@ intmeth = 'none' # imshow integration method
 
 # -----------------------------
 spectra = SpectrumContainer.load_all()
-res = spectra['ti']['disk_center'].residual.data[0:,300,20:100]
-r_w = spectra['ti']['disk_center'].residual.wvl[0:]
-li = spectra['ti']['disk_center'].line.data[:,300,20:100]
-l_w =  spectra['ti']['disk_center'].line.wvl
+wvl_nm, si_full = spectra['ti']['disk_center'].reconstruct(('residual', 'line'))
+si = si_full[:, 300, 20:100]
 
 continuum = np.nanmean(spectra['ti']['disk_center'].continuum.data[:,300,20:100], axis=0)
-si=np.concatenate((res,li))
 
 # -----------------------------
 si = np.transpose(si)
 image_sz=np.array(si.shape)
 
-wavelengthscale=10*np.concatenate((r_w,l_w)) # in A!
+wavelengthscale=10*wvl_nm # in A!
 
 # -----------------------------
  

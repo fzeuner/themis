@@ -364,6 +364,50 @@ class Spectrum:
     def __repr__(self):
         return f"Spectrum(continuum, line, residual)"
 
+    def reconstruct(self, parts=('residual', 'line', 'continuum')):
+        """
+        Reconstruct a combined spectrum from the given parts, concatenating
+        their wavelength/data arrays and removing any duplicate wavelength
+        pixels that arise where parts intentionally overlap at their boundary
+        (e.g. residual/line share a few pixels for fit continuity).
+
+        Args:
+            parts: sequence of attribute names to combine, in any order,
+                   e.g. ('residual', 'line') or ('line', 'continuum').
+
+        Returns:
+            (wvl, data): wavelength array (sorted, unique) and the
+            corresponding data array (same axis-0 ordering), or (None, None)
+            if none of the requested parts have data.
+        """
+        wvl_list = []
+        data_list = []
+        for part_name in parts:
+            part = getattr(self, part_name, None)
+            if part is None or part.data is None:
+                continue
+            wvl_list.append(part.wvl)
+            data_list.append(part.data)
+
+        if not wvl_list:
+            return None, None
+
+        wvl_concat = np.concatenate(wvl_list)
+        data_concat = np.concatenate(data_list, axis=0)
+
+        # Sort by wavelength, then keep only the first occurrence of each
+        # unique wavelength value (duplicates come from intentionally
+        # overlapping part boundaries, not floating-point noise, since all
+        # parts are sliced from the same original wavelength array).
+        sort_idx = np.argsort(wvl_concat)
+        wvl_sorted = wvl_concat[sort_idx]
+        data_sorted = data_concat[sort_idx]
+
+        wvl_unique, unique_idx = np.unique(wvl_sorted, return_index=True)
+        data_unique = data_sorted[unique_idx]
+
+        return wvl_unique, data_unique
+
     def save(self, filepath, config_path=None, sequence=None, python_file=None):
         """
         Save each SpectrumPart to separate FITS files.
