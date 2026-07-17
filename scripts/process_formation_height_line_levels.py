@@ -1057,11 +1057,24 @@ def load_l4_for_position(line: str, position: str):
     config = get_config(
         line=line,
         config_path=CONFIG_PATH,
-        auto_discover_files=True,
+        auto_discover_files=False,  # Don't auto-discover yet
         auto_create_dirs=False
     )
     # Override sequence for this position
     config.dataset['scan']['sequence'] = sequence
+
+    # Now discover files with the correct sequence
+    from themis.datasets.themis_datasets_2025 import _build_file_set
+    config.dataset['scan']['files'] = _build_file_set(
+        config.directories,
+        config.dataset['scan'],
+        config.data_types,
+        config.reduction_levels,
+        config.cam,
+        config.line,
+        yshift_calibration_date=config.yshift_calibration_date,
+    )
+
     return tio.read_any_file(config, data_type='scan', status='l4')
 
 

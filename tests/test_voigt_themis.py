@@ -91,12 +91,26 @@ def initialize_parameter(params, ti_center_wl, continuum):
 def initialize_piecewise_parameter(params, center, continuum):
    
     params['ti_r_amplitude'].value= -0.08
+    params['ti_r_amplitude'].min= -0.1
+    params['ti_r_amplitude'].max= -0.03
+    
     params['ti_b_amplitude'].value= -0.08
+    params['ti_b_amplitude'].min= -0.1
+    params['ti_b_amplitude'].max= -0.03
+    
     params['ti_r_center'].value = center
     params['ti_r_center'].vary = True
+    params['ti_r_center'].min = center - 0.005
+    params['ti_r_center'].max = center + 0.005
     params['ti_b_center'].expr = 'ti_r_center'
+    
     params['ti_r_sigma'].value= 0.03
     params['ti_b_sigma'].value= 0.03
+    params['ti_r_sigma'].max= 0.05
+    params['ti_b_sigma'].max= 0.05
+    params['ti_r_sigma'].min= 0.01
+    params['ti_b_sigma'].min= 0.01
+    
     params['ti_b_gamma'].value= 0.03
     params['ti_r_gamma'].value= 0.03
     params['ti_r_gamma'].min = 0.001
@@ -109,39 +123,73 @@ def initialize_piecewise_parameter(params, center, continuum):
   
     params['B_r_amplitude'].value= -0.09
     params['B_b_amplitude'].value= -0.09
+    params['B_r_amplitude'].max= -0.03
+    params['B_r_amplitude'].min= -0.1
+    params['B_b_amplitude'].max= -0.03
+    params['B_b_amplitude'].min= -0.1
+    
     params['B_r_center'].value = 4536.268
     params['B_r_center'].vary = True
     params['B_b_center'].expr = 'B_r_center'
+    
     params['B_r_sigma'].value= 0.03
     params['B_b_sigma'].value= 0.03
+    params['B_r_sigma'].max= 0.05
+    params['B_b_sigma'].max= 0.05
+    params['B_r_sigma'].min= 0.01
+    params['B_b_sigma'].min= 0.01
+    
     params['B_r_gamma'].value= 0.03
     params['B_b_gamma'].value= 0.03
     params['B_r_gamma'].min = 0.001
     params['B_r_gamma'].max = 0.09
     params['B_b_gamma'].min = 0.001
     params['B_b_gamma'].max = 0.09
+    
     params['B_y'].expr = 'B_r_center'
     
     params['C_r_amplitude'].value= -0.09
     params['C_b_amplitude'].value= -0.09
+    
     params['C_r_center'].value = 4536.050
     params['C_r_center'].vary = True
     params['C_b_center'].expr = 'C_r_center'
+    
     params['C_r_sigma'].value= 0.03
     params['C_b_sigma'].value= 0.03
+    params['C_r_sigma'].max= 0.05
+    params['C_b_sigma'].max= 0.05
+    params['C_r_sigma'].min= 0.01
+    params['C_b_sigma'].min= 0.01
+    
     params['C_r_gamma'].value= 0.03
     params['C_b_gamma'].value= 0.03
+    params['C_r_gamma'].min = 0.001
+    params['C_r_gamma'].max = 0.09
+    params['C_b_gamma'].min = 0.001
+    params['C_b_gamma'].max = 0.09
     params['C_y'].expr = 'C_r_center'
     
     params['D_r_amplitude'].value= -0.09
     params['D_b_amplitude'].value= -0.09
+    
     params['D_r_center'].value = 4535.9
     params['D_r_center'].vary = True
     params['D_b_center'].expr = 'D_r_center'
+    
     params['D_r_sigma'].value= 0.03
     params['D_b_sigma'].value= 0.03
+    params['D_r_sigma'].max= 0.05
+    params['D_b_sigma'].max= 0.05
+    params['D_r_sigma'].min= 0.01
+    params['D_b_sigma'].min= 0.01
+    
     params['D_r_gamma'].value= 0.03
     params['D_b_gamma'].value= 0.03
+    params['D_r_gamma'].min = 0.001
+    params['D_r_gamma'].max = 0.09
+    params['D_b_gamma'].min = 0.001
+    params['D_b_gamma'].max = 0.09
     params['D_y'].expr = 'D_r_center'
     
     params['c_c'].value= continuum
@@ -298,10 +346,10 @@ class line():
 
 
         self.out_blue = model_blue.fit(self.profile_blue, pars, x=self.wvl_blue)
-        
+
         # Print final parameters of blue fit
         print("--- Blue fit parameters ---")
-        print(self.out_blue.fit_report())
+        print(self.out_blue.fit_report(show_correl=False))
         
        
         components_blue = self.out_blue.eval_components(x=self.wvl_blue)
@@ -314,39 +362,62 @@ class line():
         components_blue_full = self.out_blue.eval_components(x=self.wvl)
         self.new_profile = self.profile - (components_blue_full['B_']+components_blue_full['C_']  +components_blue_full['D_'])
         self.out_red_ti = model_red.fit(self.new_profile[idx_left+self.idx_center-pixel_overlap:], pars, x=self.wvl_red ) # only red part of new profile
-        
+
         # Print final parameters of red fit
         print("--- Red fit parameters ---")
-        print(self.out_red_ti.fit_report())
+        print(self.out_red_ti.fit_report(show_correl=False))
         
         components_red = self.out_red_ti.eval_components(x=self.wvl_red)
         self.component_ti_red =  components_red['A_']+components_red['c_']
         
         
 class line_piecewise():
-    
+
     def __init__(self, wvl, profile, center, width, continuum=None):
-        
+
         self.wvl = wvl
-        
+
         self.profile = profile
-        
+
         if continuum is None:
             continuum = profile[-1]  # fallback to last point of profile
         if not np.isfinite(continuum):
             continuum = np.nanmean(profile)  # fallback if continuum is NaN/inf
         self.continuum = continuum
 
+        # Refine center using parabola fit (like in line class)
+        idx_left = np.argmin(abs(self.wvl - (center-width/2.)))
+        idx_right = np.argmin(abs(self.wvl - (center+width/2.)))
+
+        # find approximate center of the line
+        idx_center_approx = np.argmin(self.profile[idx_left:idx_right])
+
+        # Refine the minimum by fitting a parabola
+        parabola_half_width = 5
+        idx_parabola_left = max(idx_left, idx_left + idx_center_approx - parabola_half_width)
+        idx_parabola_right = min(idx_right, idx_left + idx_center_approx + parabola_half_width)
+
+        wvl_parabola = self.wvl[idx_parabola_left:idx_parabola_right]
+        profile_parabola = self.profile[idx_parabola_left:idx_parabola_right]
+
+        poly_coefs = np.polyfit(wvl_parabola, profile_parabola, 2)
+        a, b, c = poly_coefs
+        if a > 0:
+            center_refined = -b / (2 * a)
+        else:
+            center_refined = self.wvl[idx_left + idx_center_approx]
+
         # Initialize y parameter close to center
         model, pars = piecewise_model()
-        
-        pars = initialize_piecewise_parameter(pars, center, self.continuum)
+
+
+        pars = initialize_piecewise_parameter(pars, center_refined, self.continuum)
 
         # Upweight the region around each component's split point y, where
         # blue/red wings and neighboring components overlap the most.
         weights = add_overlap_weights(self.wvl, pars)
         self.out = model.fit(self.profile, pars, x=self.wvl, weights=weights)
-        print(self.out.fit_report())
+        print(self.out.fit_report(show_correl=False))
         
         # Evaluate the best fit and components on the original wavelength array
         self.best_fit = model.eval(self.out.params, x=self.wvl)
@@ -407,9 +478,6 @@ line_color4 = 'indigo'
 
 intergranule_idx = 39
 granule_idx = 17
-#%%
-intergranule = line( wavelengthscale, si[intergranule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[intergranule_idx])
-granule = line( wavelengthscale, si[granule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[granule_idx])
 #%%
 intergranule =  line_piecewise( wavelengthscale, si[intergranule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[intergranule_idx])
 granule =  line_piecewise( wavelengthscale, si[granule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[granule_idx])
@@ -573,4 +641,75 @@ plt.savefig('/home/franziskaz/figures/themis/test_voigt_themis-blend.png'
 
 
 
+#%%
+# try to understand how sensitive the fitting is to the noise
+#noise level from continuum:
+spectra['ti']['30'].continuum.data.std(axis=0).mean()
 
+# Use the best_fit from line_piecewise as reference (includes full pipeline: weights + parabola)
+reference = intergranule.best_fit 
+reference_ti = intergranule.component_ti
+
+# add noise 100 different realizations per noise level (Gaussian) and fit each realization.
+# compare  component_ti from reference and calculate absolute difference of profiles
+# plot abs difference of profiles versus noise
+noise_levels = [0.001, 0.01,  0.1]
+n_realizations = 30
+
+# Store results
+mean_diffs = []
+std_diffs = []
+
+# Get reference wavelength and continuum
+wvl_ref = intergranule.wvl
+continuum_ref = continuum[intergranule_idx]
+
+for noise_std in noise_levels:
+    diffs = []
+    for i in range(n_realizations):
+        # Add Gaussian noise to reference
+        noisy_profile = reference + np.random.normal(0, noise_std, size=reference.shape)
+
+        # Fit the noisy profile using full line_piecewise pipeline
+        try:
+            noisy_fit = line_piecewise(wvl_ref, noisy_profile, ti_center_wl, spec_region_width, continuum=continuum_ref)
+
+            # Calculate absolute difference of Ti component
+            diff = np.abs(noisy_fit.component_ti - reference_ti)
+            diffs.append(np.mean(diff))
+        except Exception as e:
+            print(f"  Realization {i} failed for noise {noise_std}: {e}")
+            continue
+
+    if diffs:
+        mean_diffs.append(np.mean(diffs))
+        std_diffs.append(np.std(diffs))
+        print(f"Noise {noise_std}: mean diff = {mean_diffs[-1]:.6f}, std = {std_diffs[-1]:.6f}")
+    else:
+        mean_diffs.append(np.nan)
+        std_diffs.append(np.nan)
+#%%
+# Plot results
+f = plt.figure(num=4)
+f.set_size_inches(fig_size, forward=True)
+plt.clf()
+
+ax = f.add_subplot(1, 1, 1)
+ax.errorbar(noise_levels, mean_diffs, yerr=std_diffs, fmt='o-', capsize=5, label='Mean absolute difference')
+ax.set_xlabel('Noise standard deviation')
+ax.set_ylabel('Mean absolute difference between fitted and reference')
+ax.set_title('Fitting sensitivity to Gaussian noise')
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('/home/franziskaz/figures/themis/test_voigt_themis-noise-sensitivity.png', dpi=my_dpi, metadata={'Software': __file__})
+
+#%%
+plt.plot(noisy_fit.best_fit)
+plt.plot(noisy_profile)
+plt.plot(reference)
+
+#%%
+plt.plot(noisy_fit.component_ti)
+plt.plot(intergranule.component_ti)
