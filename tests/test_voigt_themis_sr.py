@@ -4,7 +4,8 @@
 
 @author: franziskaz
 
-test the piecewise voigt fitting for ti
+test piecewise voigt fitting for sr
+
 """
 
 
@@ -31,148 +32,80 @@ from lmfit.models import ConstantModel
 from lmfit import Model
 from lmfit.lineshapes import voigt as voigt_lineshape
 
-from process_formation_height_line_levels import SpectrumContainer
+from process_formation_height_line_levels import SpectrumContainer, refine_center_with_parabola
 
 ###################
 # Definitions
 ###################
 
-# Helper function for parabola-based center initialization
-def refine_center_with_parabola(wvl, profile, center_guess, search_width=0.07):
-    """
-    Refine a component center using parabola fitting.
+def initialize_piecewise_parameter(params, center, continuum, wvl=None, profile=None):
 
-    Args:
-        wvl: Wavelength array
-        profile: Intensity profile
-        center_guess: Initial guess for the center (in Angstrom)
-        search_width: Search range around the guess (in Angstrom)
+    params['sr_r_amplitude'].value= -0.08
+    params['sr_r_amplitude'].min= -0.1
+    params['sr_r_amplitude'].max= -0.03
 
-    Returns:
-        Refined center position, or center_guess if refinement fails
-    """
-    idx_left = np.argmin(abs(wvl - (center_guess - search_width)))
-    idx_right = np.argmin(abs(wvl - (center_guess + search_width)))
-    if idx_left < idx_right:
-        idx_center_approx = np.argmin(profile[idx_left:idx_right])
-        parabola_half_width = 5
-        idx_parabola_left = max(idx_left, idx_left + idx_center_approx - parabola_half_width)
-        idx_parabola_right = min(idx_right, idx_left + idx_center_approx + parabola_half_width)
-        if idx_parabola_right > idx_parabola_left:
-            wvl_parabola = wvl[idx_parabola_left:idx_parabola_right]
-            profile_parabola = profile[idx_parabola_left:idx_parabola_right]
-            poly_coefs = np.polyfit(wvl_parabola, profile_parabola, 2)
-            a, b, c = poly_coefs
-            if a > 0:
-                return -b / (2 * a)
-    return center_guess
+    params['sr_b_amplitude'].value= -0.08
+    params['sr_b_amplitude'].min= -0.1
+    params['sr_b_amplitude'].max= -0.03
 
+    params['sr_r_center'].value = center
+    params['sr_r_center'].vary = True
+    params['sr_r_center'].min = center - 0.005
+    params['sr_r_center'].max = center + 0.005
+    params['sr_b_center'].expr = 'sr_r_center'
 
+    params['sr_r_sigma'].value= 0.03
+    params['sr_b_sigma'].value= 0.03
+    params['sr_r_sigma'].max= 0.05
+    params['sr_b_sigma'].max= 0.05
+    params['sr_r_sigma'].min= 0.01
+    params['sr_b_sigma'].min= 0.01
 
-def initialize_piecewise_parameter(params, center, continuum):
-   
-    params['ti_r_amplitude'].value= -0.08
-    params['ti_r_amplitude'].min= -0.1
-    params['ti_r_amplitude'].max= -0.03
-    
-    params['ti_b_amplitude'].value= -0.08
-    params['ti_b_amplitude'].min= -0.1
-    params['ti_b_amplitude'].max= -0.03
-    
-    params['ti_r_center'].value = center
-    params['ti_r_center'].vary = True
-    params['ti_r_center'].min = center - 0.005
-    params['ti_r_center'].max = center + 0.005
-    params['ti_b_center'].expr = 'ti_r_center'
-    
-    params['ti_r_sigma'].value= 0.03
-    params['ti_b_sigma'].value= 0.03
-    params['ti_r_sigma'].max= 0.05
-    params['ti_b_sigma'].max= 0.05
-    params['ti_r_sigma'].min= 0.01
-    params['ti_b_sigma'].min= 0.01
-    
-    params['ti_b_gamma'].value= 0.03
-    params['ti_r_gamma'].value= 0.03
-    params['ti_r_gamma'].min = 0.001
-    params['ti_r_gamma'].max = 0.09
-    params['ti_b_gamma'].min = 0.001
-    params['ti_b_gamma'].max = 0.09
+    params['sr_b_gamma'].value= 0.03
+    params['sr_r_gamma'].value= 0.03
+    params['sr_r_gamma'].min = 0.001
+    params['sr_r_gamma'].max = 0.09
+    params['sr_b_gamma'].min = 0.001
+    params['sr_b_gamma'].max = 0.09
     # Initialize y to the center for each component
-    params['ti_y'].expr = 'ti_r_center'
+    params['sr_y'].expr = 'sr_r_center'
 
-  
+
     params['B_r_amplitude'].value= -0.09
     params['B_b_amplitude'].value= -0.09
     params['B_r_amplitude'].max= -0.03
     params['B_r_amplitude'].min= -0.1
     params['B_b_amplitude'].max= -0.03
     params['B_b_amplitude'].min= -0.1
-    
-    params['B_r_center'].value = 4536.268
+
+    # Use parabola-based initialization for B component center if wvl and profile are provided
+    b_center_guess = 4607.65
+    if wvl is not None and profile is not None:
+        b_center_refined = refine_center_with_parabola(wvl, profile, b_center_guess, search_width=0.07)
+        params['B_r_center'].value = b_center_refined
+    else:
+        params['B_r_center'].value = b_center_guess
+
     params['B_r_center'].vary = True
     params['B_b_center'].expr = 'B_r_center'
-    
+
     params['B_r_sigma'].value= 0.03
     params['B_b_sigma'].value= 0.03
     params['B_r_sigma'].max= 0.05
     params['B_b_sigma'].max= 0.05
     params['B_r_sigma'].min= 0.01
     params['B_b_sigma'].min= 0.01
-    
+
     params['B_r_gamma'].value= 0.03
     params['B_b_gamma'].value= 0.03
     params['B_r_gamma'].min = 0.001
     params['B_r_gamma'].max = 0.09
     params['B_b_gamma'].min = 0.001
     params['B_b_gamma'].max = 0.09
-    
+
     params['B_y'].expr = 'B_r_center'
-    
-    params['C_r_amplitude'].value= -0.09
-    params['C_b_amplitude'].value= -0.09
-    
-    params['C_r_center'].value = 4536.050
-    params['C_r_center'].vary = True
-    params['C_b_center'].expr = 'C_r_center'
-    
-    params['C_r_sigma'].value= 0.03
-    params['C_b_sigma'].value= 0.03
-    params['C_r_sigma'].max= 0.05
-    params['C_b_sigma'].max= 0.05
-    params['C_r_sigma'].min= 0.01
-    params['C_b_sigma'].min= 0.01
-    
-    params['C_r_gamma'].value= 0.03
-    params['C_b_gamma'].value= 0.03
-    params['C_r_gamma'].min = 0.001
-    params['C_r_gamma'].max = 0.09
-    params['C_b_gamma'].min = 0.001
-    params['C_b_gamma'].max = 0.09
-    params['C_y'].expr = 'C_r_center'
-    
-    params['D_r_amplitude'].value= -0.09
-    params['D_b_amplitude'].value= -0.09
-    
-    params['D_r_center'].value = 4535.9
-    params['D_r_center'].vary = True
-    params['D_b_center'].expr = 'D_r_center'
-    
-    params['D_r_sigma'].value= 0.03
-    params['D_b_sigma'].value= 0.03
-    params['D_r_sigma'].max= 0.05
-    params['D_b_sigma'].max= 0.05
-    params['D_r_sigma'].min= 0.01
-    params['D_b_sigma'].min= 0.01
-    
-    params['D_r_gamma'].value= 0.03
-    params['D_b_gamma'].value= 0.03
-    params['D_r_gamma'].min = 0.001
-    params['D_r_gamma'].max = 0.09
-    params['D_b_gamma'].min = 0.001
-    params['D_b_gamma'].max = 0.09
-    params['D_y'].expr = 'D_r_center'
-    
+
+
     params['c_c'].value= continuum
     params['c_c'].vary = False
     params['c_c'].min = continuum*0.9
@@ -207,19 +140,15 @@ def piecewise_voigt(prefix='line'): # fit y, the point where the split should ap
 
 def piecewise_model():
     
-    voigt_ti = piecewise_voigt(prefix='ti')  # Ti I 
-    pars = voigt_ti.make_params()
+    voigt_sr = piecewise_voigt(prefix='sr')  # Sr I 
+    pars = voigt_sr.make_params()
     voigtB = piecewise_voigt(prefix='B')
     pars.update(voigtB.make_params())
-    voigtC = piecewise_voigt(prefix='C')
-    pars.update(voigtC.make_params())
-    voigtD = piecewise_voigt(prefix='D')
-    pars.update(voigtD.make_params())
     
     const = ConstantModel(prefix='c_')
     pars.update(const.make_params())
     
-    model = voigt_ti + voigtB + voigtC + voigtD + const
+    model = voigt_sr + voigtB + const
     
     return model, pars
 
@@ -229,7 +158,7 @@ def add_overlap_weights(wvl, params, base_weight=1.0, boost=3, boost_width=0.008
     the most. Use as `weights=` in model.fit().
     """
     weights = np.full_like(wvl, base_weight, dtype=float)
-    for prefix in ['ti', 'B', 'C', 'D']:
+    for prefix in ['sr', 'B']:
         y_split = params[prefix+'_y'].value
         mask = np.abs(wvl - y_split) <= boost_width
         weights[mask] = np.maximum(weights[mask], boost)
@@ -276,7 +205,7 @@ class line_piecewise():
         model, pars = piecewise_model()
 
 
-        pars = initialize_piecewise_parameter(pars, center_refined, self.continuum)
+        pars = initialize_piecewise_parameter(pars, center_refined, self.continuum, wvl=self.wvl, profile=self.profile)
 
         # Upweight the region around each component's split point y, where
         # blue/red wings and neighboring components overlap the most.
@@ -289,10 +218,10 @@ class line_piecewise():
         components = model.eval_components(params=self.out.params, x=self.wvl)
         
         # Ti component
-        self.component_ti = components['ti_']+ components['c_']
+        self.component_ti = components['sr_']+ components['c_']
         
         # Parasitic components
-        self.component_residual = components['B_'] + components['C_'] + components['D_']+ components['c_']
+        self.component_residual = components['B_'] + components['c_']
         
         
 
@@ -310,20 +239,18 @@ intmeth = 'none' # imshow integration method
 
 # -----------------------------
 spectra = SpectrumContainer.load_all()
-wvl_nm, si_full = spectra['ti']['disk_center'].reconstruct(('residual', 'line'))
+wavelengthscale, si_full = spectra['sr']['disk_center'].reconstruct(('residual', 'line'))
 si = si_full[:, 300, 20:100]
 
-continuum = np.nanmean(spectra['ti']['disk_center'].continuum.data[:,300,20:100], axis=0)
+continuum = np.nanmean(spectra['sr']['disk_center'].continuum.data[:,300,20:100], axis=0)
 
 # -----------------------------
 si = np.transpose(si)
 image_sz=np.array(si.shape)
 
-wavelengthscale=10*wvl_nm # in A!
-
 # -----------------------------
  
-ti_center_wl = 4536.39 # Ti
+sr_center_wl = 4607.34 # Sr
 cont_center_wl = wavelengthscale[-1]
 
 spec_region_width=0.16 # /2 +/- center_wl
@@ -332,7 +259,7 @@ spec_region_width=0.16 # /2 +/- center_wl
 # plotting parameter
 ##################
 
-i_gscale=[0.2,0.95]# greyscale for si
+i_gscale=[0.2,1.05]# greyscale for si
 
 line_color1 = 'red'
 line_color2 = 'lightseagreen'
@@ -341,11 +268,11 @@ line_color4 = 'indigo'
 
 # data processing
 
-intergranule_idx = 39
-granule_idx = 17
+intergranule_idx = 40
+granule_idx = 16
 #%%
-intergranule =  line_piecewise( wavelengthscale, si[intergranule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[intergranule_idx])
-granule =  line_piecewise( wavelengthscale, si[granule_idx,:], ti_center_wl,  spec_region_width, continuum=continuum[granule_idx])
+intergranule =  line_piecewise( wavelengthscale, si[intergranule_idx,:], sr_center_wl,  spec_region_width, continuum=continuum[intergranule_idx])
+granule =  line_piecewise( wavelengthscale, si[granule_idx,:], sr_center_wl,  spec_region_width, continuum=continuum[granule_idx])
 # components_intergranule = out_intergranule.eval_components(x=wavelengthscale)
 # components_granule = out_granule.eval_components(x=wavelengthscale)
 #%%
@@ -377,8 +304,8 @@ cb = plt.colorbar(im,orientation='vertical',cax=cbaxes,ticks=[i_gscale[0],i_gsca
 cb.set_label('$I/I_c$ [a.u.]')
 
 
-ax.axvline(x=ti_center_wl-spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
-ax.axvline(x=ti_center_wl+spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
+ax.axvline(x=sr_center_wl-spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
+ax.axvline(x=sr_center_wl+spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
 
 ax.set_title('MTR@THEMIS, 2025, disk center')
 ax.set_ylabel(r'X along slit [pixel]')
@@ -392,21 +319,21 @@ ax1.plot( granule.wvl, granule.profile, color=line_color4, marker='+',linestyle=
 ax1.plot( granule.wvl, granule.best_fit, '-', color=line_color4, label='best fit granule')
 #ax1.plot( granule.wvl, initial_guess, '--', color='gray', label='initial guess')
 
-ax1.plot( granule.wvl, granule.component_ti, '-', marker='.', color='red', label='best fit granule, Ti')
+ax1.plot( granule.wvl, granule.component_ti, '-', marker='.', color='red', label='best fit granule, Sr')
 ax1.plot( granule.wvl, granule.component_residual,'-', color='red', alpha=0.2,label='best fit granule, residuals')
 
 ax1.plot(intergranule.wvl, intergranule.profile, color=line_color2, marker='+',linestyle='None', label = 'intergranule, data') 
 ax1.plot( intergranule.wvl, intergranule.best_fit, '-', color=line_color2, label='best fit intergranule')
 
-ax1.plot( intergranule.wvl, intergranule.component_ti, '-', marker='.', color='magenta', label='best fit intergranule, Ti')
+ax1.plot( intergranule.wvl, intergranule.component_ti, '-', marker='.', color='magenta', label='best fit intergranule, Sr')
 ax1.plot( intergranule.wvl, intergranule.component_residual,'-', color='magenta', alpha=0.2,label='best fit intergranule, residuals')
 
 
 ax.axhline(y=intergranule_idx, color=line_color2, linewidth=1, linestyle='dotted')
 ax.axhline(y=granule_idx, color=line_color4, linewidth=1, linestyle='dotted')
 
-ax1.axvline(x=ti_center_wl-spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
-ax1.axvline(x=ti_center_wl+spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted', label='Ti I')
+ax1.axvline(x=sr_center_wl-spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted')
+ax1.axvline(x=sr_center_wl+spec_region_width/2., color=line_color1, linewidth=1, linestyle='dotted', label='Sr I')
 ax1.legend()
 
 

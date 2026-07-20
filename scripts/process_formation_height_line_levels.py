@@ -38,20 +38,23 @@ Created on Fri Jul 4 15:24:27 2025
 """
 
 from themis.core import themis_tools as tt
-from themis.core import themis_data_reduction as tdr
 from themis.core import themis_io as tio
 from themis.datasets.themis_datasets_2025 import get_config
-from themis.plots import plot_power_spectrum
 
 from spectator.controllers.app_controller import display_data # from spectator
 
 import matplotlib.pyplot as plt
 import numpy as np
-import gc
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
+
 from pathlib import Path
 from datetime import datetime
 from astropy.io import fits
 from lmfit.models import VoigtModel, ConstantModel
+from lmfit import Model
+from lmfit.lineshapes import voigt as voigt_lineshape
 
 #----------------------------------------------------------------------
 """
@@ -99,6 +102,626 @@ CROP_CONFIGS = {
     'sr': {'scan': (0, -1), 'slit': (2, -55), 'wavelength': (276, 886)},
     'ti': {'scan': (0, -1), 'slit': (2, -55), 'wavelength': (406, 1016)},
 }
+
+
+
+# Helper function for parabola-based center initialization
+def refine_center_with_parabola(wvl, profile, center_guess, search_width=0.07):
+    """
+    Refine a component center using parabola fitting.
+
+    Args:
+        wvl: Wavelength array
+        profile: Intensity profile
+        center_guess: Initial guess for the center (in Angstrom)
+        search_width: Search range around the guess (in Angstrom)
+
+    Returns:
+        Refined center position, or center_guess if refinement fails
+    """
+    idx_left = np.argmin(abs(wvl - (center_guess - search_width)))
+    idx_right = np.argmin(abs(wvl - (center_guess + search_width)))
+    if idx_left < idx_right:
+        idx_center_approx = np.argmin(profile[idx_left:idx_right])
+        parabola_half_width = 5
+        idx_parabola_left = max(idx_left, idx_left + idx_center_approx - parabola_half_width)
+        idx_parabola_right = min(idx_right, idx_left + idx_center_approx + parabola_half_width)
+        if idx_parabola_right > idx_parabola_left:
+            wvl_parabola = wvl[idx_parabola_left:idx_parabola_right]
+            profile_parabola = profile[idx_parabola_left:idx_parabola_right]
+            poly_coefs = np.polyfit(wvl_parabola, profile_parabola, 2)
+            a, b, c = poly_coefs
+            if a > 0:
+                return -b / (2 * a)
+    return center_guess
+
+
+# Fitting parameter initialization
+def initialize_piecewise_parameter(params, continuum, wvl=None, profile=None):
+
+    params['ti_r_amplitude'].value= -0.08
+    params['ti_r_amplitude'].min= -0.1
+    params['ti_r_amplitude'].max= -0.03
+
+    params['ti_b_amplitude'].value= -0.08
+    params['ti_b_amplitude'].min= -0.1
+    params['ti_b_amplitude'].max= -0.03
+
+    # Initialize Ti center with parabola fit if wvl and profile provided
+    ti_center_guess = 4536.39  # in A
+    if wvl is not None and profile is not None:
+        ti_center_refined = refine_center_with_parabola(wvl, profile, ti_center_guess)
+        params['ti_r_center'].value = ti_center_refined
+
+    else:
+        params['ti_r_center'].value = ti_center_guess
+ 
+    params['ti_r_center'].min =  params['ti_r_center'].value - 0.005 # in A
+    params['ti_r_center'].max =  params['ti_r_center'].value + 0.005 # in A
+    params['ti_r_center'].vary = True
+    params['ti_b_center'].expr = 'ti_r_center'
+
+    params['ti_r_sigma'].value= 0.03
+    params['ti_b_sigma'].value= 0.03
+    params['ti_r_sigma'].max= 0.05
+    params['ti_b_sigma'].max= 0.05
+    params['ti_r_sigma'].min= 0.01
+    params['ti_b_sigma'].min= 0.01
+
+    params['ti_b_gamma'].value= 0.03
+    params['ti_r_gamma'].value= 0.03
+    params['ti_r_gamma'].min = 0.001
+    params['ti_r_gamma'].max = 0.09
+    params['ti_b_gamma'].min = 0.001
+    params['ti_b_gamma'].max = 0.09
+    # Initialize y to the center for each component
+    params['ti_y'].expr = 'ti_r_center'
+
+
+    params['B_r_amplitude'].value= -0.09
+    params['B_b_amplitude'].value= -0.09
+    params['B_r_amplitude'].max= -0.03
+    params['B_r_amplitude'].min= -0.1
+    params['B_b_amplitude'].max= -0.03
+    params['B_b_amplitude'].min= -0.1
+
+    # Initialize B center with parabola fit if wvl and profile provided
+    if wvl is not None and profile is not None:
+        params['B_r_center'].value = refine_center_with_parabola(wvl, profile, 4536.268)
+
+    else:
+        params['B_r_center'].value = 4536.268 # in A
+
+    params['B_r_center'].min = params['B_r_center'].value - 0.005 # in A
+    params['B_r_center'].max = params['B_r_center'].value + 0.005 # in A
+    params['B_r_center'].vary = True
+    params['B_b_center'].expr = 'B_r_center'
+
+    params['B_r_sigma'].value= 0.03
+    params['B_b_sigma'].value= 0.03
+    params['B_r_sigma'].max= 0.05
+    params['B_b_sigma'].max= 0.05
+    params['B_r_sigma'].min= 0.01
+    params['B_b_sigma'].min= 0.01
+
+    params['B_r_gamma'].value= 0.03
+    params['B_b_gamma'].value= 0.03
+    params['B_r_gamma'].min = 0.001
+    params['B_r_gamma'].max = 0.09
+    params['B_b_gamma'].min = 0.001
+    params['B_b_gamma'].max = 0.09
+
+    params['B_y'].expr = 'B_r_center'
+
+    params['C_r_amplitude'].value= -0.09
+    params['C_b_amplitude'].value= -0.09
+
+    # Initialize C center with parabola fit if wvl and profile provided
+    if wvl is not None and profile is not None:
+        params['C_r_center'].value = refine_center_with_parabola(wvl, profile, 4536.050)
+    else:
+        params['C_r_center'].value = 4536.050
+
+    params['C_r_center'].min = params['C_r_center'].value - 0.005 # in A
+    params['C_r_center'].max = params['C_r_center'].value + 0.005 # in A
+    params['C_r_center'].vary = True
+    params['C_b_center'].expr = 'C_r_center'
+
+    params['C_r_sigma'].value= 0.03
+    params['C_b_sigma'].value= 0.03
+    params['C_r_sigma'].max= 0.05
+    params['C_b_sigma'].max= 0.05
+    params['C_r_sigma'].min= 0.01
+    params['C_b_sigma'].min= 0.01
+
+    params['C_r_gamma'].value= 0.03
+    params['C_b_gamma'].value= 0.03
+    params['C_r_gamma'].min = 0.001
+    params['C_r_gamma'].max = 0.09
+    params['C_b_gamma'].min = 0.001
+    params['C_b_gamma'].max = 0.09
+    params['C_y'].expr = 'C_r_center'
+
+    params['D_r_amplitude'].value= -0.09
+    params['D_b_amplitude'].value= -0.09
+
+    # Initialize D center with parabola fit if wvl and profile provided
+    if wvl is not None and profile is not None:
+        params['D_r_center'].value = refine_center_with_parabola(wvl, profile, 4535.9)
+    else:
+        params['D_r_center'].value = 4535.9 # in A
+
+    params['D_r_center'].min = params['D_r_center'].value - 0.005 # in A
+    params['D_r_center'].max = params['D_r_center'].value + 0.005 # in A
+    params['D_r_center'].vary = True
+    params['D_b_center'].expr = 'D_r_center'
+
+    params['D_r_sigma'].value= 0.03
+    params['D_b_sigma'].value= 0.03
+    params['D_r_sigma'].max= 0.05
+    params['D_b_sigma'].max= 0.05
+    params['D_r_sigma'].min= 0.01
+    params['D_b_sigma'].min= 0.01
+
+    params['D_r_gamma'].value= 0.03
+    params['D_b_gamma'].value= 0.03
+    params['D_r_gamma'].min = 0.001
+    params['D_r_gamma'].max = 0.09
+    params['D_b_gamma'].min = 0.001
+    params['D_b_gamma'].max = 0.09
+    params['D_y'].expr = 'D_r_center'
+
+    params['c_c'].value= continuum
+    params['c_c'].vary = False
+    params['c_c'].min = continuum*0.9
+    params['c_c'].max = continuum*1.1
+
+    return(params)
+
+
+def _piecewise_voigt_func(x, y, r_amplitude, r_center, r_sigma, r_gamma,
+                           b_amplitude, b_center, b_sigma, b_gamma,
+                           transition_width=0.005):
+    # Two independent Voigt profiles, selected pointwise by wavelength x
+    # relative to the split point y (blue side: x < y, red side: x >= y)
+    voigt_r = voigt_lineshape(x, r_amplitude, r_center, r_sigma, r_gamma)
+    voigt_b = voigt_lineshape(x, b_amplitude, b_center, b_sigma, b_gamma)
+    return np.where(x < y, voigt_b, voigt_r)
+
+def piecewise_voigt(prefix='line'): # fit y, the point where the split should appear
+    model = Model(_piecewise_voigt_func, independent_vars=['x'], prefix=prefix+'_',
+                  param_names=['y', 'r_amplitude', 'r_center', 'r_sigma', 'r_gamma',
+                               'b_amplitude', 'b_center', 'b_sigma', 'b_gamma'],
+                  )
+    return model
+
+
+def piecewise_model():
+
+    voigt_ti = piecewise_voigt(prefix='ti')  # Ti I
+    pars = voigt_ti.make_params()
+    voigtB = piecewise_voigt(prefix='B')
+    pars.update(voigtB.make_params())
+    voigtC = piecewise_voigt(prefix='C')
+    pars.update(voigtC.make_params())
+    voigtD = piecewise_voigt(prefix='D')
+    pars.update(voigtD.make_params())
+
+    const = ConstantModel(prefix='c_')
+    pars.update(const.make_params())
+
+    model = voigt_ti + voigtB + voigtC + voigtD + const
+
+    return model, pars
+
+def add_overlap_weights(wvl, params, prefixes=None, base_weight=1.0, boost=3, boost_width=0.008): # keep boost_width small
+    """Build a weights array that upweights the region around each component's
+    split point y, where blue/red wings and neighboring components overlap
+    the most. Use as `weights=` in model.fit().
+
+    Args:
+        wvl: Wavelength array
+        params: Model parameters
+        prefixes: List of component prefixes to weight (e.g., ['ti', 'B', 'C', 'D'] or ['sr', 'B'])
+                 If None, defaults to ['ti', 'B', 'C', 'D'] for TI line
+        base_weight: Base weight for all wavelengths
+        boost: Weight multiplier for overlap regions
+        boost_width: Width around each split point to boost (in Angstrom)
+    """
+    if prefixes is None:
+        prefixes = ['ti', 'B', 'C', 'D']
+
+    weights = np.full_like(wvl, base_weight, dtype=float)
+    for prefix in prefixes:
+        y_split = params[prefix+'_y'].value
+        mask = np.abs(wvl - y_split) <= boost_width
+        weights[mask] = np.maximum(weights[mask], boost)
+    return weights
+
+# Helper function for multiprocessing (must be at module level)
+def _fit_single_pixel(args):
+    """Fit a single pixel for multiprocessing."""
+    wvl, profile, continuum, slit_idx, scan_idx = args
+    try:
+        result = fit_ti_pixel(wvl, profile, continuum)
+        return (slit_idx, scan_idx, result, None)
+    except Exception as e:
+        return (slit_idx, scan_idx, None, str(e))
+
+
+def fit_ti_pixel(wvl, profile, continuum):
+    """
+    Fit a single pixel spectrum using the piecewise Voigt model.
+
+    Args:
+        wvl: Wavelength array
+        profile: Intensity profile (line + residual)
+        continuum: Continuum level (fixed). If None or not finite, uses profile[-1]
+
+    Returns:
+        dict: Dictionary containing:
+            - 'best_fit': Best fit profile
+            - 'component_ti': Ti component
+            - 'component_residual': Residual component (B + C + D)
+            - 'params': Fitted parameters
+    """
+    # Continuum fallback logic
+    if continuum is None or not np.isfinite(continuum):
+        continuum = profile[-1]
+
+    # Initialize model and parameters
+    model, pars = piecewise_model()
+    pars = initialize_piecewise_parameter(pars, continuum, wvl=wvl, profile=profile)
+
+    # Add weights
+    weights = add_overlap_weights(wvl, pars)
+
+    # Fit
+    out = model.fit(profile, pars, x=wvl, weights=weights)
+
+    # Evaluate best fit and components
+    best_fit = model.eval(out.params, x=wvl)
+    components = model.eval_components(params=out.params, x=wvl)
+
+    # Extract components
+    component_ti = components['ti_'] + components['c_']
+    component_residual = components['B_'] + components['C_'] + components['D_'] + components['c_']
+
+    return {
+        'best_fit': best_fit,
+        'component_ti': component_ti,
+        'component_residual': component_residual,
+        'params': out.params
+    }
+
+def fit_ti_spectrum(line_data, line_wvl, continuum_mean):
+    """
+    Fit Ti line for all spatial pixels in a spectrum.
+
+    Args:
+        line_data: Line + residual data array (shape: wavelength, slit, scan)
+        line_wvl: Wavelength array (in nm)
+        continuum_mean: Mean continuum level (fixed for all pixels)
+
+    Returns:
+        dict: Dictionary containing fitted arrays:
+            - 'best_fit': Best fit for all pixels (same shape as line_data)
+            - 'component_ti': Ti component for all pixels
+            - 'component_residual': Residual component for all pixels
+    """
+    n_wvl, n_slit, n_scan = line_data.shape
+    best_fit = np.zeros_like(line_data)
+    component_ti = np.zeros_like(line_data)
+    component_residual = np.zeros_like(line_data)
+
+    total_pixels = n_slit * n_scan
+
+    # Check if running in interactive environment (Jupyter/IPython)
+    # If so, disable multiprocessing to avoid pickling issues
+    import sys
+    use_multiprocessing = total_pixels > 100 and not hasattr(sys, 'ps1')
+
+    # Use multiprocessing for large datasets (only in non-interactive mode)
+    if use_multiprocessing:
+        n_workers = min(os.cpu_count(), total_pixels)  # Use all available CPU cores
+        print(f"Using {n_workers} workers for {total_pixels} pixels...")
+
+        # Prepare arguments for all pixels
+        args_list = []
+        for slit_idx in range(n_slit):
+            for scan_idx in range(n_scan):
+                profile = line_data[:, slit_idx, scan_idx]
+                args_list.append((line_wvl, profile, continuum_mean, slit_idx, scan_idx))
+
+        # Process with multiprocessing
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_fit_single_pixel, args): args for args in args_list}
+
+            with tqdm(total=total_pixels, desc="Fitting pixels") as pbar:
+                for future in as_completed(futures):
+                    slit_idx, scan_idx, result, error = future.result()
+                    if error is not None:
+                        print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {error}")
+                        profile = line_data[:, slit_idx, scan_idx]
+                        best_fit[:, slit_idx, scan_idx] = profile
+                        component_ti[:, slit_idx, scan_idx] = profile
+                        component_residual[:, slit_idx, scan_idx] = 0
+                    else:
+                        best_fit[:, slit_idx, scan_idx] = result['best_fit']
+                        component_ti[:, slit_idx, scan_idx] = result['component_ti']
+                        component_residual[:, slit_idx, scan_idx] = result['component_residual']
+                    pbar.update(1)
+    else:
+        # Sequential processing (for small datasets or interactive environments)
+        with tqdm(total=total_pixels, desc="Fitting pixels") as pbar:
+            for slit_idx in range(n_slit):
+                for scan_idx in range(n_scan):
+                    profile = line_data[:, slit_idx, scan_idx]
+
+                    try:
+                        result = fit_ti_pixel(line_wvl, profile, continuum_mean)
+                        best_fit[:, slit_idx, scan_idx] = result['best_fit']
+                        component_ti[:, slit_idx, scan_idx] = result['component_ti']
+                        component_residual[:, slit_idx, scan_idx] = result['component_residual']
+                    except Exception as e:
+                        print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {e}")
+                        # Use original data as fallback
+                        best_fit[:, slit_idx, scan_idx] = profile
+                        component_ti[:, slit_idx, scan_idx] = profile
+                        component_residual[:, slit_idx, scan_idx] = 0
+
+                    pbar.update(1)
+    return {
+        'best_fit': best_fit,
+        'component_ti': component_ti,
+        'component_residual': component_residual
+    }
+
+#----------------------------------------------------------------------
+# SR Line Fitting Functions
+#----------------------------------------------------------------------
+
+SR_CENTER_WL = 4607.34  # Sr I line center in Angstrom
+SR_SPEC_REGION_WIDTH = 0.16  # Width of spectral region for fitting (Angstrom)
+B_CENTER_WL = 4607.65  # B component center in Angstrom
+
+def _sr_piecewise_model():
+    """Create the full piecewise model for SR line (SR + B + constant)."""
+    voigt_sr = piecewise_voigt(prefix='sr')
+    pars = voigt_sr.make_params()
+    voigtB = piecewise_voigt(prefix='B')
+    pars.update(voigtB.make_params())
+
+    const = ConstantModel(prefix='c_')
+    pars.update(const.make_params())
+
+    model = voigt_sr + voigtB + const
+    return model, pars
+
+def _initialize_sr_parameter(params, continuum, wvl=None, profile=None):
+    """Initialize parameters for SR line fitting."""
+    # SR component parameters
+    params['sr_r_amplitude'].value = -0.08
+    params['sr_r_amplitude'].min = -0.1
+    params['sr_r_amplitude'].max = -0.03
+
+    params['sr_b_amplitude'].value = -0.08
+    params['sr_b_amplitude'].min = -0.1
+    params['sr_b_amplitude'].max = -0.03
+
+    # Initialize SR center with parabola fit if wvl and profile provided
+    if wvl is not None and profile is not None:
+        sr_center_refined = refine_center_with_parabola(wvl, profile, SR_CENTER_WL)
+        params['sr_r_center'].value = sr_center_refined
+    else:
+        params['sr_r_center'].value = SR_CENTER_WL
+
+    params['sr_r_center'].min = params['sr_r_center'].value - 0.005
+    params['sr_r_center'].max = params['sr_r_center'].value + 0.005
+    params['sr_r_center'].vary = True
+    params['sr_b_center'].expr = 'sr_r_center'
+
+    params['sr_r_sigma'].value = 0.03
+    params['sr_b_sigma'].value = 0.03
+    params['sr_r_sigma'].max = 0.05
+    params['sr_b_sigma'].max = 0.05
+    params['sr_r_sigma'].min = 0.01
+    params['sr_b_sigma'].min = 0.01
+
+    params['sr_b_gamma'].value = 0.03
+    params['sr_r_gamma'].value = 0.03
+    params['sr_r_gamma'].min = 0.001
+    params['sr_r_gamma'].max = 0.09
+    params['sr_b_gamma'].min = 0.001
+    params['sr_b_gamma'].max = 0.09
+
+    params['sr_y'].expr = 'sr_r_center'
+
+    # B component parameters
+    params['B_r_amplitude'].value = -0.09
+    params['B_b_amplitude'].value = -0.09
+    params['B_r_amplitude'].max = -0.03
+    params['B_r_amplitude'].min = -0.1
+    params['B_b_amplitude'].max = -0.03
+    params['B_b_amplitude'].min = -0.1
+
+    # Use parabola-based initialization for B component center if wvl and profile are provided
+    if wvl is not None and profile is not None:
+        b_center_refined = refine_center_with_parabola(wvl, profile, B_CENTER_WL, search_width=0.07)
+        params['B_r_center'].value = b_center_refined
+    else:
+        params['B_r_center'].value = B_CENTER_WL
+
+    params['B_r_center'].vary = True
+    params['B_b_center'].expr = 'B_r_center'
+
+    params['B_r_center'].min = params['B_r_center'].value - 0.005
+    params['B_r_center'].max = params['B_r_center'].value + 0.005
+
+    params['B_r_sigma'].value = 0.03
+    params['B_b_sigma'].value = 0.03
+    params['B_r_sigma'].max = 0.05
+    params['B_b_sigma'].max = 0.05
+    params['B_r_sigma'].min = 0.01
+    params['B_b_sigma'].min = 0.01
+
+    params['B_r_gamma'].value = 0.03
+    params['B_b_gamma'].value = 0.03
+    params['B_r_gamma'].min = 0.001
+    params['B_r_gamma'].max = 0.09
+    params['B_b_gamma'].min = 0.001
+    params['B_b_gamma'].max = 0.09
+
+    params['B_y'].expr = 'B_r_center'
+
+    # Constant continuum
+    params['c_c'].value = continuum
+    params['c_c'].vary = False
+    params['c_c'].min = continuum * 0.9
+    params['c_c'].max = continuum * 1.1
+
+    return params
+
+
+# Helper function for multiprocessing (must be at module level)
+def _fit_sr_single_pixel(args):
+    """Fit a single SR pixel for multiprocessing."""
+    wvl, profile, continuum, slit_idx, scan_idx = args
+    try:
+        result = fit_sr_pixel(wvl, profile, continuum)
+        return (slit_idx, scan_idx, result, None)
+    except Exception as e:
+        return (slit_idx, scan_idx, None, str(e))
+
+def fit_sr_pixel(wvl, profile, continuum):
+    """
+    Fit a single pixel spectrum using the SR piecewise Voigt model.
+
+    Args:
+        wvl: Wavelength array (in Angstrom)
+        profile: Intensity profile (line + residual)
+        continuum: Continuum level (fixed). If None or not finite, uses profile[-1]
+
+    Returns:
+        dict: Dictionary containing fitted arrays:
+            - 'best_fit': Best fit profile
+            - 'component_sr': Sr component
+            - 'component_residual': Residual component (B)
+            - 'params': Fitted parameters
+    """
+    # Continuum fallback
+    if continuum is None:
+        continuum = profile[-1]
+    if not np.isfinite(continuum):
+        continuum = np.nanmean(profile)
+
+    # Initialize model and parameters (parabola refinement happens inside _initialize_sr_parameter)
+    model, pars = _sr_piecewise_model()
+    pars = _initialize_sr_parameter(pars, continuum, wvl=wvl, profile=profile)
+
+    # Add weights for overlap regions
+    weights = add_overlap_weights(wvl, pars, prefixes=['sr', 'B'])
+
+    # Fit the model
+    out = model.fit(profile, pars, x=wvl, weights=weights)
+
+    # Evaluate the best fit and components
+    best_fit = model.eval(out.params, x=wvl)
+    components = model.eval_components(params=out.params, x=wvl)
+
+    # Extract components
+    component_sr = components['sr_'] + components['c_']
+    component_residual = components['B_'] + components['c_']
+
+    return {
+        'best_fit': best_fit,
+        'component_sr': component_sr,
+        'component_residual': component_residual,
+        'params': out.params
+    }
+
+def fit_sr_spectrum(line_data, line_wvl, continuum_mean):
+    """
+    Fit SR line for all pixels in the spectrum.
+
+    Args:
+        line_data: 3D array of intensity data (n_wvl, n_slit, n_scan)
+        line_wvl: Wavelength array (in Angstrom)
+        continuum_mean: Mean continuum level (fixed for all pixels)
+
+    Returns:
+        dict: Dictionary containing fitted arrays:
+            - 'best_fit': Best fit for all pixels (same shape as line_data)
+            - 'component_sr': Sr component for all pixels
+            - 'component_residual': Residual component for all pixels
+    """
+    n_wvl, n_slit, n_scan = line_data.shape
+    best_fit = np.zeros_like(line_data)
+    component_sr = np.zeros_like(line_data)
+    component_residual = np.zeros_like(line_data)
+
+    total_pixels = n_slit * n_scan
+
+    # Check if running in interactive environment (Jupyter/IPython)
+    import sys
+    use_multiprocessing = total_pixels > 100 and not hasattr(sys, 'ps1')
+
+    # Use multiprocessing for large datasets (only in non-interactive mode)
+    if use_multiprocessing:
+        n_workers = min(os.cpu_count(), total_pixels)
+        print(f"Using {n_workers} workers for {total_pixels} pixels...")
+
+        # Prepare arguments for all pixels
+        args_list = []
+        for slit_idx in range(n_slit):
+            for scan_idx in range(n_scan):
+                profile = line_data[:, slit_idx, scan_idx]
+                args_list.append((line_wvl, profile, continuum_mean, slit_idx, scan_idx))
+
+        # Process with multiprocessing
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_fit_sr_single_pixel, args): args for args in args_list}
+
+            with tqdm(total=total_pixels, desc="Fitting SR pixels") as pbar:
+                for future in as_completed(futures):
+                    slit_idx, scan_idx, result, error = future.result()
+                    if error is not None:
+                        print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {error}")
+                        profile = line_data[:, slit_idx, scan_idx]
+                        best_fit[:, slit_idx, scan_idx] = profile
+                        component_sr[:, slit_idx, scan_idx] = profile
+                        component_residual[:, slit_idx, scan_idx] = 0
+                    else:
+                        best_fit[:, slit_idx, scan_idx] = result['best_fit']
+                        component_sr[:, slit_idx, scan_idx] = result['component_sr']
+                        component_residual[:, slit_idx, scan_idx] = result['component_residual']
+                    pbar.update(1)
+    else:
+        # Sequential processing (for small datasets or interactive environments)
+        with tqdm(total=total_pixels, desc="Fitting SR pixels") as pbar:
+            for slit_idx in range(n_slit):
+                for scan_idx in range(n_scan):
+                    profile = line_data[:, slit_idx, scan_idx]
+
+                    try:
+                        result = fit_sr_pixel(line_wvl, profile, continuum_mean)
+                        best_fit[:, slit_idx, scan_idx] = result['best_fit']
+                        component_sr[:, slit_idx, scan_idx] = result['component_sr']
+                        component_residual[:, slit_idx, scan_idx] = result['component_residual']
+                    except Exception as e:
+                        print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {e}")
+                        # Use original data as fallback
+                        best_fit[:, slit_idx, scan_idx] = profile
+                        component_sr[:, slit_idx, scan_idx] = profile
+                        component_residual[:, slit_idx, scan_idx] = 0
+
+                    pbar.update(1)
+
+    return {
+        'best_fit': best_fit,
+        'component_sr': component_sr,
+        'component_residual': component_residual
+    }
 
 # Predefined split configurations for each line (wavelength ranges in nm)
 SPLIT_CONFIGS = {
@@ -239,6 +862,8 @@ class SpectrumPart:
         """
         Save the spectrum part to a FITS file.
 
+        Wavelength is converted from Angstrom to nm (divided by 10) before saving.
+
         Args:
             filepath: Path to save the FITS file
             config_path: Path to the configuration file (saved in header)
@@ -251,8 +876,9 @@ class SpectrumPart:
         # Create primary HDU with data
         primary_hdu = fits.PrimaryHDU(data=self.data)
 
-        # Create extension HDU with wavelength
-        wavelength_hdu = fits.ImageHDU(data=self.wvl, name='WAVELENGTH')
+        # Convert wavelength from Angstrom to nm for saving
+        wvl_nm = self.wvl / 10.0
+        wavelength_hdu = fits.ImageHDU(data=wvl_nm, name='WAVELENGTH')
 
         # Add header information
         header = primary_hdu.header
@@ -270,6 +896,8 @@ class SpectrumPart:
         """
         Load a spectrum part from a FITS file.
 
+        Wavelength is converted from nm to Angstrom (multiplied by 10) after loading.
+
         Args:
             filepath: Path to the FITS file
 
@@ -279,8 +907,10 @@ class SpectrumPart:
         with fits.open(filepath) as hdul:
             data = hdul[0].data
             wvl = hdul['WAVELENGTH'].data
+            # Convert wavelength from nm to Angstrom
+            wvl_angstrom = wvl * 10.0
             # Fit result is not stored in FITS, set to None
-            return cls(data, wvl, fit_result=None)
+            return cls(data, wvl_angstrom, fit_result=None)
 
     def plot(self, ax=None, scan_idx=None, slit_idx=None, **kwargs):
         """
@@ -352,7 +982,8 @@ class Spectrum:
         continuum: SpectrumPart for continuum region
         line: SpectrumPart for line region
         residual: SpectrumPart for residual region
-        fit_sum: Full fit result (wavelength, slit, scan) - fitted data array
+        fit_sum: SpectrumPart for full fit result (fitted data array)
+        fit_line: SpectrumPart for line component only (Ti for TI line, Sr for SR line)
     """
     def __init__(self, continuum, line, residual, line_name=None):
         self.continuum = continuum
@@ -360,6 +991,8 @@ class Spectrum:
         self.residual = residual
         self.line_name = line_name  # 'ti' or 'sr'
         self.fit_sum = None  # Will store full fit result after fitting
+        self.fit_line = None  # Will store line component after fitting
+        self._load_path = None  # Store original load path for default save
 
     def __repr__(self):
         return f"Spectrum(continuum, line, residual)"
@@ -408,17 +1041,24 @@ class Spectrum:
 
         return wvl_unique, data_unique
 
-    def save(self, filepath, config_path=None, sequence=None, python_file=None):
+    def save(self, filepath=None, config_path=None, sequence=None, python_file=None):
         """
         Save each SpectrumPart to separate FITS files.
 
         Args:
             filepath: Base filepath (without extension). Each part will be saved as
                      filepath_continuum.fits, filepath_line.fits, filepath_residual.fits
+                     If None, uses the path from which the spectrum was loaded.
             config_path: Path to the configuration file (saved in header)
             sequence: Sequence number used (saved in header)
             python_file: Name of the Python file that created this file (saved in header)
         """
+        if filepath is None:
+            if self._load_path is None:
+                raise ValueError("No filepath provided and spectrum was not loaded from a file. "
+                               "Please provide a filepath argument.")
+            filepath = self._load_path
+
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
@@ -426,6 +1066,12 @@ class Spectrum:
         self.continuum.save(f"{filepath}_continuum.fits", config_path, sequence, python_file)
         self.line.save(f"{filepath}_line.fits", config_path, sequence, python_file)
         self.residual.save(f"{filepath}_residual.fits", config_path, sequence, python_file)
+
+        # Save fitted profiles if available
+        if self.fit_sum is not None:
+            self.fit_sum.save(f"{filepath}_fit_sum.fits", config_path, sequence, python_file)
+        if self.fit_line is not None:
+            self.fit_line.save(f"{filepath}_fit_line.fits", config_path, sequence, python_file)
 
     @classmethod
     def load(cls, filepath, line_name=None):
@@ -444,7 +1090,111 @@ class Spectrum:
         continuum = SpectrumPart.load(f"{filepath}_continuum.fits")
         line = SpectrumPart.load(f"{filepath}_line.fits")
         residual = SpectrumPart.load(f"{filepath}_residual.fits")
-        return cls(continuum, line, residual, line_name=line_name)
+
+        spectrum = cls(continuum, line, residual, line_name)
+        spectrum._load_path = str(filepath)  # Store load path for default save
+
+        # Load fitted profiles if they exist
+        try:
+            spectrum.fit_sum = SpectrumPart.load(f"{filepath}_fit_sum.fits")
+        except FileNotFoundError:
+            spectrum.fit_sum = None
+
+        try:
+            spectrum.fit_line = SpectrumPart.load(f"{filepath}_fit_line.fits")
+        except FileNotFoundError:
+            spectrum.fit_line = None
+
+        return spectrum
+
+    def inspect_fit_quality(self, n_best=5, n_worst=5):
+        """
+        Inspect fit quality by plotting the best and worst pixel fits.
+
+        Calculates residual sum of squares (RSS) for each pixel and plots
+        the n_best and n_worst fits with their pixel indices in the legend.
+
+        Args:
+            n_best: Number of best fits to plot (default: 5)
+            n_worst: Number of worst fits to plot (default: 5)
+
+        Returns:
+            fig: The matplotlib figure object
+        """
+        if self.fit_sum is None or self.fit_line is None:
+            print("No fit results available. Run spectrum.fit() first.")
+            return None
+
+        # Get the concatenated line+residual data for comparison
+        wvl_line = self.line.wvl
+        wvl_residual = self.residual.wvl
+        data_line = self.line.data
+        data_residual = self.residual.data
+
+        # Concatenate and sort (same as in _fit_ti)
+        wvl_full = np.concatenate([wvl_line, wvl_residual])
+        data_full = np.concatenate([data_line, data_residual], axis=0)
+        sort_idx = np.argsort(wvl_full)
+        wvl_full = wvl_full[sort_idx]
+        data_full = data_full[sort_idx, :, :]
+
+        # Calculate RSS for each pixel
+        n_slit, n_scan = data_line.shape[1], data_line.shape[2]
+        rss_values = []
+        pixel_indices = []
+
+        for slit_idx in range(n_slit):
+            for scan_idx in range(n_scan):
+                profile = data_full[:, slit_idx, scan_idx]
+                fit_profile = self.fit_sum.data[:, slit_idx, scan_idx]
+                rss = np.sum((profile - fit_profile) ** 2)
+                rss_values.append(rss)
+                pixel_indices.append((slit_idx, scan_idx))
+
+        rss_values = np.array(rss_values)
+        pixel_indices = np.array(pixel_indices)
+
+        # Get best and worst indices
+        best_indices = np.argsort(rss_values)[:n_best]
+        worst_indices = np.argsort(rss_values)[-n_worst:]
+
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+
+        # Plot best fits
+        ax_best = axes[0]
+        for idx in best_indices:
+            slit_idx, scan_idx = pixel_indices[idx]
+            profile = data_full[:, slit_idx, scan_idx]
+            fit_profile = self.fit_sum.data[:, slit_idx, scan_idx]
+            line_profile = self.fit_line.data[:, slit_idx, scan_idx]
+            ax_best.plot(wvl_full, profile, '+', alpha=0.7, markersize=4)
+            ax_best.plot(wvl_full, fit_profile, '--', linewidth=1,
+                        label=f'Fit (slit={slit_idx}, scan={scan_idx})')
+            ax_best.plot(wvl_full, line_profile, ':', linewidth=1, color='orange')
+        ax_best.set_title(f'Best {n_best} Fits (lowest RSS)')
+        ax_best.set_xlabel('Wavelength (Angstrom)')
+        ax_best.set_ylabel('Intensity')
+        ax_best.legend()
+
+        # Plot worst fits
+        ax_worst = axes[1]
+        for idx in worst_indices:
+            slit_idx, scan_idx = pixel_indices[idx]
+            profile = data_full[:, slit_idx, scan_idx]
+            fit_profile = self.fit_sum.data[:, slit_idx, scan_idx]
+            line_profile = self.fit_line.data[:, slit_idx, scan_idx]
+            ax_worst.plot(wvl_full, profile, '+', alpha=0.7, markersize=4)
+            ax_worst.plot(wvl_full, fit_profile, '--', linewidth=1,
+                         label=f'Fit (slit={slit_idx}, scan={scan_idx})')
+            ax_worst.plot(wvl_full, line_profile, ':', linewidth=1, color='orange')
+        ax_worst.set_title(f'Worst {n_worst} Fits (highest RSS)')
+        ax_worst.set_xlabel('Wavelength (Angstrom)')
+        ax_worst.set_ylabel('Intensity')
+        ax_worst.legend()
+
+        plt.tight_layout()
+        return fig
 
     def fit(self, slit=None, scan=None):
         """
@@ -453,7 +1203,8 @@ class Spectrum:
         For TI line: Uses 4 Voigt profiles (A, B, C, D) + constant model.
         Fits each spatial pixel individually, or a single pixel if indices are provided.
 
-        For SR line: Not implemented yet (placeholder).
+        For SR line: Uses 2 Voigt profiles (SR, B) + constant model.
+        Fits each spatial pixel individually, or a single pixel if indices are provided.
 
         Args:
             slit: Optional slit index to fit only that pixel. If None, fits all pixels.
@@ -463,23 +1214,20 @@ class Spectrum:
         if self.line_name == 'ti':
             self._fit_ti(slit=slit, scan=scan)
         elif self.line_name == 'sr':
-            print("SR line fitting not implemented yet")
-            return
+            self._fit_sr(slit=slit, scan=scan)
         else:
             print(f"Unknown line: {self.line_name}")
             return
 
     def _fit_ti(self, slit=None, scan=None):
         """
-        Fit TI line using 4 Voigt profiles (A, B, C, D) + constant.
+        Fit TI line using piecewise Voigt model.
 
         Procedure:
         1. Concatenate residual+line for full spectrum
-        2. Split into blue and red parts (per pixel, using minimum of the line)
-        3. Fit blue and red parts separately with full model (A+B+C+D+const)
-        4. Full fit = blue fit + red fit
-        5. TI line = voigtA_blue+const concatenated with voigtA_red+const
-        6. Store voigtA_blue and voigtA_red separately for plotting
+        2. Use mean continuum as fixed continuum level
+        3. Fit all spatial pixels separately using fit_ti_spectrum
+        4. Store full fit and Ti component as SpectrumParts
 
         Args:
             slit: Optional slit index to fit only that pixel. If None, fits all pixels.
@@ -496,193 +1244,94 @@ class Spectrum:
         wvl_full = np.concatenate([wvl_line, wvl_residual])
         data_full = np.concatenate([data_line, data_residual], axis=0)
 
-        n_wvl_full, n_slit, n_scan = data_full.shape
-        n_wvl_line = data_line.shape[0]
-
-        # Sort by wavelength to ensure proper blue/red splitting
+        # Sort by wavelength (important for fitting)
         sort_idx = np.argsort(wvl_full)
         wvl_full = wvl_full[sort_idx]
         data_full = data_full[sort_idx, :, :]
 
-        # Track which indices in sorted array correspond to original line region
-        # Create a mask for line region (first n_wvl_line elements before sorting)
-        line_mask = np.zeros(n_wvl_full, dtype=bool)
-        line_mask[:n_wvl_line] = True
-        # Apply the sort to the mask
-        line_mask_sorted = line_mask[sort_idx]
-        # Get indices where line region is in sorted array
-        line_indices_sorted = np.where(line_mask_sorted)[0]
+        # Get mean continuum level
+        continuum_mean = np.mean(self.continuum.data)
 
         # Determine which pixels to fit
         if slit is not None and scan is not None:
             # Fit single pixel
-            slit_indices = [slit]
-            scan_indices = [scan]
-            single_pixel = True
-        elif slit is None and scan is None:
-            # Fit all pixels
-            slit_indices = range(n_slit)
-            scan_indices = range(n_scan)
-            single_pixel = False
+            profile = data_full[:, slit, scan]
+            continuum_pixel = np.mean(self.continuum.data[:, slit, scan])
+            result = fit_ti_pixel(wvl_full, profile, continuum_pixel)
+
+            # Create arrays with single pixel result
+            n_wvl = wvl_full.shape[0]
+            n_slit, n_scan = data_line.shape[1], data_line.shape[2]
+            best_fit = np.zeros((n_wvl, n_slit, n_scan))
+            component_ti = np.zeros((n_wvl, n_slit, n_scan))
+            best_fit[:, slit, scan] = result['best_fit']
+            component_ti[:, slit, scan] = result['component_ti']
         else:
-            raise ValueError("Both slit and scan must be provided together, or both must be None")
+            # Fit all pixels separately
+            fit_results = fit_ti_spectrum(data_full, wvl_full, continuum_mean)
+            best_fit = fit_results['best_fit']
+            component_ti = fit_results['component_ti']
 
-        # Initialize output arrays for full spectrum
-        line_fit_full = np.zeros_like(data_full)  # Ti component (A_ + const)
-        residual_fit_full = np.zeros_like(data_full)  # Parasitic components (B_ + C_ + D_)
-        fit_sum_full = np.zeros_like(data_full)  # Full fit (A_ + B_ + C_ + D_ + const)
-        voigtA_blue_full = np.zeros_like(data_full)  # VoigtA component from blue fit
-        voigtA_red_full = np.zeros_like(data_full)  # VoigtA component from red fit
+        # Store results as SpectrumParts (wavelength is already in Angstrom)
+        self.fit_sum = SpectrumPart(best_fit, wvl_full)
+        self.fit_line = SpectrumPart(component_ti, wvl_full)
 
-        # TI line center wavelength
-        ti_center_wl = 453.6385
+    def _fit_sr(self, slit=None, scan=None):
+        """
+        Fit SR line using piecewise Voigt model.
 
-        # Pixel overlap between blue and red parts
-        pixel_overlap = 2
+        Procedure:
+        1. Concatenate residual+line for full spectrum
+        2. Use mean continuum as fixed continuum level
+        3. Fit all spatial pixels separately using fit_sr_spectrum
+        4. Store full fit and SR component as SpectrumParts
 
-        # Initialize model parameters
-        def initialize_ti_parameters(params, ti_center_wl, continuum_mean):
-            params['A_amplitude'].value = -0.01
-            params['A_center'].value = ti_center_wl
-            params['A_sigma'].value = 0.002
-            params['A_gamma'].value = 1
+        Args:
+            slit: Optional slit index to fit only that pixel. If None, fits all pixels.
+            scan: Optional scan index to fit only that pixel. If None, fits all pixels.
+                  Must be provided together with slit.
+        """
+        # Concatenate line and residual data for full spectrum fitting
+        wvl_line = self.line.wvl
+        wvl_residual = self.residual.wvl
+        data_line = self.line.data  # shape: (n_wvl_line, n_slit, n_scan)
+        data_residual = self.residual.data  # shape: (n_wvl_residual, n_slit, n_scan)
 
-            params['B_amplitude'].value = -0.01
-            params['B_center'].value = 453.6268
-            params['B_sigma'].value = 0.002
-            params['B_gamma'].value = 1
+        # Concatenate along wavelength axis
+        wvl_full = np.concatenate([wvl_line, wvl_residual])
+        data_full = np.concatenate([data_line, data_residual], axis=0)
 
-            params['C_amplitude'].value = -0.01
-            params['C_center'].value = 453.6050
-            params['C_sigma'].value = 0.002
-            params['C_gamma'].value = 1
+        # Sort by wavelength (important for fitting)
+        sort_idx = np.argsort(wvl_full)
+        wvl_full = wvl_full[sort_idx]
+        data_full = data_full[sort_idx, :, :]
 
-            params['D_amplitude'].value = -0.01
-            params['D_center'].value = 453.5926
-            params['D_sigma'].value = 0.002
-            params['D_gamma'].value = 1
+        # Get mean continuum level
+        continuum_mean = np.mean(self.continuum.data)
 
-            params['c_c'].value = continuum_mean
-            #params['c_c'].vary = False  # Fix constant to continuum mean, don't fit
-            return params
+        # Determine which pixels to fit
+        if slit is not None and scan is not None:
+            # Fit single pixel
+            profile = data_full[:, slit, scan]
+            continuum_pixel = np.mean(self.continuum.data[:, slit, scan])
+            result = fit_sr_pixel(wvl_full, profile, continuum_pixel)
 
-        # Fit each spatial pixel
-        for i, slit in enumerate(slit_indices):
-            for j, scan in enumerate(scan_indices):
-                profile = data_full[:, slit, scan]
-
-                # Find center of the line for this pixel (using minimum of line region)
-                # First, find the wavelength of the minimum in the line region
-                line_profile = data_line[:, slit, scan]
-                idx_min_line = np.argmin(line_profile)
-                wvl_min_line = wvl_line[idx_min_line]
-
-                # Then find the index of this wavelength in the full sorted spectrum
-                idx_center_pixel = np.argmin(np.abs(wvl_full - wvl_min_line))
-
-                # Calculate continuum mean for this pixel
-                continuum_profile = self.continuum.data[:, slit, scan]
-                continuum_mean = np.mean(continuum_profile)
-
-                # Create models
-                voigtA = VoigtModel(prefix='A_')
-                pars = voigtA.make_params()
-                voigtB = VoigtModel(prefix='B_')
-                pars.update(voigtB.make_params())
-                voigtC = VoigtModel(prefix='C_')
-                pars.update(voigtC.make_params())
-                voigtD = VoigtModel(prefix='D_')
-                pars.update(voigtD.make_params())
-                const = ConstantModel(prefix='c_')
-                pars.update(const.make_params())
-
-                pars = initialize_ti_parameters(pars, ti_center_wl, continuum_mean)
-
-                # Build separate models for blue and red
-                model_blue = voigtA + voigtB + voigtC + voigtD + const
-                model_red = voigtA + const
-
-                # Extract blue and red parts for this pixel
-                wvl_blue_pixel = wvl_full[:idx_center_pixel + pixel_overlap]
-                wvl_red_pixel = wvl_full[idx_center_pixel - pixel_overlap:]
-                profile_blue = profile[:idx_center_pixel + pixel_overlap]
-                profile_red = profile[idx_center_pixel - pixel_overlap:]
-
-                # Plot initial guess if fitting single pixel
-                if single_pixel:
-                    
-                    fig, ax = plt.subplots(figsize=(12, 6))
-
-                    # Blue part
-                    initial_guess_blue = model_blue.eval(pars, x=wvl_blue_pixel)
-                    ax.plot(wvl_blue_pixel, profile_blue, '--', label='Data (blue)', alpha=0.6, color='blue')
-                    ax.plot(wvl_blue_pixel, initial_guess_blue, '-', label='Initial guess (blue)', linewidth=2, color='blue')
-
-                    # Red part
-                    initial_guess_red = model_red.eval(pars, x=wvl_red_pixel)
-                    ax.plot(wvl_red_pixel, profile_red, '--', label='Data (red)', alpha=0.6, color='red')
-                    ax.plot(wvl_red_pixel, initial_guess_red, '-', label='Initial guess (red)', linewidth=2, color='red')
-
-                    ax.set_xlabel('Wavelength')
-                    ax.set_ylabel('Intensity')
-                    ax.set_title('Initial guess - Blue and red parts')
-                    ax.legend()
-                    ax.grid(True, alpha=0.3)
-
-                    plt.tight_layout()
-                    plt.show()
-
-                # Fit blue part
-                try:
-                    out_blue = model_blue.fit(profile_blue, pars, x=wvl_blue_pixel)
-                    components_blue = out_blue.eval_components(x=wvl_blue_pixel)
-
-                    # Fit red part
-                    out_red = model_red.fit(profile_red, pars, x=wvl_red_pixel)
-                    components_red = out_red.eval_components(x=wvl_red_pixel)
-
-                    # Store results
-                    # VoigtA components (for plotting in different colors)
-                    voigtA_blue_full[:idx_center_pixel + pixel_overlap, slit, scan] = components_blue['A_']
-                    voigtA_red_full[idx_center_pixel - pixel_overlap:, slit, scan] = components_red['A_']
-
-                    # Line fit: Ti component (A_ + const)
-                    line_fit_full[:idx_center_pixel + pixel_overlap, slit, scan] = components_blue['A_'] + components_blue['c_']
-                    line_fit_full[idx_center_pixel - pixel_overlap:, slit, scan] = components_red['A_'] + components_red['c_']
-
-                    # Residual fit: Parasitic components (B_ + C_ + D_)
-                    # Only blue part has parasitic components, red part has none
-                    residual_fit_full[:idx_center_pixel + pixel_overlap, slit, scan] = components_blue['B_'] + components_blue['C_'] + components_blue['D_']
-                    residual_fit_full[idx_center_pixel - pixel_overlap:, slit, scan] = 0  # No parasitic components in red part
-
-                    # Full fit: blue fit + red fit
-                    fit_sum_full[:idx_center_pixel + pixel_overlap, slit, scan] = out_blue.eval(x=wvl_blue_pixel)
-                    fit_sum_full[idx_center_pixel - pixel_overlap:, slit, scan] = out_red.eval(x=wvl_red_pixel)
-
-                except Exception as e:
-                    print(f"Fit failed for slit={slit}, scan={scan}: {e}")
-                    # Use zeros for failed fits
-                    line_fit_full[:, slit, scan] = 0
-                    residual_fit_full[:, slit, scan] = 0
-                    fit_sum_full[:, slit, scan] = 0
-                    voigtA_blue_full[:, slit, scan] = 0
-                    voigtA_red_full[:, slit, scan] = 0
-
-        # Separate results back into line and residual parts
-        # Line region results go to line wavelength region
-        self.line.fit = line_fit_full[line_indices_sorted, :, :]
-        self.residual.fit = residual_fit_full[line_indices_sorted, :, :]
-        self.voigtA_blue = voigtA_blue_full[line_indices_sorted, :, :]
-        self.voigtA_red = voigtA_red_full[line_indices_sorted, :, :]
-
-        # Full fit should be in the full wavelength region (blue+red)
-        self.fit_sum = fit_sum_full
-        self.fit_sum_wvl = wvl_full  # Store full wavelength array for plotting
-
-        if single_pixel:
-            print(f"TI line fitting completed for single pixel (slit={slit}, scan={scan})")
+            # Create arrays with single pixel result
+            n_wvl = wvl_full.shape[0]
+            n_slit, n_scan = data_line.shape[1], data_line.shape[2]
+            best_fit = np.zeros((n_wvl, n_slit, n_scan))
+            component_sr = np.zeros((n_wvl, n_slit, n_scan))
+            best_fit[:, slit, scan] = result['best_fit']
+            component_sr[:, slit, scan] = result['component_sr']
         else:
-            print(f"TI line fitting completed for {n_slit} x {n_scan} spatial pixels")
+            # Fit all pixels separately
+            fit_results = fit_sr_spectrum(data_full, wvl_full, continuum_mean)
+            best_fit = fit_results['best_fit']
+            component_sr = fit_results['component_sr']
+
+        # Store results as SpectrumParts (wavelength is already in Angstrom)
+        self.fit_sum = SpectrumPart(best_fit, wvl_full)
+        self.fit_line = SpectrumPart(component_sr, wvl_full)
 
     def plot(self, ax=None, show_continuum=True, show_line=True, show_residual=True,
               scan=None, slit=None, fit=False):
@@ -696,7 +1345,7 @@ class Spectrum:
             show_residual: Whether to plot residual
             scan_idx: Optional scan index to plot specific pixel. If None, averages over scan.
             slit_idx: Optional slit index to plot specific pixel. If None, averages over slit.
-            fit: Whether to plot fit results (line.fit, residual.fit, fit_sum)
+            fit: Whether to plot fit results (fit_sum, fit_line)
 
         Returns:
             ax: The matplotlib axes object
@@ -704,53 +1353,39 @@ class Spectrum:
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
 
+        # Helper function to extract spectrum from 3D array
+        def extract_spectrum(data, scan, slit):
+            if scan is not None and slit is not None:
+                return data[:, slit, scan]
+            elif scan is not None:
+                return np.mean(data[:, :, scan], axis=1)
+            elif slit is not None:
+                return np.mean(data[:, slit, :], axis=1)
+            else:
+                return np.mean(data, axis=(1, 2))
+
+        # Plot original data
         if show_continuum and self.continuum.data is not None:
-            self.continuum.plot(ax, label='Continuum', alpha=0.7,
-                              scan_idx=scan, slit_idx=slit)
+            continuum_data = extract_spectrum(self.continuum.data, scan, slit)
+            ax.plot(self.continuum.wvl, continuum_data, '+', label='Continuum', alpha=0.7)
+
         if show_line and self.line.data is not None:
-            self.line.plot(ax, label='Line', alpha=0.9,
-                          scan_idx=scan, slit_idx=slit)
+            line_data = extract_spectrum(self.line.data, scan, slit)
+            ax.plot(self.line.wvl, line_data, '+', label='Line', alpha=0.9)
+
         if show_residual and self.residual.data is not None:
-            self.residual.plot(ax, label='Residual', alpha=0.7,
-                              scan_idx=scan, slit_idx=slit)
+            residual_data = extract_spectrum(self.residual.data, scan, slit)
+            ax.plot(self.residual.wvl, residual_data, '+', label='Residual', alpha=0.7)
 
         # Plot fit results if available and requested
-        if fit and self.fit_sum is not None:
-            wvl = self.line.wvl
+        if fit:
+            if self.fit_sum is not None:
+                fit_sum_data = extract_spectrum(self.fit_sum.data, scan, slit)
+                ax.plot(self.fit_sum.wvl, fit_sum_data, '--', label='Full fit', alpha=0.8, linewidth=1)
 
-            # Helper function to extract spectrum from 3D array
-            def extract_spectrum(data, scan, slit):
-                if scan is not None and slit is not None:
-                    return data[:, slit, scan]
-                elif scan is not None:
-                    return np.mean(data[:, :, scan], axis=1)
-                elif slit is not None:
-                    return np.mean(data[:, slit, :], axis=1)
-                else:
-                    return np.mean(data, axis=(1, 2))
-
-            # Plot individual fit components (in line wavelength region)
-            if hasattr(self.line, 'fit') and self.line.fit is not None:
-                line_fit = extract_spectrum(self.line.fit, scan, slit)
-                ax.plot(wvl, line_fit, '--', label='Line fit (Ti)', alpha=0.8, linewidth=1.5)
-
-            if hasattr(self.residual, 'fit') and self.residual.fit is not None:
-                residual_fit = extract_spectrum(self.residual.fit, scan, slit)
-                ax.plot(wvl, residual_fit, '--', label='Residual fit (parasitic)', alpha=0.8, linewidth=1.5)
-
-            # Plot voigtA components in different colors (in line wavelength region)
-            if hasattr(self, 'voigtA_blue') and self.voigtA_blue is not None:
-                voigtA_blue = extract_spectrum(self.voigtA_blue, scan, slit)
-                ax.plot(wvl, voigtA_blue, ':', label='VoigtA (blue)', alpha=0.7, linewidth=1.5, color='blue')
-
-            if hasattr(self, 'voigtA_red') and self.voigtA_red is not None:
-                voigtA_red = extract_spectrum(self.voigtA_red, scan, slit)
-                ax.plot(wvl, voigtA_red, ':', label='VoigtA (red)', alpha=0.7, linewidth=1.5, color='red')
-
-            # Plot full fit sum (in full wavelength region)
-            if hasattr(self, 'fit_sum_wvl') and self.fit_sum_wvl is not None:
-                fit_sum = extract_spectrum(self.fit_sum, scan, slit)
-                ax.plot(self.fit_sum_wvl, fit_sum, '-', label='Full fit', alpha=0.9, linewidth=2)
+            if self.fit_line is not None:
+                fit_line_data = extract_spectrum(self.fit_line.data, scan, slit)
+                ax.plot(self.fit_line.wvl, fit_line_data, '--', label='Line component', alpha=0.8, linewidth=1, color='orange')
 
         ax.legend()
         ax.set_title("Split Spectrum")
@@ -945,9 +1580,9 @@ def convert_to_spectrum(split_data):
             residual_data = _reorder_axes(parts['residual'][0])
 
             result[line][position] = Spectrum(
-                SpectrumPart(continuum_data, parts['continuum'][1]),
-                SpectrumPart(line_data, parts['line'][1]),
-                SpectrumPart(residual_data, parts['residual'][1]),
+                SpectrumPart(continuum_data, parts['continuum'][1] * 10.0),
+                SpectrumPart(line_data, parts['line'][1] * 10.0),
+                SpectrumPart(residual_data, parts['residual'][1] * 10.0),
                 line_name=line
             )
     return SpectrumContainer(result)
@@ -1257,6 +1892,27 @@ def run_all_preparation_steps(crop=True):
     spectra.save_all()
     return spectra
 
+def run_all_fitting(spectra):
+    """
+    Fit and save all spectra in the container, except disk_center positions.
+
+    Args:
+        spectra: SpectrumContainer with spectra to fit
+    """
+    for line_name, positions in spectra.items():
+        for position_name, spectrum in positions.items():
+            if position_name == 'disk_center':
+                print(f"Skipping {line_name} disk_center")
+                continue
+
+            print(f"Fitting {line_name} {position_name}...")
+            try:
+                spectrum.fit()
+                spectrum.save()
+                print(f"  Saved {line_name} {position_name}")
+            except Exception as e:
+                print(f"  Error fitting {line_name} {position_name}: {e}")
+
 
 #%%
 if __name__ == '__main__':
@@ -1270,8 +1926,21 @@ if __name__ == '__main__':
     # spectra = run_all_preparation_steps(crop=True)
     # check out mean intensity
     # spectra['ti']['disk_center'].plot()
-    
+
     # once the preparation is finished, you can just load the prepared data
     spectra = SpectrumContainer.load_all()
+
+    # Fit Ti line for a specific spectrum
+    spectrum = spectra['sr']['disk_center']
+    spectrum.fit(slit=200, scan=22)
+    #spectrum.fit()
+    spectrum.save()
+
+    # Plot with fit results
+    spectrum.plot(fit=True, slit=200, scan=22)
+    
+    #Fit all other positions and lines in external terminal
+    # uv run python /home/franziskaz/code/themis/scripts/process_formation_height_line_levels.py
+    run_all_fitting(spectra) # uncomment for running
 # -----------------------------------------------------
 
