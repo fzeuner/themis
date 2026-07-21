@@ -1,40 +1,60 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Fri Jul 4 15:24:27 2025
+Spectral Line Fitting and Formation Height Analysis
+
+This script implements Voigt profile fitting for Ti and Sr spectral lines to extract
+formation height parameters. It follows the methodology from run_voigt_as.pro (IDL)
+with Python implementations using lmfit.
+
+Workflow Steps:
+1. Data Preparation: Load L4 data, split spectrum into continuum/line/residual regions
+2. Continuum Normalization: Normalize each position to its continuum level
+3. Spectral Fitting: Fit each spatial pixel with piecewise (red and blue) Voigt models
+   - Ti line: 4 Voigt profiles (A, B, C, D) + constant continuum
+   - Sr line: 2 Voigt profiles (SR, B) + constant continuum
+4. Line Levels Calculation: Extract intensity levels at equally-spaced widths
+5. Results Storage: Save fitted profiles and line levels in FITS format
+
+Special Implementation Details:
+
+- Per-pixel Continuum: Each pixel uses its own continuum level calculated from
+  the continuum region, using central 80% of continuum data (removing top/bottom 10%
+  outliers) to reduce sensitivity to bad pixels or cosmic rays.
+
+- Continuum Sanity Check: In line_levels calculation, ensures 95% continuum level
+  is below the maximum of fitted data. If too high, adjusts to 99% of max.
+
+- Parabola Refinement: Component centers are initialized using parabola fitting
+  around the minimum for improved starting parameters. 
+  --> Center is fitted, and the assumed to be the same for red/blue and splitting 
+
+- Weights around the center are higher to prevent disconuities
+
+- Shared Memory Multiprocessing: For large datasets (>100 pixels), uses shared memory
+  to avoid data copying overhead. Data is cast to float64 to match worker expectations.
+
+- Minimizer strategy slightly optimized (max number of iterations)
+
+- Wavelength Units: All internal calculations use Angstrom. Data is converted to nm
+  only when saving to FITS files for compatibility with IDL/other tools.
+
+- Line Levels Storage: Line levels are saved as FITS binary table extension with
+  metadata (continuum level, intensity at core, width at continuum) following
+  run_voigt_as.pro format.
+
+- Error Handling: Line levels calculation can fail for bad data pixels; these are
+  gracefully handled by returning None rather than crashing the entire fit.
+
+Example usage:
+    spectra = SpectrumContainer.load_all()
+    spectrum = spectra['ti']['disk_center']
+    spectrum.fit()  # Fit all pixels
+    spectrum.save()
+    spectrum.plot(fit=True, show_levels=True, slit=100, scan=10)
 
 @author: zeuner
-
-
-    # Example usage: load L4 data for different positions and lines
-
-    # Option 1: Load specific positions
-    ti_disk_center_l4, ti_disk_center_header = load_l4_for_position('ti', 'disk_center')
-    print(f"Loaded TI disk center L4 data: {ti_disk_center_l4.keys() if hasattr(ti_disk_center_l4, 'keys') else 'scalar'}")
-
-    # Option 2: Iterate over all positions for a line
-    print("\nIterating over all TI positions:")
-    for position, sequence in iterate_positions('ti'):
-        print(f"  Position: {position}, Sequence: {sequence}")
-
-    # Option 3: Load all L4 data for a line at once
-    print("\nLoading all TI L4 data:")
-    ti_all_l4 = load_all_l4_for_line('ti')
-
-    # Option 4: Get all available lines and positions
-    print(f"\nAvailable lines: {get_all_lines()}")
-    print(f"TI positions: {get_all_positions('ti')}")
-    print(f"SR positions: {get_all_positions('sr')}")
-
-    # Option 5: Loop over all lines and positions
-    print("\nLooping over all lines and positions:")
-    for line in get_all_lines():
-        print(f"  Line: {line}")
-        for position in get_all_positions(line):
-            sequence = get_formation_height_config(line, position)
-            print(f"    {position}: sequence {sequence}")
-
-
+Created on Fri Jul 4 15:24:27 2025
 """
 
 from themis.core import themis_tools as tt
@@ -338,6 +358,41 @@ def add_overlap_weights(wvl, params, prefixes=None, base_weight=1.0, boost=3, bo
         weights[mask] = np.maximum(weights[mask], boost)
     return weights
 
+# Helper function for multiprocessing with shared memory (must be at module level)
+def _fit_single_pixel_shared(args):
+    """Fit a single pixel for multiprocessing using shared memory."""
+    wvl_shm_name, line_data_shm_name, continuum_data_shm_name, wvl_shape, line_data_shape, continuum_data_shape, slit_idx, scan_idx = args
+    
+    try:
+        # Access shared memory
+        from multiprocessing import shared_memory
+        
+        # Connect to shared memory blocks
+        wvl_shm = shared_memory.SharedMemory(name=wvl_shm_name)
+        line_data_shm = shared_memory.SharedMemory(name=line_data_shm_name)
+        continuum_data_shm = shared_memory.SharedMemory(name=continuum_data_shm_name)
+        
+        # Create numpy arrays from shared memory
+        wvl = np.ndarray(wvl_shape, dtype=np.float64, buffer=wvl_shm.buf)
+        line_data = np.ndarray(line_data_shape, dtype=np.float64, buffer=line_data_shm.buf)
+        continuum_data = np.ndarray(continuum_data_shape, dtype=np.float64, buffer=continuum_data_shm.buf)
+        
+        # Extract profile and continuum for this pixel
+        profile = line_data[:, slit_idx, scan_idx].copy()  # Copy to avoid keeping shared memory reference
+        continuum_pixel = robust_continuum_mean(continuum_data[:, slit_idx, scan_idx])
+        wvl_copy = wvl.copy()  # Copy wavelength
+        
+        # Close shared memory access
+        wvl_shm.close()
+        line_data_shm.close()
+        continuum_data_shm.close()
+        
+        # Fit the pixel
+        result = fit_ti_pixel(wvl_copy, profile, continuum_pixel)
+        return (slit_idx, scan_idx, result, None)
+    except Exception as e:
+        return (slit_idx, scan_idx, None, str(e))
+
 # Helper function for multiprocessing (must be at module level)
 def _fit_single_pixel(args):
     """Fit a single pixel for multiprocessing."""
@@ -387,32 +442,197 @@ def fit_ti_pixel(wvl, profile, continuum):
     component_ti = components['ti_'] + components['c_']
     component_residual = components['B_'] + components['C_'] + components['D_'] + components['c_']
 
+    # Calculate line levels (may fail for bad data)
+    line_center = out.params['ti_r_center'].value
+    try:
+        levels = line_levels(wvl, component_ti, line_center, continuum)
+    except Exception:
+        levels = None
+
     return {
         'best_fit': best_fit,
         'component_ti': component_ti,
         'component_residual': component_residual,
-        'params': out.params
+        'params': out.params,
+        'levels': levels
     }
 
-def fit_ti_spectrum(line_data, line_wvl, continuum_mean):
+def robust_continuum_mean(continuum_data):
+    """
+    Calculate robust continuum mean using 80% of data (removing outliers).
+    
+    Takes the central 80% of the data after sorting, which effectively removes
+    the top and bottom 10% outliers.
+    
+    Args:
+        continuum_data: Continuum data array (1D or can be sliced to 1D)
+        
+    Returns:
+        float: Robust mean of the continuum data
+    """
+    continuum_flat = continuum_data.flatten()
+    continuum_sorted = np.sort(continuum_flat)
+    # Take central 80% (remove top and bottom 10%)
+    n = len(continuum_sorted)
+    start_idx = int(n * 0.1)
+    end_idx = int(n * 0.9)
+    continuum_central = continuum_sorted[start_idx:end_idx]
+    return np.mean(continuum_central)
+
+def line_levels(wvl, line_profile, line_center, continuum, n_levels=25):
+    """
+    Calculate line levels (intensity at different widths) following run_voigt_as.pro logic.
+    
+    For a fitted line profile, calculates the intensity at N equally-spaced widths
+    from the line core to the width at 95% of continuum.
+    
+    Args:
+        wvl: Wavelength array (in Angstrom)
+        line_profile: Fitted line component profile (e.g., component_ti or component_sr)
+        line_center: Line center wavelength from fit parameters (in Angstrom)
+        continuum: Continuum level for this pixel
+        n_levels: Number of levels to calculate (default: 25)
+        
+    Returns:
+        dict: Dictionary containing:
+            - 'widths': Array of widths from line center (in Angstrom)
+            - 'intensities': Array of intensities at those widths
+            - 'continuum_level': The continuum level used (95% of continuum)
+            Returns None if calculation fails
+    """
+    try:
+        # Use 95% of continuum as reference level
+        continuum_level = 0.95 * continuum
+        
+        # Sanity check: ensure 95% continuum is below the maximum of the fitted data
+        if continuum_level >= np.max(line_profile):
+            # If continuum level is too high, use max of data as upper bound
+            continuum_level = np.max(line_profile) * 0.99
+        
+        # Find intensity at line core
+        idx_center = np.argmin(np.abs(wvl - line_center))
+        intensity_core = line_profile[idx_center]
+        
+        # Find width at continuum level (where profile crosses continuum_level)
+        # Interpolate to find crossing points on both sides
+        from scipy import interpolate
+        
+        # Create interpolation function
+        interp_func = interpolate.interp1d(wvl, line_profile, kind='linear', fill_value='extrapolate')
+        
+        # Find where profile equals continuum_level on both sides
+        # Search in reasonable range around center
+        search_range = 2.0  # Angstrom
+        wvl_search = wvl[(wvl >= line_center - search_range) & (wvl <= line_center + search_range)]
+        
+        # Find crossing points by looking for sign changes
+        profile_search = line_profile[(wvl >= line_center - search_range) & (wvl <= line_center + search_range)]
+        diff = profile_search - continuum_level
+        
+        # Find sign changes (where diff crosses zero)
+        sign_changes = np.diff(np.sign(diff)) != 0
+        
+        # Find blue side crossing (wvl < line_center)
+        blue_mask = (wvl_search[:-1] < line_center) & sign_changes
+        blue_idx = np.where(blue_mask)[0]
+        if len(blue_idx) > 0:
+            blue_cross = wvl_search[blue_idx[0]]
+        else:
+            # Fallback: use edge of search range
+            blue_cross = line_center - search_range
+        
+        # Find red side crossing (wvl > line_center)
+        red_mask = (wvl_search[:-1] > line_center) & sign_changes
+        red_idx = np.where(red_mask)[0]
+        if len(red_idx) > 0:
+            red_cross = wvl_search[red_idx[-1]]
+        else:
+            # Fallback: use edge of search range
+            red_cross = line_center + search_range
+        
+        # Total width at continuum level
+        width_continuum = red_cross - blue_cross
+        
+        # Create N equally-spaced widths from 0 to width_continuum
+        widths = np.linspace(0, width_continuum, n_levels)
+        
+        # Calculate intensity at each width
+        # For each width, find the intensity at (center - width/2) and (center + width/2)
+        # and take the average (following run_voigt_as.pro which combines both wings)
+        intensities = np.zeros(n_levels)
+        intensities[0] = intensity_core  # Width 0 is at line core
+        
+        for i in range(1, n_levels):
+            w = widths[i]
+            wvl_blue = line_center - w/2
+            wvl_red = line_center + w/2
+            
+            # Interpolate intensity at these wavelengths
+            if wvl_blue >= wvl.min() and wvl_blue <= wvl.max():
+                int_blue = interp_func(wvl_blue)
+            else:
+                int_blue = continuum_level
+                
+            if wvl_red >= wvl.min() and wvl_red <= wvl.max():
+                int_red = interp_func(wvl_red)
+            else:
+                int_red = continuum_level
+            
+            intensities[i] = (int_blue + int_red) / 2
+        
+        return {
+            'intensities': intensities,  # 1D array of intensity values at each level (Nniv)
+            'widths': widths,  # 1D array of widths (in Angstrom) from line core
+            'continuum_level': continuum_level,
+            'intensity_core': intensity_core,
+            'width_continuum': width_continuum
+        }
+    except Exception as e:
+        # Return None if calculation fails (e.g., due to bad data)
+        return None
+
+def fit_ti_spectrum(line_data, line_wvl, continuum_data):
     """
     Fit Ti line for all spatial pixels in a spectrum.
 
     Args:
         line_data: Line + residual data array (shape: wavelength, slit, scan)
-        line_wvl: Wavelength array (in nm)
-        continuum_mean: Mean continuum level (fixed for all pixels)
+        line_wvl: Wavelength array (in Angstrom)
+        continuum_data: Continuum data array (shape: n_wvl_cont, n_slit, n_scan)
+                        Per-pixel continuum level is computed as mean over wavelength
 
     Returns:
         dict: Dictionary containing fitted arrays:
             - 'best_fit': Best fit for all pixels (same shape as line_data)
             - 'component_ti': Ti component for all pixels
             - 'component_residual': Residual component for all pixels
+            - 'levels': 3D array of intensity levels (shape: n_levels, n_slit, n_scan)
+            - 'widths': 1D array of widths (in Angstrom) from line core
+            - 'metadata': Dictionary with continuum_level, intensity_core, width_continuum per pixel
     """
     n_wvl, n_slit, n_scan = line_data.shape
     best_fit = np.zeros_like(line_data)
     component_ti = np.zeros_like(line_data)
     component_residual = np.zeros_like(line_data)
+    
+    # Initialize levels array (will store intensities at each level for each pixel)
+    # First, get n_levels from a test pixel
+    test_profile = line_data[:, 0, 0]
+    test_continuum = robust_continuum_mean(continuum_data[:, 0, 0])
+    test_center = line_wvl[np.argmin(test_profile)]
+    test_levels = line_levels(line_wvl, test_profile, test_center, test_continuum)
+    if test_levels is not None:
+        n_levels = len(test_levels['intensities'])
+        levels_array = np.zeros((n_levels, n_slit, n_scan))
+        widths = test_levels['widths']  # Same for all pixels
+    else:
+        levels_array = None
+        widths = None
+    
+    # Store metadata per pixel
+    continuum_levels = np.zeros((n_slit, n_scan))
+    intensity_cores = np.zeros((n_slit, n_scan))
+    width_continuums = np.zeros((n_slit, n_scan))
 
     total_pixels = n_slit * n_scan
 
@@ -423,46 +643,94 @@ def fit_ti_spectrum(line_data, line_wvl, continuum_mean):
 
     # Use multiprocessing for large datasets (only in non-interactive mode)
     if use_multiprocessing:
+        from multiprocessing import shared_memory
+        import uuid
+        
         n_workers = min(os.cpu_count(), total_pixels)  # Use all available CPU cores
-        print(f"Using {n_workers} workers for {total_pixels} pixels...")
+        print(f"Using {n_workers} workers for {total_pixels} pixels with shared memory...")
 
-        # Prepare arguments for all pixels
+        # Ensure float64 dtype to match worker's fixed dtype assumption when
+        # reconstructing arrays from shared memory (avoids buffer size mismatch)
+        line_wvl_f64 = np.ascontiguousarray(line_wvl, dtype=np.float64)
+        line_data_f64 = np.ascontiguousarray(line_data, dtype=np.float64)
+        continuum_data_f64 = np.ascontiguousarray(continuum_data, dtype=np.float64)
+
+        # Create shared memory blocks sized exactly for float64 data
+        wvl_shm = shared_memory.SharedMemory(create=True, size=line_wvl_f64.nbytes)
+        line_data_shm = shared_memory.SharedMemory(create=True, size=line_data_f64.nbytes)
+        continuum_data_shm = shared_memory.SharedMemory(create=True, size=continuum_data_f64.nbytes)
+        
+        # Copy data to shared memory
+        wvl_shared = np.ndarray(line_wvl_f64.shape, dtype=np.float64, buffer=wvl_shm.buf)
+        line_data_shared = np.ndarray(line_data_f64.shape, dtype=np.float64, buffer=line_data_shm.buf)
+        continuum_data_shared = np.ndarray(continuum_data_f64.shape, dtype=np.float64, buffer=continuum_data_shm.buf)
+        
+        wvl_shared[:] = line_wvl_f64[:]
+        line_data_shared[:] = line_data_f64[:]
+        continuum_data_shared[:] = continuum_data_f64[:]
+
+        # Prepare arguments for all pixels (only indices, not data)
         args_list = []
         for slit_idx in range(n_slit):
             for scan_idx in range(n_scan):
-                profile = line_data[:, slit_idx, scan_idx]
-                args_list.append((line_wvl, profile, continuum_mean, slit_idx, scan_idx))
+                args_list.append((
+                    wvl_shm.name, line_data_shm.name, continuum_data_shm.name,
+                    line_wvl_f64.shape, line_data_f64.shape, continuum_data_f64.shape,
+                    slit_idx, scan_idx
+                ))
 
-        # Process with multiprocessing
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_fit_single_pixel, args): args for args in args_list}
+        try:
+            # Process with multiprocessing using shared memory
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_fit_single_pixel_shared, args): args for args in args_list}
 
-            with tqdm(total=total_pixels, desc="Fitting pixels") as pbar:
-                for future in as_completed(futures):
-                    slit_idx, scan_idx, result, error = future.result()
-                    if error is not None:
-                        print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {error}")
-                        profile = line_data[:, slit_idx, scan_idx]
-                        best_fit[:, slit_idx, scan_idx] = profile
-                        component_ti[:, slit_idx, scan_idx] = profile
-                        component_residual[:, slit_idx, scan_idx] = 0
-                    else:
-                        best_fit[:, slit_idx, scan_idx] = result['best_fit']
-                        component_ti[:, slit_idx, scan_idx] = result['component_ti']
-                        component_residual[:, slit_idx, scan_idx] = result['component_residual']
-                    pbar.update(1)
+                with tqdm(total=total_pixels, desc="Fitting TI pixels") as pbar:
+                    for future in as_completed(futures):
+                        slit_idx, scan_idx, result, error = future.result()
+                        if error is not None:
+                            print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {error}")
+                            profile = line_data[:, slit_idx, scan_idx]
+                            best_fit[:, slit_idx, scan_idx] = profile
+                            component_ti[:, slit_idx, scan_idx] = profile
+                            component_residual[:, slit_idx, scan_idx] = 0
+                        else:
+                            best_fit[:, slit_idx, scan_idx] = result['best_fit']
+                            component_ti[:, slit_idx, scan_idx] = result['component_ti']
+                            component_residual[:, slit_idx, scan_idx] = result['component_residual']
+                            # Store levels if available
+                            if result['levels'] is not None and levels_array is not None:
+                                levels_array[:, slit_idx, scan_idx] = result['levels']['intensities']
+                                continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
+                                intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
+                                width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
+                        pbar.update(1)
+        finally:
+            # Clean up shared memory
+            wvl_shm.close()
+            wvl_shm.unlink()
+            line_data_shm.close()
+            line_data_shm.unlink()
+            continuum_data_shm.close()
+            continuum_data_shm.unlink()
     else:
         # Sequential processing (for small datasets or interactive environments)
         with tqdm(total=total_pixels, desc="Fitting pixels") as pbar:
             for slit_idx in range(n_slit):
                 for scan_idx in range(n_scan):
                     profile = line_data[:, slit_idx, scan_idx]
+                    continuum_pixel = robust_continuum_mean(continuum_data[:, slit_idx, scan_idx])
 
                     try:
-                        result = fit_ti_pixel(line_wvl, profile, continuum_mean)
+                        result = fit_ti_pixel(line_wvl, profile, continuum_pixel)
                         best_fit[:, slit_idx, scan_idx] = result['best_fit']
                         component_ti[:, slit_idx, scan_idx] = result['component_ti']
                         component_residual[:, slit_idx, scan_idx] = result['component_residual']
+                        # Store levels if available
+                        if result['levels'] is not None and levels_array is not None:
+                            levels_array[:, slit_idx, scan_idx] = result['levels']['intensities']
+                            continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
+                            intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
+                            width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
                     except Exception as e:
                         print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {e}")
                         # Use original data as fallback
@@ -474,7 +742,14 @@ def fit_ti_spectrum(line_data, line_wvl, continuum_mean):
     return {
         'best_fit': best_fit,
         'component_ti': component_ti,
-        'component_residual': component_residual
+        'component_residual': component_residual,
+        'levels': levels_array,
+        'widths': widths,
+        'metadata': {
+            'continuum_levels': continuum_levels,
+            'intensity_cores': intensity_cores,
+            'width_continuums': width_continuums
+        }
     }
 
 #----------------------------------------------------------------------
@@ -583,6 +858,41 @@ def _initialize_sr_parameter(params, continuum, wvl=None, profile=None):
     return params
 
 
+# Helper function for multiprocessing with shared memory (must be at module level)
+def _fit_sr_single_pixel_shared(args):
+    """Fit a single SR pixel for multiprocessing using shared memory."""
+    wvl_shm_name, line_data_shm_name, continuum_data_shm_name, wvl_shape, line_data_shape, continuum_data_shape, slit_idx, scan_idx = args
+    
+    try:
+        # Access shared memory
+        from multiprocessing import shared_memory
+        
+        # Connect to shared memory blocks
+        wvl_shm = shared_memory.SharedMemory(name=wvl_shm_name)
+        line_data_shm = shared_memory.SharedMemory(name=line_data_shm_name)
+        continuum_data_shm = shared_memory.SharedMemory(name=continuum_data_shm_name)
+        
+        # Create numpy arrays from shared memory
+        wvl = np.ndarray(wvl_shape, dtype=np.float64, buffer=wvl_shm.buf)
+        line_data = np.ndarray(line_data_shape, dtype=np.float64, buffer=line_data_shm.buf)
+        continuum_data = np.ndarray(continuum_data_shape, dtype=np.float64, buffer=continuum_data_shm.buf)
+        
+        # Extract profile and continuum for this pixel
+        profile = line_data[:, slit_idx, scan_idx].copy()  # Copy to avoid keeping shared memory reference
+        continuum_pixel = robust_continuum_mean(continuum_data[:, slit_idx, scan_idx])
+        wvl_copy = wvl.copy()  # Copy wavelength
+        
+        # Close shared memory access
+        wvl_shm.close()
+        line_data_shm.close()
+        continuum_data_shm.close()
+        
+        # Fit the pixel
+        result = fit_sr_pixel(wvl_copy, profile, continuum_pixel)
+        return (slit_idx, scan_idx, result, None)
+    except Exception as e:
+        return (slit_idx, scan_idx, None, str(e))
+
 # Helper function for multiprocessing (must be at module level)
 def _fit_sr_single_pixel(args):
     """Fit a single SR pixel for multiprocessing."""
@@ -623,7 +933,7 @@ def fit_sr_pixel(wvl, profile, continuum):
     weights = add_overlap_weights(wvl, pars, prefixes=['sr', 'B'])
 
     # Fit the model
-    out = model.fit(profile, pars, x=wvl, weights=weights)
+    out = model.fit(profile, pars, x=wvl, weights=weights, method='least_squares', max_nfev=50)  # Limits total function evaluations)
 
     # Evaluate the best fit and components
     best_fit = model.eval(out.params, x=wvl)
@@ -633,32 +943,63 @@ def fit_sr_pixel(wvl, profile, continuum):
     component_sr = components['sr_'] + components['c_']
     component_residual = components['B_'] + components['c_']
 
+    # Calculate line levels (may fail for bad data)
+    line_center = out.params['sr_r_center'].value
+    try:
+        levels = line_levels(wvl, component_sr, line_center, continuum)
+    except Exception:
+        levels = None
+
     return {
         'best_fit': best_fit,
         'component_sr': component_sr,
         'component_residual': component_residual,
-        'params': out.params
+        'params': out.params,
+        'levels': levels
     }
 
-def fit_sr_spectrum(line_data, line_wvl, continuum_mean):
+def fit_sr_spectrum(line_data, line_wvl, continuum_data):
     """
     Fit SR line for all pixels in the spectrum.
 
     Args:
         line_data: 3D array of intensity data (n_wvl, n_slit, n_scan)
         line_wvl: Wavelength array (in Angstrom)
-        continuum_mean: Mean continuum level (fixed for all pixels)
+        continuum_data: Continuum data array (shape: n_wvl_cont, n_slit, n_scan)
+                        Per-pixel continuum level is computed as mean over wavelength
 
     Returns:
         dict: Dictionary containing fitted arrays:
             - 'best_fit': Best fit for all pixels (same shape as line_data)
             - 'component_sr': Sr component for all pixels
             - 'component_residual': Residual component for all pixels
+            - 'levels': 3D array of intensity levels (shape: n_levels, n_slit, n_scan)
+            - 'widths': 1D array of widths (in Angstrom) from line core
+            - 'metadata': Dictionary with continuum_level, intensity_core, width_continuum per pixel
     """
     n_wvl, n_slit, n_scan = line_data.shape
     best_fit = np.zeros_like(line_data)
     component_sr = np.zeros_like(line_data)
     component_residual = np.zeros_like(line_data)
+    
+    # Initialize levels array (will store intensities at each level for each pixel)
+    # First, get n_levels from a test pixel
+    test_profile = line_data[:, 0, 0]
+    test_continuum = robust_continuum_mean(continuum_data[:, 0, 0])
+    test_center = line_wvl[np.argmin(test_profile)]
+    test_levels = line_levels(line_wvl, test_profile, test_center, test_continuum)
+    if test_levels is not None:
+        n_levels = len(test_levels['intensities'])
+        levels_array = np.zeros((n_levels, n_slit, n_scan))
+        widths = test_levels['widths']  # Same for all pixels
+    else:
+        levels_array = None
+        widths = None
+    
+    # Store metadata per pixel
+    continuum_levels = np.zeros((n_slit, n_scan))
+    intensity_cores = np.zeros((n_slit, n_scan))
+    width_continuums = np.zeros((n_slit, n_scan))
 
     total_pixels = n_slit * n_scan
 
@@ -668,46 +1009,93 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_mean):
 
     # Use multiprocessing for large datasets (only in non-interactive mode)
     if use_multiprocessing:
+        from multiprocessing import shared_memory
+        
         n_workers = min(os.cpu_count(), total_pixels)
-        print(f"Using {n_workers} workers for {total_pixels} pixels...")
+        print(f"Using {n_workers} workers for {total_pixels} pixels with shared memory...")
 
-        # Prepare arguments for all pixels
+        # Ensure float64 dtype to match worker's fixed dtype assumption when
+        # reconstructing arrays from shared memory (avoids buffer size mismatch)
+        line_wvl_f64 = np.ascontiguousarray(line_wvl, dtype=np.float64)
+        line_data_f64 = np.ascontiguousarray(line_data, dtype=np.float64)
+        continuum_data_f64 = np.ascontiguousarray(continuum_data, dtype=np.float64)
+
+        # Create shared memory blocks sized exactly for float64 data
+        wvl_shm = shared_memory.SharedMemory(create=True, size=line_wvl_f64.nbytes)
+        line_data_shm = shared_memory.SharedMemory(create=True, size=line_data_f64.nbytes)
+        continuum_data_shm = shared_memory.SharedMemory(create=True, size=continuum_data_f64.nbytes)
+        
+        # Copy data to shared memory
+        wvl_shared = np.ndarray(line_wvl_f64.shape, dtype=np.float64, buffer=wvl_shm.buf)
+        line_data_shared = np.ndarray(line_data_f64.shape, dtype=np.float64, buffer=line_data_shm.buf)
+        continuum_data_shared = np.ndarray(continuum_data_f64.shape, dtype=np.float64, buffer=continuum_data_shm.buf)
+        
+        wvl_shared[:] = line_wvl_f64[:]
+        line_data_shared[:] = line_data_f64[:]
+        continuum_data_shared[:] = continuum_data_f64[:]
+
+        # Prepare arguments for all pixels (only indices, not data)
         args_list = []
         for slit_idx in range(n_slit):
             for scan_idx in range(n_scan):
-                profile = line_data[:, slit_idx, scan_idx]
-                args_list.append((line_wvl, profile, continuum_mean, slit_idx, scan_idx))
+                args_list.append((
+                    wvl_shm.name, line_data_shm.name, continuum_data_shm.name,
+                    line_wvl_f64.shape, line_data_f64.shape, continuum_data_f64.shape,
+                    slit_idx, scan_idx
+                ))
 
-        # Process with multiprocessing
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_fit_sr_single_pixel, args): args for args in args_list}
+        try:
+            # Process with multiprocessing using shared memory
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_fit_sr_single_pixel_shared, args): args for args in args_list}
 
-            with tqdm(total=total_pixels, desc="Fitting SR pixels") as pbar:
-                for future in as_completed(futures):
-                    slit_idx, scan_idx, result, error = future.result()
-                    if error is not None:
-                        print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {error}")
-                        profile = line_data[:, slit_idx, scan_idx]
-                        best_fit[:, slit_idx, scan_idx] = profile
-                        component_sr[:, slit_idx, scan_idx] = profile
-                        component_residual[:, slit_idx, scan_idx] = 0
-                    else:
-                        best_fit[:, slit_idx, scan_idx] = result['best_fit']
-                        component_sr[:, slit_idx, scan_idx] = result['component_sr']
-                        component_residual[:, slit_idx, scan_idx] = result['component_residual']
-                    pbar.update(1)
+                with tqdm(total=total_pixels, desc="Fitting SR pixels") as pbar:
+                    for future in as_completed(futures):
+                        slit_idx, scan_idx, result, error = future.result()
+                        if error is not None:
+                            print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {error}")
+                            profile = line_data[:, slit_idx, scan_idx]
+                            best_fit[:, slit_idx, scan_idx] = profile
+                            component_sr[:, slit_idx, scan_idx] = profile
+                            component_residual[:, slit_idx, scan_idx] = 0
+                        else:
+                            best_fit[:, slit_idx, scan_idx] = result['best_fit']
+                            component_sr[:, slit_idx, scan_idx] = result['component_sr']
+                            component_residual[:, slit_idx, scan_idx] = result['component_residual']
+                            # Store levels if available
+                            if result['levels'] is not None and levels_array is not None:
+                                levels_array[:, slit_idx, scan_idx] = result['levels']['intensities']
+                                continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
+                                intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
+                                width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
+                        pbar.update(1)
+        finally:
+            # Clean up shared memory
+            wvl_shm.close()
+            wvl_shm.unlink()
+            line_data_shm.close()
+            line_data_shm.unlink()
+            continuum_data_shm.close()
+            continuum_data_shm.unlink()
     else:
         # Sequential processing (for small datasets or interactive environments)
         with tqdm(total=total_pixels, desc="Fitting SR pixels") as pbar:
             for slit_idx in range(n_slit):
                 for scan_idx in range(n_scan):
                     profile = line_data[:, slit_idx, scan_idx]
+                    continuum_pixel = robust_continuum_mean(continuum_data[:, slit_idx, scan_idx])
 
                     try:
-                        result = fit_sr_pixel(line_wvl, profile, continuum_mean)
+                        result = fit_sr_pixel(line_wvl, profile, continuum_pixel)
                         best_fit[:, slit_idx, scan_idx] = result['best_fit']
                         component_sr[:, slit_idx, scan_idx] = result['component_sr']
                         component_residual[:, slit_idx, scan_idx] = result['component_residual']
+                        # Store levels if available
+                        if result['levels'] is not None and levels_array is not None:
+                            levels_array[:, slit_idx, scan_idx] = result['levels']['intensities']
+                            continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
+                            intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
+                            width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
                     except Exception as e:
                         print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {e}")
                         # Use original data as fallback
@@ -720,7 +1108,14 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_mean):
     return {
         'best_fit': best_fit,
         'component_sr': component_sr,
-        'component_residual': component_residual
+        'component_residual': component_residual,
+        'levels': levels_array,
+        'widths': widths,
+        'metadata': {
+            'continuum_levels': continuum_levels,
+            'intensity_cores': intensity_cores,
+            'width_continuums': width_continuums
+        }
     }
 
 # Predefined split configurations for each line (wavelength ranges in nm)
@@ -858,7 +1253,7 @@ class SpectrumPart:
             return f"SpectrumPart(data=None, wvl=None)"
         return f"SpectrumPart(data.shape={self.data.shape}, wvl.shape={self.wvl.shape})"
 
-    def save(self, filepath, config_path=None, sequence=None, python_file=None):
+    def save(self, filepath, config_path=None, sequence=None, python_file=None, levels=None):
         """
         Save the spectrum part to a FITS file.
 
@@ -869,6 +1264,7 @@ class SpectrumPart:
             config_path: Path to the configuration file (saved in header)
             sequence: Sequence number used (saved in header)
             python_file: Name of the Python file that created this file (saved in header)
+            levels: Optional dictionary with line levels data (widths, intensities, continuum_level, etc.)
         """
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -887,8 +1283,38 @@ class SpectrumPart:
         header['SEQUENCE'] = str(sequence) if sequence is not None else 'unknown'
         header['PYTHON'] = str(python_file) if python_file else 'unknown'
 
-        # Create HDU list and write to file
+        # Create HDU list
         hdul = fits.HDUList([primary_hdu, wavelength_hdu])
+
+        # Add line levels extension if provided (following run_voigt_as.pro format)
+        # Format: 3D array of intensities (n_levels, n_slit, n_scan) + widths (1D) + metadata
+        if levels is not None:
+            from astropy.table import Table
+
+            levels_array = levels['intensities']  # (n_levels, n_slit, n_scan)
+            widths = levels['widths']  # 1D array
+            metadata = levels['metadata']
+
+            # Save as 3D image HDU (Mval0 format from run_voigt_as.pro)
+            levels_hdu = fits.ImageHDU(data=levels_array, name='LEVELS')
+            levels_hdu.header['NLEVELS'] = len(widths)
+            levels_hdu.header['NSLIT'] = levels_array.shape[1]
+            levels_hdu.header['NSCAN'] = levels_array.shape[2]
+
+            # Save widths as a separate extension
+            widths_hdu = fits.ImageHDU(data=widths, name='WIDTHS')
+            hdul.append(widths_hdu)
+
+            # Save metadata as a table extension
+            meta_table = Table()
+            meta_table['continuum_levels'] = metadata['continuum_levels'].flatten()
+            meta_table['intensity_cores'] = metadata['intensity_cores'].flatten()
+            meta_table['width_continuums'] = metadata['width_continuums'].flatten()
+            meta_hdu = fits.BinTableHDU(meta_table, name='LEVELS_META')
+            hdul.append(meta_hdu)
+
+            hdul.append(levels_hdu)
+
         hdul.writeto(filepath, overwrite=True)
 
     @classmethod
@@ -909,8 +1335,29 @@ class SpectrumPart:
             wvl = hdul['WAVELENGTH'].data
             # Convert wavelength from nm to Angstrom
             wvl_angstrom = wvl * 10.0
-            # Fit result is not stored in FITS, set to None
-            return cls(data, wvl_angstrom, fit_result=None)
+            
+            spectrum_part = cls(data, wvl_angstrom, fit_result=None)
+            
+            # Load levels extension if present
+            # Format: 3D array of intensities (n_levels, n_slit, n_scan) + widths (1D) + metadata
+            if 'LEVELS' in hdul:
+                levels_array = hdul['LEVELS'].data
+                widths = hdul['WIDTHS'].data
+                meta_table = hdul['LEVELS_META'].data
+                n_slit = hdul['LEVELS'].header['NSLIT']
+                n_scan = hdul['LEVELS'].header['NSCAN']
+
+                spectrum_part.levels = {
+                    'intensities': levels_array,
+                    'widths': widths,
+                    'metadata': {
+                        'continuum_levels': meta_table['continuum_levels'].reshape(n_slit, n_scan),
+                        'intensity_cores': meta_table['intensity_cores'].reshape(n_slit, n_scan),
+                        'width_continuums': meta_table['width_continuums'].reshape(n_slit, n_scan)
+                    }
+                }
+            
+            return spectrum_part
 
     def plot(self, ax=None, scan_idx=None, slit_idx=None, **kwargs):
         """
@@ -992,10 +1439,64 @@ class Spectrum:
         self.line_name = line_name  # 'ti' or 'sr'
         self.fit_sum = None  # Will store full fit result after fitting
         self.fit_line = None  # Will store line component after fitting
+        self.levels = None  # Will store line levels dict (3D intensities array + widths + metadata)
         self._load_path = None  # Store original load path for default save
 
     def __repr__(self):
         return f"Spectrum(continuum, line, residual)"
+
+    def _has_3d_levels(self):
+        """Check whether self.levels holds a valid 3D intensities array (n_levels, n_slit, n_scan)."""
+        return (self.levels is not None
+                and isinstance(self.levels, dict)
+                and 'intensities' in self.levels
+                and isinstance(self.levels['intensities'], np.ndarray)
+                and self.levels['intensities'].ndim == 3)
+
+    def _merge_pixel_levels(self, slit, scan, pixel_levels, n_slit, n_scan):
+        """
+        Merge a single pixel's line levels into the shared 3D levels array,
+        preserving any previously fitted pixels (loaded or fitted earlier).
+
+        Args:
+            slit, scan: pixel indices to update
+            pixel_levels: dict returned by line_levels() for this pixel
+                          (keys: 'intensities', 'widths', 'continuum_level',
+                          'intensity_core', 'width_continuum'), or None
+            n_slit, n_scan: full spatial dimensions of the spectrum
+
+        Returns:
+            None. Updates self.levels in place.
+        """
+        if pixel_levels is None:
+            return
+
+        if self._has_3d_levels():
+            # Reuse existing 3D levels array, update only this pixel
+            levels_array = self.levels['intensities']
+            widths = self.levels['widths']
+            metadata = self.levels['metadata']
+        else:
+            # No existing levels array, create new one filled with NaN
+            n_levels = len(pixel_levels['intensities'])
+            levels_array = np.full((n_levels, n_slit, n_scan), np.nan)
+            widths = pixel_levels['widths']
+            metadata = {
+                'continuum_levels': np.full((n_slit, n_scan), np.nan),
+                'intensity_cores': np.full((n_slit, n_scan), np.nan),
+                'width_continuums': np.full((n_slit, n_scan), np.nan)
+            }
+
+        levels_array[:, slit, scan] = pixel_levels['intensities']
+        metadata['continuum_levels'][slit, scan] = pixel_levels['continuum_level']
+        metadata['intensity_cores'][slit, scan] = pixel_levels['intensity_core']
+        metadata['width_continuums'][slit, scan] = pixel_levels['width_continuum']
+
+        self.levels = {
+            'intensities': levels_array,
+            'widths': widths,
+            'metadata': metadata
+        }
 
     def reconstruct(self, parts=('residual', 'line', 'continuum')):
         """
@@ -1071,7 +1572,8 @@ class Spectrum:
         if self.fit_sum is not None:
             self.fit_sum.save(f"{filepath}_fit_sum.fits", config_path, sequence, python_file)
         if self.fit_line is not None:
-            self.fit_line.save(f"{filepath}_fit_line.fits", config_path, sequence, python_file)
+            # Pass levels dictionary as extension to _fit_line.fits
+            self.fit_line.save(f"{filepath}_fit_line.fits", config_path, sequence, python_file, levels=self.levels)
 
     @classmethod
     def load(cls, filepath, line_name=None):
@@ -1102,8 +1604,11 @@ class Spectrum:
 
         try:
             spectrum.fit_line = SpectrumPart.load(f"{filepath}_fit_line.fits")
+            # Load levels from extension if present, else leave as None (set in __init__)
+            spectrum.levels = getattr(spectrum.fit_line, 'levels', None)
         except FileNotFoundError:
             spectrum.fit_line = None
+            spectrum.levels = None
 
         return spectrum
 
@@ -1193,7 +1698,7 @@ class Spectrum:
         ax_worst.set_ylabel('Intensity')
         ax_worst.legend()
 
-        plt.tight_layout()
+        #plt.tight_layout()
         return fig
 
     def fit(self, slit=None, scan=None):
@@ -1225,7 +1730,7 @@ class Spectrum:
 
         Procedure:
         1. Concatenate residual+line for full spectrum
-        2. Use mean continuum as fixed continuum level
+        2. Use per-pixel continuum as fixed continuum level
         3. Fit all spatial pixels separately using fit_ti_spectrum
         4. Store full fit and Ti component as SpectrumParts
 
@@ -1234,43 +1739,53 @@ class Spectrum:
             scan: Optional scan index to fit only that pixel. If None, fits all pixels.
                   Must be provided together with slit.
         """
-        # Concatenate line and residual data for full spectrum fitting
-        wvl_line = self.line.wvl
-        wvl_residual = self.residual.wvl
-        data_line = self.line.data  # shape: (n_wvl_line, n_slit, n_scan)
-        data_residual = self.residual.data  # shape: (n_wvl_residual, n_slit, n_scan)
+        # Use reconstruct to concatenate line and residual data
+        wvl_full, data_full = self.reconstruct(parts=('line', 'residual'))
 
-        # Concatenate along wavelength axis
-        wvl_full = np.concatenate([wvl_line, wvl_residual])
-        data_full = np.concatenate([data_line, data_residual], axis=0)
-
-        # Sort by wavelength (important for fitting)
-        sort_idx = np.argsort(wvl_full)
-        wvl_full = wvl_full[sort_idx]
-        data_full = data_full[sort_idx, :, :]
-
-        # Get mean continuum level
-        continuum_mean = np.mean(self.continuum.data)
+        # Get continuum data for per-pixel fitting
+        continuum_data = self.continuum.data  # shape: (n_wvl_cont, n_slit, n_scan)
 
         # Determine which pixels to fit
         if slit is not None and scan is not None:
             # Fit single pixel
+            import time
             profile = data_full[:, slit, scan]
-            continuum_pixel = np.mean(self.continuum.data[:, slit, scan])
+            continuum_pixel = robust_continuum_mean(continuum_data[:, slit, scan])
+            start_time = time.time()
             result = fit_ti_pixel(wvl_full, profile, continuum_pixel)
+            elapsed = time.time() - start_time
+            print(f"Single pixel fit time: {elapsed:.3f}s")
 
-            # Create arrays with single pixel result
+            # Preserve existing fit data if available, only update the single pixel
             n_wvl = wvl_full.shape[0]
-            n_slit, n_scan = data_line.shape[1], data_line.shape[2]
-            best_fit = np.zeros((n_wvl, n_slit, n_scan))
-            component_ti = np.zeros((n_wvl, n_slit, n_scan))
-            best_fit[:, slit, scan] = result['best_fit']
-            component_ti[:, slit, scan] = result['component_ti']
+            n_slit, n_scan = data_full.shape[1], data_full.shape[2]
+            
+            if self.fit_sum is not None and self.fit_line is not None:
+                # Use existing fitted data, update only this pixel
+                best_fit = self.fit_sum.data.copy()
+                component_ti = self.fit_line.data.copy()
+                best_fit[:, slit, scan] = result['best_fit']
+                component_ti[:, slit, scan] = result['component_ti']
+            else:
+                # No existing fit data, create new arrays with only this pixel
+                best_fit = np.zeros((n_wvl, n_slit, n_scan))
+                component_ti = np.zeros((n_wvl, n_slit, n_scan))
+                best_fit[:, slit, scan] = result['best_fit']
+                component_ti[:, slit, scan] = result['component_ti']
+
+            # Store levels data for plotting, preserving previously fitted pixels
+            self._merge_pixel_levels(slit, scan, result['levels'], n_slit, n_scan)
         else:
-            # Fit all pixels separately
-            fit_results = fit_ti_spectrum(data_full, wvl_full, continuum_mean)
+            # Fit all pixels separately with per-pixel continuum
+            fit_results = fit_ti_spectrum(data_full, wvl_full, continuum_data)
             best_fit = fit_results['best_fit']
             component_ti = fit_results['component_ti']
+            # Store levels data for all pixels
+            self.levels = {
+                'intensities': fit_results['levels'],  # 3D array (n_levels, n_slit, n_scan)
+                'widths': fit_results['widths'],  # 1D array
+                'metadata': fit_results['metadata']
+            }
 
         # Store results as SpectrumParts (wavelength is already in Angstrom)
         self.fit_sum = SpectrumPart(best_fit, wvl_full)
@@ -1282,7 +1797,7 @@ class Spectrum:
 
         Procedure:
         1. Concatenate residual+line for full spectrum
-        2. Use mean continuum as fixed continuum level
+        2. Use per-pixel continuum as fixed continuum level
         3. Fit all spatial pixels separately using fit_sr_spectrum
         4. Store full fit and SR component as SpectrumParts
 
@@ -1291,50 +1806,60 @@ class Spectrum:
             scan: Optional scan index to fit only that pixel. If None, fits all pixels.
                   Must be provided together with slit.
         """
-        # Concatenate line and residual data for full spectrum fitting
-        wvl_line = self.line.wvl
-        wvl_residual = self.residual.wvl
-        data_line = self.line.data  # shape: (n_wvl_line, n_slit, n_scan)
-        data_residual = self.residual.data  # shape: (n_wvl_residual, n_slit, n_scan)
+        # Use reconstruct to concatenate line and residual data
+        wvl_full, data_full = self.reconstruct(parts=('line', 'residual'))
 
-        # Concatenate along wavelength axis
-        wvl_full = np.concatenate([wvl_line, wvl_residual])
-        data_full = np.concatenate([data_line, data_residual], axis=0)
-
-        # Sort by wavelength (important for fitting)
-        sort_idx = np.argsort(wvl_full)
-        wvl_full = wvl_full[sort_idx]
-        data_full = data_full[sort_idx, :, :]
-
-        # Get mean continuum level
-        continuum_mean = np.mean(self.continuum.data)
+        # Get continuum data for per-pixel fitting
+        continuum_data = self.continuum.data  # shape: (n_wvl_cont, n_slit, n_scan)
 
         # Determine which pixels to fit
         if slit is not None and scan is not None:
             # Fit single pixel
+            import time
             profile = data_full[:, slit, scan]
-            continuum_pixel = np.mean(self.continuum.data[:, slit, scan])
+            continuum_pixel = robust_continuum_mean(continuum_data[:, slit, scan])
+            start_time = time.time()
             result = fit_sr_pixel(wvl_full, profile, continuum_pixel)
+            elapsed = time.time() - start_time
+            print(f"Single pixel fit time: {elapsed:.3f}s")
 
-            # Create arrays with single pixel result
+            # Preserve existing fit data if available, only update the single pixel
             n_wvl = wvl_full.shape[0]
-            n_slit, n_scan = data_line.shape[1], data_line.shape[2]
-            best_fit = np.zeros((n_wvl, n_slit, n_scan))
-            component_sr = np.zeros((n_wvl, n_slit, n_scan))
-            best_fit[:, slit, scan] = result['best_fit']
-            component_sr[:, slit, scan] = result['component_sr']
+            n_slit, n_scan = data_full.shape[1], data_full.shape[2]
+            
+            if self.fit_sum is not None and self.fit_line is not None:
+                # Use existing fitted data, update only this pixel
+                best_fit = self.fit_sum.data.copy()
+                component_sr = self.fit_line.data.copy()
+                best_fit[:, slit, scan] = result['best_fit']
+                component_sr[:, slit, scan] = result['component_sr']
+            else:
+                # No existing fit data, create new arrays with only this pixel
+                best_fit = np.zeros((n_wvl, n_slit, n_scan))
+                component_sr = np.zeros((n_wvl, n_slit, n_scan))
+                best_fit[:, slit, scan] = result['best_fit']
+                component_sr[:, slit, scan] = result['component_sr']
+
+            # Store levels data for plotting, preserving previously fitted pixels
+            self._merge_pixel_levels(slit, scan, result['levels'], n_slit, n_scan)
         else:
-            # Fit all pixels separately
-            fit_results = fit_sr_spectrum(data_full, wvl_full, continuum_mean)
+            # Fit all pixels separately with per-pixel continuum
+            fit_results = fit_sr_spectrum(data_full, wvl_full, continuum_data)
             best_fit = fit_results['best_fit']
             component_sr = fit_results['component_sr']
+            # Store levels data for all pixels
+            self.levels = {
+                'intensities': fit_results['levels'],  # 3D array (n_levels, n_slit, n_scan)
+                'widths': fit_results['widths'],  # 1D array
+                'metadata': fit_results['metadata']
+            }
 
         # Store results as SpectrumParts (wavelength is already in Angstrom)
         self.fit_sum = SpectrumPart(best_fit, wvl_full)
         self.fit_line = SpectrumPart(component_sr, wvl_full)
 
     def plot(self, ax=None, show_continuum=True, show_line=True, show_residual=True,
-              scan=None, slit=None, fit=False):
+              scan=None, slit=None, fit=False, show_levels=False):
         """
         Plot all parts of the split spectrum.
 
@@ -1346,6 +1871,7 @@ class Spectrum:
             scan_idx: Optional scan index to plot specific pixel. If None, averages over scan.
             slit_idx: Optional slit index to plot specific pixel. If None, averages over slit.
             fit: Whether to plot fit results (fit_sum, fit_line)
+            show_levels: Whether to plot line levels (only available for single pixel fits)
 
         Returns:
             ax: The matplotlib axes object
@@ -1381,11 +1907,59 @@ class Spectrum:
         if fit:
             if self.fit_sum is not None:
                 fit_sum_data = extract_spectrum(self.fit_sum.data, scan, slit)
-                ax.plot(self.fit_sum.wvl, fit_sum_data, '--', label='Full fit', alpha=0.8, linewidth=1)
+                ax.plot(self.fit_sum.wvl, fit_sum_data, '--', label='Full fit', alpha=0.8, linewidth=1, color='black')
 
             if self.fit_line is not None:
                 fit_line_data = extract_spectrum(self.fit_line.data, scan, slit)
                 ax.plot(self.fit_line.wvl, fit_line_data, '--', label='Line component', alpha=0.8, linewidth=1, color='orange')
+
+        # Plot line levels if available and requested
+        if show_levels and self.fit_line is not None and slit is not None and scan is not None:
+            # Check if we have stored levels for this pixel (3D array format, NaN = not fitted)
+            levels = None
+            if self._has_3d_levels():
+                intensities = self.levels['intensities'][:, slit, scan]
+                if not np.all(np.isnan(intensities)):
+                    widths = self.levels['widths']
+                    continuum_level = self.levels['metadata']['continuum_levels'][slit, scan]
+                    levels = {'widths': widths, 'intensities': intensities, 'continuum_level': continuum_level}
+            
+            # Plot levels if available
+            if levels is not None:
+                widths = levels['widths']
+                intensities = levels['intensities']
+                continuum_level = levels['continuum_level']
+                
+                # Get line center from fitted profile
+                line_center = self.fit_line.wvl[np.argmin(self.fit_line.data[:, slit, scan])]
+                
+                if line_center is not None:
+                    # Plot horizontal lines at each level
+                    for i, (w, intensity) in enumerate(zip(widths, intensities)):
+                        if i % 5 == 0:
+                            # Every 5th level with stronger alpha
+                            ax.axhline(y=intensity, color='gray', alpha=0.4, linestyle=':', linewidth=0.5)
+                            # Show width markers for every 5th level
+                            wvl_blue = line_center - w/2
+                            wvl_red = line_center + w/2
+                            ax.axvline(x=wvl_blue, color='blue', alpha=0.2, linestyle=':', linewidth=0.5)
+                            ax.axvline(x=wvl_red, color='blue', alpha=0.2, linestyle=':', linewidth=0.5)
+                        else:
+                            # Other levels with weaker alpha
+                            ax.axhline(y=intensity, color='gray', alpha=0.15, linestyle=':', linewidth=0.5)
+                else:
+                    # Plot horizontal lines at each level (no width markers if center unknown)
+                    for i, intensity in enumerate(intensities):
+                        if i % 5 == 0:
+                            ax.axhline(y=intensity, color='gray', alpha=0.4, linestyle=':', linewidth=0.5)
+                        else:
+                            ax.axhline(y=intensity, color='gray', alpha=0.15, linestyle=':', linewidth=0.5)
+                
+                # Add legend entry for line levels
+                ax.axhline(y=intensities[0], color='gray', alpha=0.4, linestyle=':', linewidth=0.5, label='Line levels')
+                
+                # Plot continuum level with separate label
+                ax.axhline(y=continuum_level, color='red', alpha=0.5, linestyle='--', linewidth=1, label='95% continuum')
 
         ax.legend()
         ax.set_title("Split Spectrum")
@@ -1931,16 +2505,15 @@ if __name__ == '__main__':
     spectra = SpectrumContainer.load_all()
 
     # Fit Ti line for a specific spectrum
-    spectrum = spectra['sr']['disk_center']
-    spectrum.fit(slit=200, scan=22)
-    #spectrum.fit()
+    spectrum = spectra['ti']['disk_center']
+    #spectrum.fit(slit=0, scan=0)
+    # Plot with fit results
+    #spectrum.plot(fit=True, show_levels=True, slit=0, scan=0)
+    spectrum.fit()
     spectrum.save()
 
-    # Plot with fit results
-    spectrum.plot(fit=True, slit=200, scan=22)
-    
     #Fit all other positions and lines in external terminal
     # uv run python /home/franziskaz/code/themis/scripts/process_formation_height_line_levels.py
-    run_all_fitting(spectra) # uncomment for running
+    #run_all_fitting(spectra) # uncomment for running
 # -----------------------------------------------------
 
