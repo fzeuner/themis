@@ -482,113 +482,147 @@ def robust_continuum_mean(continuum_data):
 def line_levels(wvl, line_profile, line_center, continuum, n_levels=25):
     """
     Calculate line levels (intensity at different widths) following run_voigt_as.pro logic.
-    
-    For a fitted line profile, calculates the intensity at N equally-spaced widths
-    from the line core to the width at 95% of continuum.
-    
+
+    Splits the fitted profile into blue and red wings at the line center,
+    treats each wing independently (asymmetric), and for each target width
+    finds the intensity at which the combined width (blue + red) equals the
+    target, using root-finding — matching the IDL niv() approach.
+
     Args:
         wvl: Wavelength array (in Angstrom)
         line_profile: Fitted line component profile (e.g., component_ti or component_sr)
         line_center: Line center wavelength from fit parameters (in Angstrom)
         continuum: Continuum level for this pixel
         n_levels: Number of levels to calculate (default: 25)
-        
+
     Returns:
         dict: Dictionary containing:
             - 'widths': Array of widths from line center (in Angstrom)
             - 'intensities': Array of intensities at those widths
             - 'continuum_level': The continuum level used (95% of continuum)
+            - 'intensity_core': Intensity evaluated exactly at line_center
+            - 'width_continuum': Total width at continuum level (blue + red)
             Returns None if calculation fails
     """
+    from scipy import interpolate
+    from scipy.optimize import brentq
+
     try:
         # Use 95% of continuum as reference level
         continuum_level = 0.95 * continuum
-        
+
         # Sanity check: ensure 95% continuum is below the maximum of the fitted data
         if continuum_level >= np.max(line_profile):
-            # If continuum level is too high, use max of data as upper bound
             continuum_level = np.max(line_profile) * 0.99
-        
-        # Find intensity at line core
-        idx_center = np.argmin(np.abs(wvl - line_center))
-        intensity_core = line_profile[idx_center]
-        
-        # Find width at continuum level (where profile crosses continuum_level)
-        # Interpolate to find crossing points on both sides
-        from scipy import interpolate
-        
-        # Create interpolation function
-        interp_func = interpolate.interp1d(wvl, line_profile, kind='linear', fill_value='extrapolate')
-        
-        # Find where profile equals continuum_level on both sides
-        # Search in reasonable range around center
-        search_range = 2.0  # Angstrom
-        wvl_search = wvl[(wvl >= line_center - search_range) & (wvl <= line_center + search_range)]
-        
-        # Find crossing points by looking for sign changes
-        profile_search = line_profile[(wvl >= line_center - search_range) & (wvl <= line_center + search_range)]
-        diff = profile_search - continuum_level
-        
-        # Find sign changes (where diff crosses zero)
-        sign_changes = np.diff(np.sign(diff)) != 0
-        
-        # Find blue side crossing (wvl < line_center)
-        blue_mask = (wvl_search[:-1] < line_center) & sign_changes
-        blue_idx = np.where(blue_mask)[0]
-        if len(blue_idx) > 0:
-            blue_cross = wvl_search[blue_idx[0]]
-        else:
-            # Fallback: use edge of search range
-            blue_cross = line_center - search_range
-        
-        # Find red side crossing (wvl > line_center)
-        red_mask = (wvl_search[:-1] > line_center) & sign_changes
-        red_idx = np.where(red_mask)[0]
-        if len(red_idx) > 0:
-            red_cross = wvl_search[red_idx[-1]]
-        else:
-            # Fallback: use edge of search range
-            red_cross = line_center + search_range
-        
-        # Total width at continuum level
-        width_continuum = red_cross - blue_cross
-        
-        # Create N equally-spaced widths from 0 to width_continuum
+
+        # Evaluate core intensity exactly at line_center via interpolation
+        interp_full = interpolate.interp1d(wvl, line_profile, kind='linear',
+                                           fill_value='extrapolate')
+        intensity_core = float(interp_full(line_center))
+
+        # Split profile into blue and red wings at line_center
+        blue_mask = wvl < line_center
+        red_mask = wvl >= line_center
+
+        if np.sum(blue_mask) < 2 or np.sum(red_mask) < 2:
+            return None
+
+        wvl_blue = wvl[blue_mask]
+        prof_blue = line_profile[blue_mask]
+        wvl_red = wvl[red_mask]
+        prof_red = line_profile[red_mask]
+
+        # Distance from center for each wing (positive)
+        dist_blue = line_center - wvl_blue
+        dist_red = wvl_red - line_center
+
+        # Sort by distance (closest to center first)
+        blue_sort = np.argsort(dist_blue)
+        red_sort = np.argsort(dist_red)
+        dist_blue = dist_blue[blue_sort]
+        prof_blue = prof_blue[blue_sort]
+        dist_red = dist_red[red_sort]
+        prof_red = prof_red[red_sort]
+
+        # Prepend the core point (distance=0, intensity=intensity_core) to each wing
+        # so that inv_interp(core_intensity) = 0 for both wings
+        dist_blue = np.concatenate([[0.0], dist_blue])
+        prof_blue = np.concatenate([[intensity_core], prof_blue])
+        dist_red = np.concatenate([[0.0], dist_red])
+        prof_red = np.concatenate([[intensity_core], prof_red])
+
+        # Enforce monotonic increase of intensity with distance (remove non-monotonic points)
+        # This ensures the inverse interpolation is well-defined
+        def _make_monotonic(dist, prof):
+            sort_idx = np.argsort(prof)
+            prof_s = prof[sort_idx]
+            dist_s = dist[sort_idx]
+            unique_mask = np.concatenate([[True], np.diff(prof_s) > 1e-12])
+            return dist_s[unique_mask], prof_s[unique_mask]
+
+        dist_blue_m, prof_blue_m = _make_monotonic(dist_blue, prof_blue)
+        dist_red_m, prof_red_m = _make_monotonic(dist_red, prof_red)
+
+        if len(prof_blue_m) < 2 or len(prof_red_m) < 2:
+            return None
+
+        # Create inverse interpolation: distance as function of intensity
+        inv_interp_blue = interpolate.interp1d(prof_blue_m, dist_blue_m, kind='linear',
+                                               fill_value=(0.0, dist_blue_m[-1]),
+                                               bounds_error=False)
+        inv_interp_red = interpolate.interp1d(prof_red_m, dist_red_m, kind='linear',
+                                              fill_value=(0.0, dist_red_m[-1]),
+                                              bounds_error=False)
+
+        # Width at continuum level for each wing (independently)
+        blue_width_cont = float(inv_interp_blue(continuum_level))
+        red_width_cont = float(inv_interp_red(continuum_level))
+        width_continuum = blue_width_cont + red_width_cont
+
+        if width_continuum <= 0 or not np.isfinite(width_continuum):
+            return None
+
+        # N equally-spaced widths from 0 to width_continuum
         widths = np.linspace(0, width_continuum, n_levels)
-        
-        # Calculate intensity at each width
-        # For each width, find the intensity at (center - width/2) and (center + width/2)
-        # and take the average (following run_voigt_as.pro which combines both wings)
-        intensities = np.zeros(n_levels)
-        intensities[0] = intensity_core  # Width 0 is at line core
-        
+
+        # For each width, find intensity I such that
+        #   inv_interp_blue(I) + inv_interp_red(I) = target_width
+        # This matches IDL's niv() which uses zbrent_tc on func2.
+        intensities = np.full(n_levels, np.nan)
+        intensities[0] = intensity_core
+
+        Imin = min(intensity_core, prof_blue_m[0], prof_red_m[0])
+        Imax = continuum_level
+
         for i in range(1, n_levels):
-            w = widths[i]
-            wvl_blue = line_center - w/2
-            wvl_red = line_center + w/2
-            
-            # Interpolate intensity at these wavelengths
-            if wvl_blue >= wvl.min() and wvl_blue <= wvl.max():
-                int_blue = interp_func(wvl_blue)
-            else:
-                int_blue = continuum_level
-                
-            if wvl_red >= wvl.min() and wvl_red <= wvl.max():
-                int_red = interp_func(wvl_red)
-            else:
-                int_red = continuum_level
-            
-            intensities[i] = (int_blue + int_red) / 2
-        
+            target_width = widths[i]
+
+            def combined_width(I, tw=target_width):
+                return float(inv_interp_blue(I)) + float(inv_interp_red(I)) - tw
+
+            try:
+                val = brentq(combined_width, Imin, Imax, xtol=1e-10)
+                intensities[i] = val
+            except (ValueError, RuntimeError):
+                intensities[i] = np.nan
+
+        if np.any(np.isnan(intensities)):
+            return None
+
+        # Compute per-wing distances at each level intensity (for plotting/storage)
+        blue_dists = np.array([float(inv_interp_blue(I)) for I in intensities])
+        red_dists = np.array([float(inv_interp_red(I)) for I in intensities])
+
         return {
-            'intensities': intensities,  # 1D array of intensity values at each level (Nniv)
-            'widths': widths,  # 1D array of widths (in Angstrom) from line core
+            'intensities': intensities,
+            'widths': widths,
             'continuum_level': continuum_level,
             'intensity_core': intensity_core,
-            'width_continuum': width_continuum
+            'width_continuum': width_continuum,
+            'blue_dists': blue_dists,
+            'red_dists': red_dists
         }
-    except Exception as e:
-        # Return None if calculation fails (e.g., due to bad data)
+    except Exception:
         return None
 
 def fit_ti_spectrum(line_data, line_wvl, continuum_data):
@@ -1253,7 +1287,7 @@ class SpectrumPart:
             return f"SpectrumPart(data=None, wvl=None)"
         return f"SpectrumPart(data.shape={self.data.shape}, wvl.shape={self.wvl.shape})"
 
-    def save(self, filepath, config_path=None, sequence=None, python_file=None, levels=None):
+    def save(self, filepath, config_path=None, sequence=None, python_file=None):
         """
         Save the spectrum part to a FITS file.
 
@@ -1264,7 +1298,6 @@ class SpectrumPart:
             config_path: Path to the configuration file (saved in header)
             sequence: Sequence number used (saved in header)
             python_file: Name of the Python file that created this file (saved in header)
-            levels: Optional dictionary with line levels data (widths, intensities, continuum_level, etc.)
         """
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -1285,36 +1318,6 @@ class SpectrumPart:
 
         # Create HDU list
         hdul = fits.HDUList([primary_hdu, wavelength_hdu])
-
-        # Add line levels extension if provided (following run_voigt_as.pro format)
-        # Format: 3D array of intensities (n_levels, n_slit, n_scan) + widths (1D) + metadata
-        if levels is not None:
-            from astropy.table import Table
-
-            levels_array = levels['intensities']  # (n_levels, n_slit, n_scan)
-            widths = levels['widths']  # 1D array
-            metadata = levels['metadata']
-
-            # Save as 3D image HDU (Mval0 format from run_voigt_as.pro)
-            levels_hdu = fits.ImageHDU(data=levels_array, name='LEVELS')
-            levels_hdu.header['NLEVELS'] = len(widths)
-            levels_hdu.header['NSLIT'] = levels_array.shape[1]
-            levels_hdu.header['NSCAN'] = levels_array.shape[2]
-
-            # Save widths as a separate extension
-            widths_hdu = fits.ImageHDU(data=widths, name='WIDTHS')
-            hdul.append(widths_hdu)
-
-            # Save metadata as a table extension
-            meta_table = Table()
-            meta_table['continuum_levels'] = metadata['continuum_levels'].flatten()
-            meta_table['intensity_cores'] = metadata['intensity_cores'].flatten()
-            meta_table['width_continuums'] = metadata['width_continuums'].flatten()
-            meta_hdu = fits.BinTableHDU(meta_table, name='LEVELS_META')
-            hdul.append(meta_hdu)
-
-            hdul.append(levels_hdu)
-
         hdul.writeto(filepath, overwrite=True)
 
     @classmethod
@@ -1335,29 +1338,8 @@ class SpectrumPart:
             wvl = hdul['WAVELENGTH'].data
             # Convert wavelength from nm to Angstrom
             wvl_angstrom = wvl * 10.0
-            
-            spectrum_part = cls(data, wvl_angstrom, fit_result=None)
-            
-            # Load levels extension if present
-            # Format: 3D array of intensities (n_levels, n_slit, n_scan) + widths (1D) + metadata
-            if 'LEVELS' in hdul:
-                levels_array = hdul['LEVELS'].data
-                widths = hdul['WIDTHS'].data
-                meta_table = hdul['LEVELS_META'].data
-                n_slit = hdul['LEVELS'].header['NSLIT']
-                n_scan = hdul['LEVELS'].header['NSCAN']
 
-                spectrum_part.levels = {
-                    'intensities': levels_array,
-                    'widths': widths,
-                    'metadata': {
-                        'continuum_levels': meta_table['continuum_levels'].reshape(n_slit, n_scan),
-                        'intensity_cores': meta_table['intensity_cores'].reshape(n_slit, n_scan),
-                        'width_continuums': meta_table['width_continuums'].reshape(n_slit, n_scan)
-                    }
-                }
-            
-            return spectrum_part
+            return cls(data, wvl_angstrom, fit_result=None)
 
     def plot(self, ax=None, scan_idx=None, slit_idx=None, **kwargs):
         """
@@ -1419,6 +1401,94 @@ class SpectrumPart:
             plt.show()
 
         return ax
+
+
+def save_line_levels(filepath, levels, config_path=None, sequence=None, python_file=None):
+    """
+    Save line levels (OUTPUT of the line-levels calculation) to a dedicated
+    FITS file, separate from the fitted line profile (INPUT).
+
+    Format: LEVELS is the PRIMARY HDU (3D image, n_levels x n_slit x n_scan),
+    matching run_voigt_as.pro (`writefits, outfile, Mval0[...], h` is the
+    first, non-/APPEND write, i.e. Mval0 is the primary HDU there too).
+    WIDTHS (1D image) and LEVELS_META (binary table) are extensions.
+
+    Args:
+        filepath: Path to save the FITS file (e.g. '{base}_levels.fits')
+        levels: Dictionary with keys 'intensities' (3D array), 'widths' (1D array),
+                'metadata' (dict with 'continuum_levels', 'intensity_cores', 'width_continuums')
+        config_path: Path to the configuration file (saved in header)
+        sequence: Sequence number used (saved in header)
+        python_file: Name of the Python file that created this file (saved in header)
+    """
+    from astropy.table import Table
+
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    levels_array = levels['intensities']  # (n_levels, n_slit, n_scan)
+    widths = levels['widths']  # 1D array
+    metadata = levels['metadata']
+
+    # LEVELS is the primary HDU (Mval0 format from run_voigt_as.pro)
+    primary_hdu = fits.PrimaryHDU(data=levels_array)
+    header = primary_hdu.header
+    header['EXTNAME'] = 'LEVELS'
+    header['CONFIG'] = str(config_path) if config_path else 'unknown'
+    header['DATE'] = datetime.now().isoformat()
+    header['SEQUENCE'] = str(sequence) if sequence is not None else 'unknown'
+    header['PYTHON'] = str(python_file) if python_file else 'unknown'
+    header['NLEVELS'] = len(widths)
+    header['NSLIT'] = levels_array.shape[1]
+    header['NSCAN'] = levels_array.shape[2]
+
+    widths_hdu = fits.ImageHDU(data=widths, name='WIDTHS')
+    blue_dists_hdu = fits.ImageHDU(data=metadata['blue_dists'], name='BLUE_DISTS')
+    red_dists_hdu = fits.ImageHDU(data=metadata['red_dists'], name='RED_DISTS')
+
+    meta_table = Table()
+    meta_table['continuum_levels'] = metadata['continuum_levels'].flatten()
+    meta_table['intensity_cores'] = metadata['intensity_cores'].flatten()
+    meta_table['width_continuums'] = metadata['width_continuums'].flatten()
+    meta_hdu = fits.BinTableHDU(meta_table, name='LEVELS_META')
+
+    hdul = fits.HDUList([primary_hdu, widths_hdu, blue_dists_hdu, red_dists_hdu, meta_hdu])
+    hdul.writeto(filepath, overwrite=True)
+
+
+def load_line_levels(filepath):
+    """
+    Load line levels (OUTPUT of the line-levels calculation) from a
+    dedicated FITS file, as saved by save_line_levels().
+
+    Args:
+        filepath: Path to the FITS file (e.g. '{base}_levels.fits')
+
+    Returns:
+        dict: Dictionary with keys 'intensities' (3D array), 'widths' (1D array),
+              'metadata' (dict with 'continuum_levels', 'intensity_cores', 'width_continuums')
+    """
+    with fits.open(filepath) as hdul:
+        levels_array = hdul['LEVELS'].data
+        widths = hdul['WIDTHS'].data
+        meta_table = hdul['LEVELS_META'].data
+        n_slit = hdul['LEVELS'].header['NSLIT']
+        n_scan = hdul['LEVELS'].header['NSCAN']
+
+        blue_dists = hdul['BLUE_DISTS'].data if 'BLUE_DISTS' in hdul else None
+        red_dists = hdul['RED_DISTS'].data if 'RED_DISTS' in hdul else None
+
+        return {
+            'intensities': levels_array,
+            'widths': widths,
+            'metadata': {
+                'continuum_levels': meta_table['continuum_levels'].reshape(n_slit, n_scan),
+                'intensity_cores': meta_table['intensity_cores'].reshape(n_slit, n_scan),
+                'width_continuums': meta_table['width_continuums'].reshape(n_slit, n_scan),
+                'blue_dists': blue_dists,
+                'red_dists': red_dists
+            }
+        }
 
 
 class Spectrum:
@@ -1484,13 +1554,17 @@ class Spectrum:
             metadata = {
                 'continuum_levels': np.full((n_slit, n_scan), np.nan),
                 'intensity_cores': np.full((n_slit, n_scan), np.nan),
-                'width_continuums': np.full((n_slit, n_scan), np.nan)
+                'width_continuums': np.full((n_slit, n_scan), np.nan),
+                'blue_dists': np.full((n_levels, n_slit, n_scan), np.nan),
+                'red_dists': np.full((n_levels, n_slit, n_scan), np.nan)
             }
 
         levels_array[:, slit, scan] = pixel_levels['intensities']
         metadata['continuum_levels'][slit, scan] = pixel_levels['continuum_level']
         metadata['intensity_cores'][slit, scan] = pixel_levels['intensity_core']
         metadata['width_continuums'][slit, scan] = pixel_levels['width_continuum']
+        metadata['blue_dists'][:, slit, scan] = pixel_levels['blue_dists']
+        metadata['red_dists'][:, slit, scan] = pixel_levels['red_dists']
 
         self.levels = {
             'intensities': levels_array,
@@ -1572,8 +1646,11 @@ class Spectrum:
         if self.fit_sum is not None:
             self.fit_sum.save(f"{filepath}_fit_sum.fits", config_path, sequence, python_file)
         if self.fit_line is not None:
-            # Pass levels dictionary as extension to _fit_line.fits
-            self.fit_line.save(f"{filepath}_fit_line.fits", config_path, sequence, python_file, levels=self.levels)
+            # INPUT: fitted line profile only (no levels embedded)
+            self.fit_line.save(f"{filepath}_fit_line.fits", config_path, sequence, python_file)
+        if self.levels is not None:
+            # OUTPUT: line levels saved to a dedicated file, separate from the fitted profile
+            save_line_levels(f"{filepath}_levels.fits", self.levels, config_path, sequence, python_file)
 
     @classmethod
     def load(cls, filepath, line_name=None):
@@ -1604,10 +1681,13 @@ class Spectrum:
 
         try:
             spectrum.fit_line = SpectrumPart.load(f"{filepath}_fit_line.fits")
-            # Load levels from extension if present, else leave as None (set in __init__)
-            spectrum.levels = getattr(spectrum.fit_line, 'levels', None)
         except FileNotFoundError:
             spectrum.fit_line = None
+
+        # Load line levels (OUTPUT) from its own dedicated file, if present
+        try:
+            spectrum.levels = load_line_levels(f"{filepath}_levels.fits")
+        except FileNotFoundError:
             spectrum.levels = None
 
         return spectrum
@@ -1922,42 +2002,64 @@ class Spectrum:
                 if not np.all(np.isnan(intensities)):
                     widths = self.levels['widths']
                     continuum_level = self.levels['metadata']['continuum_levels'][slit, scan]
-                    levels = {'widths': widths, 'intensities': intensities, 'continuum_level': continuum_level}
+                    blue_dists = self.levels['metadata'].get('blue_dists')
+                    red_dists = self.levels['metadata'].get('red_dists')
+                    levels = {
+                        'widths': widths,
+                        'intensities': intensities,
+                        'continuum_level': continuum_level,
+                        'blue_dists': blue_dists[:, slit, scan] if blue_dists is not None else None,
+                        'red_dists': red_dists[:, slit, scan] if red_dists is not None else None,
+                    }
             
             # Plot levels if available
             if levels is not None:
                 widths = levels['widths']
                 intensities = levels['intensities']
                 continuum_level = levels['continuum_level']
-                
+                blue_dists = levels.get('blue_dists')
+                red_dists = levels.get('red_dists')
+
                 # Get line center from fitted profile
                 line_center = self.fit_line.wvl[np.argmin(self.fit_line.data[:, slit, scan])]
-                
-                if line_center is not None:
-                    # Plot horizontal lines at each level
-                    for i, (w, intensity) in enumerate(zip(widths, intensities)):
-                        if i % 5 == 0:
-                            # Every 5th level with stronger alpha
-                            ax.axhline(y=intensity, color='gray', alpha=0.4, linestyle=':', linewidth=0.5)
-                            # Show width markers for every 5th level
-                            wvl_blue = line_center - w/2
-                            wvl_red = line_center + w/2
-                            ax.axvline(x=wvl_blue, color='blue', alpha=0.2, linestyle=':', linewidth=0.5)
-                            ax.axvline(x=wvl_red, color='blue', alpha=0.2, linestyle=':', linewidth=0.5)
-                        else:
-                            # Other levels with weaker alpha
-                            ax.axhline(y=intensity, color='gray', alpha=0.15, linestyle=':', linewidth=0.5)
-                else:
-                    # Plot horizontal lines at each level (no width markers if center unknown)
-                    for i, intensity in enumerate(intensities):
-                        if i % 5 == 0:
-                            ax.axhline(y=intensity, color='gray', alpha=0.4, linestyle=':', linewidth=0.5)
-                        else:
-                            ax.axhline(y=intensity, color='gray', alpha=0.15, linestyle=':', linewidth=0.5)
-                
-                # Add legend entry for line levels
+
+                # Plot horizontal lines and magenta dots at each level
+                for i, (w, intensity) in enumerate(zip(widths, intensities)):
+                    if np.isnan(intensity):
+                        continue
+                    if i % 5 == 0:
+                        ax.axhline(y=intensity, color='gray', alpha=0.4, linestyle=':', linewidth=0.5)
+                    else:
+                        ax.axhline(y=intensity, color='gray', alpha=0.15, linestyle=':', linewidth=0.5)
+                    # Two magenta dots at same intensity, asymmetric positions
+                    if blue_dists is not None and red_dists is not None:
+                        db = blue_dists[i]
+                        dr = red_dists[i]
+                        if np.isfinite(db) and np.isfinite(dr):
+                            x_blue = line_center - db
+                            x_red = line_center + dr
+                            # Connecting segment shows the combined width
+                            seg_alpha = 0.5 if i % 5 == 0 else 0.12
+                            ax.plot([x_blue, x_red], [intensity, intensity], '-',
+                                    color='magenta', alpha=seg_alpha, linewidth=1, zorder=4)
+                            dot_alpha = 0.8 if i % 5 == 0 else 0.3
+                            ax.plot(x_blue, intensity, 'o', color='magenta', markersize=3, alpha=dot_alpha, zorder=5)
+                            ax.plot(x_red, intensity, 'o', color='magenta', markersize=3, alpha=dot_alpha, zorder=5)
+                            # Annotate every 5th level with width and index
+                            if i % 5 == 0:
+                                w_mA = w * 1000  # Angstrom to mA
+                                ax.annotate(f'#{i}: {w_mA:.0f} mA',
+                                            xy=(x_red, intensity),
+                                            xytext=(5, 0), textcoords='offset points',
+                                            fontsize=6, color='magenta', va='center')
+
+                # Add legend entries
                 ax.axhline(y=intensities[0], color='gray', alpha=0.4, linestyle=':', linewidth=0.5, label='Line levels')
-                
+                if blue_dists is not None and red_dists is not None:
+                    delta_mA = (widths[1] - widths[0]) * 1000 if len(widths) > 1 else 0
+                    ax.plot([], [], 'o', color='magenta', markersize=3,
+                            label=f'Level positions (Δ={delta_mA:.1f} mA)')
+
                 # Plot continuum level with separate label
                 ax.axhline(y=continuum_level, color='red', alpha=0.5, linestyle='--', linewidth=1, label='95% continuum')
 
@@ -2505,7 +2607,7 @@ if __name__ == '__main__':
     spectra = SpectrumContainer.load_all()
 
     # Fit Ti line for a specific spectrum
-    spectrum = spectra['ti']['disk_center']
+    spectrum = spectra['ti']['m30']
     #spectrum.fit(slit=0, scan=0)
     # Plot with fit results
     #spectrum.plot(fit=True, show_levels=True, slit=0, scan=0)
