@@ -667,6 +667,8 @@ def fit_ti_spectrum(line_data, line_wvl, continuum_data):
     continuum_levels = np.zeros((n_slit, n_scan))
     intensity_cores = np.zeros((n_slit, n_scan))
     width_continuums = np.zeros((n_slit, n_scan))
+    blue_dists_arr = np.full((n_levels, n_slit, n_scan), np.nan) if levels_array is not None else None
+    red_dists_arr = np.full((n_levels, n_slit, n_scan), np.nan) if levels_array is not None else None
 
     total_pixels = n_slit * n_scan
 
@@ -737,6 +739,8 @@ def fit_ti_spectrum(line_data, line_wvl, continuum_data):
                                 continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
                                 intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
                                 width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
+                                blue_dists_arr[:, slit_idx, scan_idx] = result['levels']['blue_dists']
+                                red_dists_arr[:, slit_idx, scan_idx] = result['levels']['red_dists']
                         pbar.update(1)
         finally:
             # Clean up shared memory
@@ -765,6 +769,8 @@ def fit_ti_spectrum(line_data, line_wvl, continuum_data):
                             continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
                             intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
                             width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
+                            blue_dists_arr[:, slit_idx, scan_idx] = result['levels']['blue_dists']
+                            red_dists_arr[:, slit_idx, scan_idx] = result['levels']['red_dists']
                     except Exception as e:
                         print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {e}")
                         # Use original data as fallback
@@ -782,7 +788,9 @@ def fit_ti_spectrum(line_data, line_wvl, continuum_data):
         'metadata': {
             'continuum_levels': continuum_levels,
             'intensity_cores': intensity_cores,
-            'width_continuums': width_continuums
+            'width_continuums': width_continuums,
+            'blue_dists': blue_dists_arr,
+            'red_dists': red_dists_arr
         }
     }
 
@@ -1034,6 +1042,8 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_data):
     continuum_levels = np.zeros((n_slit, n_scan))
     intensity_cores = np.zeros((n_slit, n_scan))
     width_continuums = np.zeros((n_slit, n_scan))
+    blue_dists_arr = np.full((n_levels, n_slit, n_scan), np.nan) if levels_array is not None else None
+    red_dists_arr = np.full((n_levels, n_slit, n_scan), np.nan) if levels_array is not None else None
 
     total_pixels = n_slit * n_scan
 
@@ -1102,6 +1112,8 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_data):
                                 continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
                                 intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
                                 width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
+                                blue_dists_arr[:, slit_idx, scan_idx] = result['levels']['blue_dists']
+                                red_dists_arr[:, slit_idx, scan_idx] = result['levels']['red_dists']
                         pbar.update(1)
         finally:
             # Clean up shared memory
@@ -1130,6 +1142,8 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_data):
                             continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
                             intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
                             width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
+                            blue_dists_arr[:, slit_idx, scan_idx] = result['levels']['blue_dists']
+                            red_dists_arr[:, slit_idx, scan_idx] = result['levels']['red_dists']
                     except Exception as e:
                         print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {e}")
                         # Use original data as fallback
@@ -1148,7 +1162,9 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_data):
         'metadata': {
             'continuum_levels': continuum_levels,
             'intensity_cores': intensity_cores,
-            'width_continuums': width_continuums
+            'width_continuums': width_continuums,
+            'blue_dists': blue_dists_arr,
+            'red_dists': red_dists_arr
         }
     }
 
@@ -2622,7 +2638,7 @@ if __name__ == '__main__':
     spectra = SpectrumContainer.load_all()
 
     # Fit Ti line for a specific spectrum
-    spectrum = spectra['sr']['m30']
+    spectrum = spectra['ti']['m30']
     #spectrum.fit(slit=0, scan=0)
     # Plot with fit results
     #spectrum.plot(fit=True, show_levels=True, slit=0, scan=0)
