@@ -1443,8 +1443,16 @@ def save_line_levels(filepath, levels, config_path=None, sequence=None, python_f
     header['NSCAN'] = levels_array.shape[2]
 
     widths_hdu = fits.ImageHDU(data=widths, name='WIDTHS')
-    blue_dists_hdu = fits.ImageHDU(data=metadata['blue_dists'], name='BLUE_DISTS')
-    red_dists_hdu = fits.ImageHDU(data=metadata['red_dists'], name='RED_DISTS')
+
+    blue_dists = metadata.get('blue_dists')
+    red_dists = metadata.get('red_dists')
+
+    hdul_list = [primary_hdu, widths_hdu]
+
+    if blue_dists is not None:
+        hdul_list.append(fits.ImageHDU(data=blue_dists, name='BLUE_DISTS'))
+    if red_dists is not None:
+        hdul_list.append(fits.ImageHDU(data=red_dists, name='RED_DISTS'))
 
     meta_table = Table()
     meta_table['continuum_levels'] = metadata['continuum_levels'].flatten()
@@ -1452,7 +1460,8 @@ def save_line_levels(filepath, levels, config_path=None, sequence=None, python_f
     meta_table['width_continuums'] = metadata['width_continuums'].flatten()
     meta_hdu = fits.BinTableHDU(meta_table, name='LEVELS_META')
 
-    hdul = fits.HDUList([primary_hdu, widths_hdu, blue_dists_hdu, red_dists_hdu, meta_hdu])
+    hdul_list.append(meta_hdu)
+    hdul = fits.HDUList(hdul_list)
     hdul.writeto(filepath, overwrite=True)
 
 
@@ -1546,6 +1555,12 @@ class Spectrum:
             levels_array = self.levels['intensities']
             widths = self.levels['widths']
             metadata = self.levels['metadata']
+            # Ensure blue_dists/red_dists arrays exist (may be missing from old files)
+            n_levels = levels_array.shape[0]
+            if 'blue_dists' not in metadata or metadata['blue_dists'] is None:
+                metadata['blue_dists'] = np.full((n_levels, n_slit, n_scan), np.nan)
+            if 'red_dists' not in metadata or metadata['red_dists'] is None:
+                metadata['red_dists'] = np.full((n_levels, n_slit, n_scan), np.nan)
         else:
             # No existing levels array, create new one filled with NaN
             n_levels = len(pixel_levels['intensities'])
@@ -2063,7 +2078,7 @@ class Spectrum:
                 # Plot continuum level with separate label
                 ax.axhline(y=continuum_level, color='red', alpha=0.5, linestyle='--', linewidth=1, label='95% continuum')
 
-        ax.legend()
+        ax.legend(ncol=4)
         ax.set_title("Split Spectrum")
 
         if ax is None:
@@ -2607,7 +2622,7 @@ if __name__ == '__main__':
     spectra = SpectrumContainer.load_all()
 
     # Fit Ti line for a specific spectrum
-    spectrum = spectra['ti']['m30']
+    spectrum = spectra['sr']['m30']
     #spectrum.fit(slit=0, scan=0)
     # Plot with fit results
     #spectrum.plot(fit=True, show_levels=True, slit=0, scan=0)
