@@ -85,6 +85,11 @@ class LineLevelsInspector(QtWidgets.QMainWindow):
         ctrl.addWidget(self.hist_toggle)
         self.hist_auto = True
 
+        self.hist_info = QtWidgets.QLabel(
+            "Auto: blue=min, black=mean, red=max (updates per level)")
+        self.hist_info.setStyleSheet("color: #aaa; font-style: italic;")
+        ctrl.addWidget(self.hist_info)
+
         # Rectangle controls
         self.btn_rect = QtWidgets.QPushButton("Add Rectangle")
         self.btn_rect.setCheckable(True)
@@ -101,16 +106,17 @@ class LineLevelsInspector(QtWidgets.QMainWindow):
         # --- Level slider as a pyqtgraph draggable line ---
         pg.setConfigOptions(antialias=True)
 
-        # Build blue -> cyan -> black -> magenta -> red colormap
-        cmap_colors = np.array([
+        # Colormap base colors: blue -> cyan -> black -> magenta -> red
+        self.cmap_colors = np.array([
             [0, 0, 255, 255],     # blue
             [0, 255, 255, 255],   # cyan
             [0, 0, 0, 255],       # black
             [255, 0, 255, 255],   # magenta
             [255, 0, 0, 255],     # red
         ], dtype=np.float64)
+        # Default colormap with black at center
         pos = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
-        self.cmap = pg.ColorMap(pos, cmap_colors)
+        self.cmap = pg.ColorMap(pos, self.cmap_colors)
         self.lut = self.cmap.getLookupTable(0.0, 1.0, 256)
 
         # Level slider plot — a thin horizontal bar with a draggable vertical line
@@ -295,6 +301,10 @@ class LineLevelsInspector(QtWidgets.QMainWindow):
 
     def _on_hist_toggle(self, text):
         self.hist_auto = 'Auto' in text
+        if self.hist_auto:
+            self.hist_info.setText("Auto: blue=min, black=mean, red=max (updates per level)")
+        else:
+            self.hist_info.setText("Fixed: color scale locked across levels")
 
     def _on_level_dragged(self):
         val = int(round(self.level_line.value()))
@@ -336,23 +346,33 @@ class LineLevelsInspector(QtWidgets.QMainWindow):
             if vmin == vmax:
                 vmax = vmin + 1e-6
 
-            # Center black at the mean: make levels symmetric around mean
             mean_val = np.mean(finite)
-            max_dev = max(abs(vmin - mean_val), abs(vmax - mean_val))
-            if max_dev < 1e-6:
-                max_dev = 1e-6
-            vmin_sym = mean_val - max_dev
-            vmax_sym = mean_val + max_dev
 
             if self.hist_auto:
-                img_item.setImage(map_display, levels=(vmin_sym, vmax_sym))
+                # Build a colormap where black sits at the mean fraction
+                mean_frac = (mean_val - vmin) / (vmax - vmin)
+                mean_frac = max(0.01, min(0.99, mean_frac))
+                blue_to_black = mean_frac
+                black_to_red = 1.0 - mean_frac
+                cmap_pos = np.array([
+                    0.0,
+                    blue_to_black * 0.5,
+                    blue_to_black,
+                    blue_to_black + black_to_red * 0.5,
+                    1.0,
+                ])
+                dyn_cmap = pg.ColorMap(cmap_pos, self.cmap_colors)
+                dyn_lut = dyn_cmap.getLookupTable(0.0, 1.0, 256)
+                img_item.setLookupTable(dyn_lut)
+                self.hist_items[line].gradient.setColorMap(dyn_cmap)
+                img_item.setImage(map_display, levels=(vmin, vmax))
             else:
                 # Keep existing levels, just update the image data
                 current_levels = img_item.levels
                 if current_levels is not None:
                     img_item.setImage(map_display, levels=tuple(current_levels))
                 else:
-                    img_item.setImage(map_display, levels=(vmin_sym, vmax_sym))
+                    img_item.setImage(map_display, levels=(vmin, vmax))
 
             # Update title with width info
             widths = spec.levels['widths']
