@@ -395,153 +395,112 @@ function niv,dx,Imin,Imax,ar,ab,mar,mab
 end
 ;------------------------------------------------------------------------------------------------
 ;------------------------------------------------------------------------------------------------
-pro voigt_as,profile,Nniv,frac_Ic,$
-             ab_t,ar_t,$
-             chi2b,chi2r,$
-             delta0,$
-             Ic,DeltaLcb,DeltaLcr,val,$
-             quadratic=quadratic,show=show,NIc=NIc
+pro run_voigt_as,file, lbda_win, show=show,limit_cs=limit_cs,width_cs=width_cs,$
+                 lbda_smooth_width=lbda_smooth_width,$
+                 Nniv=Nniv,frac_Ic=frac_Ic,NIc=NIc,quadratic=quadratic
+;file : fits cube file name (wavelength,slit dir,scan dir)
+;lbda_win: first and last array indices for the line location eg. [170,233]
+;/show : display the line fit
+;limit_cs : contrast limit below which scans are ignored
+;width_cs : size (in pixels along the slit) for contrast calculation runing window  
+;lbda_smooth_width: smoothing window size (in pixels along the wavelength axis) 
+;                    
+;Nniv : Number of output levels (line cuts) between the line core and frac_Ic*continuum level 
+;frac_Ic fraction of the continuum for the highest line cord
+;NIc : 1 or 2 for one or two definition of the continuum level
+;/quadratic if set a quadratic trend is fitted for the continuum level
+;           (otherwise linear trend only)
 
+  
+  SetDefaultValue,lbda_smooth_width,10
+  SetDefaultValue,Nniv,25
+  SetDefaultValue,frac_Ic,0.95
+  SetDefaultValue,limit_cs,0.02
+  SetDefaultValue,width_cs,21
+  SetDefaultValue,quadratic,0,/boolean
   SetDefaultValue,NIc,1
 
-  if(NIc ne 1 and NIc ne 2) then message,'wrong value for NIc'
-
-  ;Get profile minimum value and location
-  find_min,profile,xmin,pmin
-  N=N_elements(profile)
-
-  ;distances from line core position (frequency bin unit)
-  x=findgen(N)-xmin
-  pos=where(x ge 0,complement=neg,npos,ncomplement=nneg)
-
-  ;Fiting blue wing
-  xb=[x[neg],0,-reverse(x[neg])]
-  vb=[profile[neg],pmin,reverse(profile[neg])]
+  cube=transpose(float(readfits(file,h,/noscale)),[2,1,0])
  
-  fixp=keyword_set(quadratic)?[1,4]:[1,2,4]
-  vgb=voigt_fit_tc(xb,vb,ab,sigmaa,chi2=chi21,fixp=fixp,$
-                   ;weights=1./(abs(xb)+1.d-2))
-                   weights=1+1./(abs(xb)+3.d-1))
-  ab_t=ab[cgSetDifference(indgen(7),fixp)] ;all but fixed
-  chi2b=total((vb-vgb)^2)
+  Nz=N_elements(cube[0,0,*])
+  y0=0
+  y1=N_elements(cube[0,*,0])-1
+  ywin_cs=[y0,y1]
+  lbda_min=lbda_win[0]
+  lbda_max=lbda_win[1]
  
-  ;Fiting red wing
-  xr=[reverse(-x[pos]),0,x[pos]]
-  vr=[reverse(profile[pos]),pmin,profile[pos]]
- 
-  vgr=voigt_fit_tc(xr,vr,ar,sigmaa,chi2=chi22,fixp=fixp,$
-                   ;weights=1./(abs(xr)+1.d-2))
-                  weights=1+1./(abs(xr)+3.d-1))
-  ar_t=ar[cgSetDifference(indgen(7),fixp)] ;all but fixed
-  chi2r=total((vr-vgr)^2)
- 
-  ;Discontinuity get at line core
-  delta0=vgr[-npos-1]-vgb[nneg]
 
-
-  ;Get fitted profile values each side 
-  ;up to a distance from line core which corresponds to the maximum
-  ;distance available in the data (either in blue or red wings)
-  ;xx=repar(0,max([N_elements(neg),N_elements(pos)]),100)
-  ;vr=mvoigt(xx,ar)
-  ;vb=mvoigt(xx,ab)
-
-  ;Get the intensity max and min both sides and their location
-  ;Imaxr=max(vr,imar,min=Iminr)
-  ;mar=xx[imar]
-  ;Imaxb=max(vb,imab,min=Iminb)
-  ;mab=xx[imab]
-  
-  ;Get the intensity at the line core and in the fitted continuum 
-  mar=max([N_elements(neg),N_elements(pos)])*2
-  mab=mar
-  Iminr=mvoigt(0.,ar)
-  Iminb=mvoigt(0.,ab)
-  Imaxr=mvoigt(mar,ar)
-  Imaxb=mvoigt(mab,ab)
-
-  ;Take the intensity range common for both sides
-  Imin=min([Iminr,Iminb])
-  Imax=min([Imaxr,Imaxb])
-  ;dmin=func2(Imin,ar=ar,ab=ab,mar=mar,mab=mab,dx=0.)
-  ;dmax=func2(Imax,ar=ar,ab=ab,mar=mar,mab=mab,dx=0.)
-
-  ;Continuum level 
-;;  NIc=2 & Ic=fltarr(NIc)
-;;  Ic[0]=frac_Ic  ;we assume continuum level at 1.
-  ;print,'ab[0]=',ab[0]
-;;  Ic[1]=frac_Ic*min([ab[0],1.])
-  ;Ic[1]=frac_Ic*ab[0] ;we assume that the background level 
-                     ;fitted on the blue wing gives the continuum level  
-
-                                ;27/10/2022 pour les données
-                                ;THEMIS on se base sur l'aile
-                                ;bleue seulement 
-  ;NIc=1 & 
-
-  Ic=fltarr(NIc)
-
-  if(NIc eq 1) then begin
-     Ic[0]=frac_Ic*min([ab[0],1.])
-  endif else begin
-     Ic[0]=frac_Ic  ;we assume continuum level at 1.
-     Ic[1]=frac_Ic*ab[0] ;we assume that the background level 
-                                ;fitted on the blue wing gives the
-                                ;continuum level 
-  endelse
-
-
-  if(keyword_set(show)) then begin
-     !P.multi=[0,NIc,1]
-     max_ab=fix(max(abs(x))/10.)*10+10
-     titles=(NIc eq 2)?['Ic org','Ic fitted']:['Ic fitted']
-     for k=0,NIc-1 do begin   
-        cgplot,x*13.508,profile/ab[0],ps=1,yr=[0.2,Ic[k]/frac_Ic/ab[0]],xr=[-max_ab,max_ab]*13.508,$
-               ys=1,title=titles[k],ytitle=tex2idl('$I/Ic_b$'),xtitle='x [mA]'
-        cgoplot,[0,x[pos]]*13.508,vgr[-npos-1:-1]/ab[0],color='red'
-        cgoplot,[x[neg],0]*13.508,vgb[0:nneg]/ab[0],color='blue'
-        DeltaLcb=inv_voigt(Ic[k],ab,mab)
-        DeltaLcr=inv_voigt(Ic[k],ar,mar)
-        cgoplot,[-DeltaLcb,DeltaLcr]*13.508,[Ic[k],Ic[k]]/ab[0]
-     endfor
-     swait,0
+  cs=fltarr(Nz)
+  for k=0,Nz-1 do cs[k]=get_contrast(cube[*,*,k],ywin_cs,width_cs)
+  goodcs=where(cs gt limit_cs,ngoodcs)
+  if(ngoodcs eq 0) then begin
+     message,'No good contrast found',/info
+     return  
   endif
-
-
-  ;Width at reference levels
-  ;print,'DeltaLcb'
-  ;print,Ic,ab[0]
-  DeltaLcb=inv_voigt(Ic,ab,mab)
-  ;print,DeltaLcb
-  ;swait,0
-  ;print,'DeltaLcr'
-  DeltaLcr=inv_voigt(Ic,ar,mar)
-  ;print,DeltaLcr
-  ;swait,0
-  DeltaLc=DeltaLcb+DeltaLcr
-
-  dx = fltarr(Nniv,NIc)
-  val= fltarr(Nniv,NIc)
-  for k=0,NIc-1 do begin
-     ;Take Nniv widths between 0 and the width at reference level
-     if(is_nan(DeltaLc[k])) then begin
-        val[0,k]=pmin
-        val[1:-1,k]=!VALUES.F_NAN
-     endif else begin
-        dx[*,k]=repar(0,DeltaLc[k],Nniv)
-                                ;if(is_nan(DeltaLc[k])) then begin
-                                ;   print,'max is nan'
-                                ;   print,mar,mab
-                                ;   print,ar[0]
-                                ;   print,dx[*,k]
-                                ;endif
-                                
-       ;get the intensity for each width by taking the inverse profile function
-       ;(intensity at width=0 is given by pmin)
-        val[*,k]=[pmin,niv(dx[1:-1,k],Imin,Imax,ar,ab,mar,mab)]
-                                ;stop
-     endelse
+  maxmap=max(smooth(cube,[lbda_smooth_width,1,1]),dim=1)
+ 
+  Ny=y1-y0+1
+  Mval0=fltarr(Ny,ngoodcs,Nniv)
+  if(NIc eq 2) then Mval1=fltarr(Ny,ngoodcs,Nniv)
+  Ndata=(keyword_set(quadratic))?19:17
+  if(NIc eq 1) then Ndata-=3
+  data=fltarr(Ny,ngoodcs,Ndata)
+  kg=-1
+  good=goodcs
+  ngood=ngoodcs
+  for k=0,ngoodcs-1 do begin
+     kg=kg+1
+     print,k,'/',ngoodcs,ngood
+     good[kg]=goodcs[k]
+     for i=y0,y1 do begin
+        ;print,k,i
+        p=reform(cube[lbda_min:lbda_max,i,goodcs[k]])
+        p/=maxmap[i,goodcs[k]]
+        voigt_as,p,Nniv,frac_Ic,ab,ar,chi2b,chi2r,delta0,$
+                 Ic,DeltaLcb,DeltaLcr,val,quadratic=quadratic,show=keyword_set(show),NIc=NIc
+        bad=where(is_nan(val),nbad)
+        if(nbad ne 0) then begin
+           kg=kg-1
+           ngood=ngood-1
+           break ;We skip the whole k plane
+        endif
+        val*=maxmap[i,goodcs[k]]
+        Mval0[i-y0,kg,*]=val[*,0]
+        if(NIc eq 2) then Mval1[i-y0,kg,*]=val[*,1]
+        data[i-y0,kg,*]=[ab,ar,chi2b,chi2r,delta0,Ic,DeltaLcb,DeltaLcr]
+     endfor
   endfor
+  
+
+  sxaddpar,h,'NAXIS1',Ny
+  sxaddpar,h,'NAXIS2',ngood
+  sxaddpar,h,'NAXIS3',Nniv
+  sxaddpar,h,'BITPIX',-32
+  sxaddpar,h,'BSCALE',1
+  sxaddpar,h,'BZERO',0
+  sxaddpar,h,'CLEVEL',frac_Ic
+  sxaddpar,h,'LIMIT_CS',limit_cs ;13/03/2023
+  sxaddpar,h,'NGOOD_CS',ngoodcs,'nb of good contrast spec. images' ;20/07/2024
+  sxaddpar,h,'Nz',Nz,'initial number of spectral images'
+   
+  outfile=file
+ 
+  tc_str_replace,outfile,'_line','_levels_tc'
+
+  writefits,outfile,Mval0[*,0:ngood-1,*],h
+  if(NIc eq 2) then writefits,outfile,Mval1[*,0:ngood-1,*],/APPEND
+
+  writefits,outfile,data[*,0:ngood-1,*],/APPEND
+                                ;19/07/2024  ajout de [0:ngood-1]
+ 
+  writefits,outfile,good[0:ngood-1],/APPEND
+
+  writefits,outfile,cs[good[0:ngood-1]],/APPEND ;13/03/2023
+  if(ngood ne Nz) then begin
+     scan_numbers=list(good[0:ngood-1],/extract)
+     missing_scan=tc_intersec(list(indgen(Nz),/extract),scan_numbers)
+     writefits,outfile,missing_scan.ToArray(),/APPEND
+  endif
 end
 ;---------------------------------------------------------------------------------------------------------
 ;---------------------------------------------------------------------------------------------------------

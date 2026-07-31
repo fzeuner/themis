@@ -479,7 +479,7 @@ def robust_continuum_mean(continuum_data):
     continuum_central = continuum_sorted[start_idx:end_idx]
     return np.mean(continuum_central)
 
-def line_levels(wvl, line_profile, line_center, continuum, n_levels=25):
+def line_levels(wvl, line_profile, line_center, continuum, n_levels=35):
     """
     Calculate line levels (intensity at different widths) following run_voigt_as.pro logic.
 
@@ -2630,7 +2630,7 @@ if __name__ == '__main__':
     #display_one_position('m40', crop=True)
     
     # Prepare data into a SpectrumContainer class holding all information
-    # spectra = run_all_preparation_steps(crop=True)
+    # spectra = run_all_preparation_steps(crop=True) # if you ever run this again - see pixel below!
     # check out mean intensity
     # spectra['ti']['disk_center'].plot()
 
@@ -2638,11 +2638,15 @@ if __name__ == '__main__':
     spectra = SpectrumContainer.load_all()
 
     # Fit Ti line for a specific spectrum
-    spectrum = spectra['ti']['m30']
+    spectrum = spectra['sr']['30']
+    #spectrum.line.data[:,135,:] --> scan position 119 has a weird shape for Ti m30
+   # spectrum.line.data[:,135,119] = 1.*spectrum.line.data[:,135,120]
+  #  spectrum.continuum.data[:,135,119] = 1.*spectrum.continuum.data[:,135,120]
+   # spectrum.residual.data[:,135,119] = 1.*spectrum.residual.data[:,135,120]
     #spectrum.fit(slit=0, scan=0)
     # Plot with fit results
     #spectrum.plot(fit=True, show_levels=True, slit=0, scan=0)
-    spectrum.fit()
+    spectrum.fit() # ONLY USING WORKERS IF RUN IN TERMINAL!
     spectrum.save()
 
     #Fit all other positions and lines in external terminal
