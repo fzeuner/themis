@@ -658,7 +658,7 @@ def _load_yshift_arrays(config):
     return yshifts
 
 
-def _apply_yshift_to_half(data_2d, yshift_array):
+def _apply_yshift_to_half(data_2d, yshift_array, order=1):
     """Apply per-column y-shifts to a 2D image.
     
     Parameters
@@ -667,6 +667,10 @@ def _apply_yshift_to_half(data_2d, yshift_array):
         Input image (ny, nx).
     yshift_array : 1D ndarray
         Y-shift values for each column (length must equal nx).
+    order : int
+        Interpolation order passed to scipy.ndimage.shift (default: 1,
+        the pipeline default). order=3 (cubic spline) is more accurate
+        for sub-pixel shifts; only change this for testing purposes.
     
     Returns
     -------
@@ -689,14 +693,14 @@ def _apply_yshift_to_half(data_2d, yshift_array):
             # NOTE: Using cval=np.nan with spline interpolation (order>1) can
             # spread NaNs through the entire output column due to spline
             # prefiltering. Use a NaN-safe boundary mode instead.
-            shifted[:, j] = scipy_shift(col, -dy, order=1, mode='nearest')
+            shifted[:, j] = scipy_shift(col, -dy, order=order, mode='nearest')
         else:
             shifted[:, j] = col
     
     return shifted
 
 
-def _apply_yshift_map_to_half(data_2d, yshift_map):
+def _apply_yshift_map_to_half(data_2d, yshift_map, order=1):
     yshift_map = np.asarray(yshift_map, dtype=float)
     if yshift_map.shape != data_2d.shape:
         raise ValueError(f"yshift_map shape {yshift_map.shape} does not match image shape {data_2d.shape}")
@@ -711,18 +715,18 @@ def _apply_yshift_map_to_half(data_2d, yshift_map):
     shifted = map_coordinates(
         data_2d.astype(float),
         coords,
-        order=1,
+        order=order,
         mode='nearest',
     )
     return shifted
 
 
-def _apply_yshift_correction_to_half(data_2d, yshift):
+def _apply_yshift_correction_to_half(data_2d, yshift, order=1):
     yshift = np.asarray(yshift)
     if yshift.ndim == 1:
-        return _apply_yshift_to_half(data_2d, yshift)
+        return _apply_yshift_to_half(data_2d, yshift, order=order)
     if yshift.ndim == 2:
-        return _apply_yshift_map_to_half(data_2d, yshift)
+        return _apply_yshift_map_to_half(data_2d, yshift, order=order)
     raise ValueError(f"Unsupported yshift ndim={yshift.ndim}; expected 1D (nx,) or 2D (ny,nx).")
 
 

@@ -92,10 +92,10 @@ class CameraRegistry:
 cam1 = Camera(name="Zyla 5", target="sr", pixel_scale=0.096, file_ext='b0505', 
               wavelength='4607', roi=ROI(lower=((60, 928), (350, 1600)), upper=((1122, 1990), (342, 1592))),
               atlas_fit_config=_project_root() / "configs" / "atlas_fit_config_cam1.yml")
-cam2 = Camera(name="Zyla 6", target="ti", pixel_scale=0.065, file_ext='b0606', 
+cam2 = Camera(name="Zyla 6", target="ti", pixel_scale=0.094, file_ext='b0606', 
               wavelength='4536', roi=ROI(lower=((53, 921), (320, 1570)), upper=((1128, 1996), (310, 1560))),
               atlas_fit_config=_project_root() / "configs" / "atlas_fit_config_cam2.yml")  
-cam3 = Camera(name="iXon 2", target="fe", pixel_scale=0.235, file_ext='b0202', 
+cam3 = Camera(name="iXon 2", target="fe", pixel_scale=0.235, file_ext='b0202', #pixel_scale NOT CONFIRMED YET
               wavelength='6302', roi=ROI(lower=((12, 248), (113, 300)), upper=((264, 500), (113, 300))),
               atlas_fit_config=_project_root() / "configs" / "atlas_fit_config_cam3.yml")  
 #ROI(lower=((8, 252), (113, 300)), upper=((254, 498), (113, 300))
