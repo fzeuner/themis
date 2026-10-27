@@ -3,16 +3,25 @@
 """
 Spectral Line Fitting and Formation Height Analysis
 
-This script implements Voigt profile fitting for Ti and Sr spectral lines to extract
-formation height parameters. It follows the methodology from run_voigt_as.pro (IDL)
-with Python implementations using lmfit.
+This script implements Voigt profile fitting for the Ti and Sr spectral lines and the
+Fe I 4607.65 A line next to Sr (in the Sr camera) to extract formation height
+parameters. It follows the methodology from run_voigt_as.pro (IDL) with Python
+implementations using lmfit.
 
 Workflow Steps:
+0. Stray-light Removal (REMOVE_STRAY_LIGHT): every L4 frame half (upper/lower) is
+   corrected for the global spectrograph stray light right after loading,
+   I - mean(I) * s/100, with s from the camera's atlas-fit config
+   (stray_light for upper, stray_light_lower for lower), see
+   themis.core.stray_light and tests/test_remove_straylight.py
 1. Data Preparation: Load L4 data, split spectrum into continuum/line/residual regions
+   - Ti: lower half of pQ only; Sr and Fe: uml intensity = mean of (upper+lower)/2
 2. Continuum Normalization: Normalize each position to its continuum level
 3. Spectral Fitting: Fit each spatial pixel with piecewise (red and blue) Voigt models
    - Ti line: 4 Voigt profiles (A, B, C, D) + constant continuum
    - Sr line: 2 Voigt profiles (SR, B) + constant continuum
+   - Sr and Fe lines are fitted together in one fit (Sr + Fe model, B = Fe I);
+     components and line levels are stored separately for 'sr' and 'fe'
 4. Line Levels Calculation: Extract intensity levels at equally-spaced widths
 5. Results Storage: Save fitted profiles and line levels in FITS format
 
@@ -59,6 +68,7 @@ Created on Fri Jul 4 15:24:27 2025
 
 from themis.core import themis_tools as tt
 from themis.core import themis_io as tio
+from themis.core import stray_light as sl
 from themis.datasets.themis_datasets_2025 import get_config
 
 from spectator.controllers.app_controller import display_data # from spectator
@@ -95,14 +105,27 @@ POSITION_TO_SEQUENCE = {
     'm30': 18,
     '30': 50,
     '40': 36,
-    '45': 38,
-    'm45': 48,
-    'm55': 92,
-    '55': 86,
+ #   '45': 38,
+  #  'm45': 48,
+  #  'm55': 92,
+ #   '55': 86,
 }
 
+# Spectral line -> camera the line is observed with ('fe' is the Fe I 4607.65 A
+# line next to Sr in the Sr camera, NOT the Fe 630 nm camera)
+LINE_TO_CAMERA = {'ti': 'ti', 'sr': 'sr', 'fe': 'sr'}
+
 # Available spectral lines
-AVAILABLE_LINES = ['ti', 'sr']
+AVAILABLE_LINES = list(LINE_TO_CAMERA)
+
+# Remove the global spectrograph stray light from every L4 frame half
+# (first processing step, see themis.core.stray_light)
+REMOVE_STRAY_LIGHT = True
+
+# Lines and positions fitted by run_all_fitting (all positions except
+# disk_center; positions -> sequences: POSITION_TO_SEQUENCE above)
+FIT_LINES =['sr','fe']#AVAILABLE_LINES
+FIT_POSITIONS = [p for p in POSITION_TO_SEQUENCE if p != 'disk_center']
 
 # Helper: convert position name to numeric value (for plotting labels, etc.)
 POSITION_TO_NUMERIC = {
@@ -122,6 +145,7 @@ CROP_CONFIGS = {
     'sr': {'scan': (0, -1), 'slit': (2, -55), 'wavelength': (276, 886)},
     'ti': {'scan': (0, -1), 'slit': (2, -55), 'wavelength': (406, 1016)},
 }
+CROP_CONFIGS['fe'] = CROP_CONFIGS['sr']
 
 
 
@@ -479,7 +503,7 @@ def robust_continuum_mean(continuum_data):
     continuum_central = continuum_sorted[start_idx:end_idx]
     return np.mean(continuum_central)
 
-def line_levels(wvl, line_profile, line_center, continuum, n_levels=35):
+def line_levels(wvl, line_profile, line_center, continuum, n_levels=25):
     """
     Calculate line levels (intensity at different widths) following run_voigt_as.pro logic.
 
@@ -795,12 +819,16 @@ def fit_ti_spectrum(line_data, line_wvl, continuum_data):
     }
 
 #----------------------------------------------------------------------
-# SR Line Fitting Functions
+# SR + FE Line Fitting Functions (Sr I 4607.34 A and Fe I 4607.65 A fitted together)
 #----------------------------------------------------------------------
 
 SR_CENTER_WL = 4607.34  # Sr I line center in Angstrom
 SR_SPEC_REGION_WIDTH = 0.16  # Width of spectral region for fitting (Angstrom)
-B_CENTER_WL = 4607.65  # B component center in Angstrom
+B_CENTER_WL = 4607.65  # B component center in Angstrom (Fe I line)
+
+# Line name -> component prefix in the Sr + Fe model. Both lines are fitted
+# together in one fit; components and line levels are stored separately per line.
+SR_FE_COMPONENT_PREFIX = {'sr': 'sr', 'fe': 'B'}
 
 def _sr_piecewise_model():
     """Create the full piecewise model for SR line (SR + B + constant)."""
@@ -901,8 +929,8 @@ def _initialize_sr_parameter(params, continuum, wvl=None, profile=None):
 
 
 # Helper function for multiprocessing with shared memory (must be at module level)
-def _fit_sr_single_pixel_shared(args):
-    """Fit a single SR pixel for multiprocessing using shared memory."""
+def _fit_sr_fe_single_pixel_shared(args):
+    """Fit Sr + Fe in a single pixel for multiprocessing using shared memory."""
     wvl_shm_name, line_data_shm_name, continuum_data_shm_name, wvl_shape, line_data_shape, continuum_data_shape, slit_idx, scan_idx = args
     
     try:
@@ -930,36 +958,30 @@ def _fit_sr_single_pixel_shared(args):
         continuum_data_shm.close()
         
         # Fit the pixel
-        result = fit_sr_pixel(wvl_copy, profile, continuum_pixel)
+        result = fit_sr_fe_pixel(wvl_copy, profile, continuum_pixel)
         return (slit_idx, scan_idx, result, None)
     except Exception as e:
         return (slit_idx, scan_idx, None, str(e))
 
-# Helper function for multiprocessing (must be at module level)
-def _fit_sr_single_pixel(args):
-    """Fit a single SR pixel for multiprocessing."""
-    wvl, profile, continuum, slit_idx, scan_idx = args
-    try:
-        result = fit_sr_pixel(wvl, profile, continuum)
-        return (slit_idx, scan_idx, result, None)
-    except Exception as e:
-        return (slit_idx, scan_idx, None, str(e))
-
-def fit_sr_pixel(wvl, profile, continuum):
+def fit_sr_fe_pixel(wvl, profile, continuum):
     """
-    Fit a single pixel spectrum using the SR piecewise Voigt model.
+    Fit a single pixel with the Sr + Fe piecewise Voigt model:
+    component 'sr' (Sr I 4607.34 A) + component 'B' (Fe I 4607.65 A) + constant.
+
+    Both lines are fitted together in one fit; the line components and line
+    levels are returned separately per line ('sr', 'fe').
 
     Args:
         wvl: Wavelength array (in Angstrom)
-        profile: Intensity profile (line + residual)
+        profile: Intensity profile (Sr + Fe window)
         continuum: Continuum level (fixed). If None or not finite, uses profile[-1]
 
     Returns:
-        dict: Dictionary containing fitted arrays:
-            - 'best_fit': Best fit profile
-            - 'component_sr': Sr component
-            - 'component_residual': Residual component (B)
-            - 'params': Fitted parameters
+        dict: {'best_fit': full fit, 'params': fitted parameters,
+               'sr': {...}, 'fe': {...}}, each line dict containing
+               - 'component_line': this line's component + continuum
+               - 'component_residual': the other line's component + continuum
+               - 'levels': line levels of this line's component (or None)
     """
     # Continuum fallback
     if continuum is None:
@@ -981,28 +1003,25 @@ def fit_sr_pixel(wvl, profile, continuum):
     best_fit = model.eval(out.params, x=wvl)
     components = model.eval_components(params=out.params, x=wvl)
 
-    # Extract components
-    component_sr = components['sr_'] + components['c_']
-    component_residual = components['B_'] + components['c_']
+    result = {'best_fit': best_fit, 'params': out.params}
+    for line, prefix in SR_FE_COMPONENT_PREFIX.items():
+        other = 'B' if prefix == 'sr' else 'sr'
+        component_line = components[prefix + '_'] + components['c_']
+        # Calculate line levels (may fail for bad data)
+        try:
+            levels = line_levels(wvl, component_line, out.params[prefix + '_r_center'].value, continuum)
+        except Exception:
+            levels = None
+        result[line] = {
+            'component_line': component_line,
+            'component_residual': components[other + '_'] + components['c_'],
+            'levels': levels,
+        }
+    return result
 
-    # Calculate line levels (may fail for bad data)
-    line_center = out.params['sr_r_center'].value
-    try:
-        levels = line_levels(wvl, component_sr, line_center, continuum)
-    except Exception:
-        levels = None
-
-    return {
-        'best_fit': best_fit,
-        'component_sr': component_sr,
-        'component_residual': component_residual,
-        'params': out.params,
-        'levels': levels
-    }
-
-def fit_sr_spectrum(line_data, line_wvl, continuum_data):
+def fit_sr_fe_spectrum(line_data, line_wvl, continuum_data):
     """
-    Fit SR line for all pixels in the spectrum.
+    Fit the Sr + Fe model for all pixels (both lines in one fit per pixel).
 
     Args:
         line_data: 3D array of intensity data (n_wvl, n_slit, n_scan)
@@ -1011,39 +1030,66 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_data):
                         Per-pixel continuum level is computed as mean over wavelength
 
     Returns:
-        dict: Dictionary containing fitted arrays:
-            - 'best_fit': Best fit for all pixels (same shape as line_data)
-            - 'component_sr': Sr component for all pixels
-            - 'component_residual': Residual component for all pixels
+        dict: {'best_fit': full fit (same shape as line_data), 'sr': {...}, 'fe': {...}},
+              each line dict containing
+            - 'component_line': this line's component for all pixels
+            - 'component_residual': the other line's component for all pixels
             - 'levels': 3D array of intensity levels (shape: n_levels, n_slit, n_scan)
             - 'widths': 1D array of widths (in Angstrom) from line core
             - 'metadata': Dictionary with continuum_level, intensity_core, width_continuum per pixel
     """
     n_wvl, n_slit, n_scan = line_data.shape
     best_fit = np.zeros_like(line_data)
-    component_sr = np.zeros_like(line_data)
-    component_residual = np.zeros_like(line_data)
-    
-    # Initialize levels array (will store intensities at each level for each pixel)
-    # First, get n_levels from a test pixel
+
+    # Get n_levels and widths from a test pixel
     test_profile = line_data[:, 0, 0]
     test_continuum = robust_continuum_mean(continuum_data[:, 0, 0])
     test_center = line_wvl[np.argmin(test_profile)]
     test_levels = line_levels(line_wvl, test_profile, test_center, test_continuum)
-    if test_levels is not None:
-        n_levels = len(test_levels['intensities'])
-        levels_array = np.zeros((n_levels, n_slit, n_scan))
-        widths = test_levels['widths']  # Same for all pixels
-    else:
-        levels_array = None
-        widths = None
-    
-    # Store metadata per pixel
-    continuum_levels = np.zeros((n_slit, n_scan))
-    intensity_cores = np.zeros((n_slit, n_scan))
-    width_continuums = np.zeros((n_slit, n_scan))
-    blue_dists_arr = np.full((n_levels, n_slit, n_scan), np.nan) if levels_array is not None else None
-    red_dists_arr = np.full((n_levels, n_slit, n_scan), np.nan) if levels_array is not None else None
+    n_levels = len(test_levels['intensities']) if test_levels is not None else None
+    widths = test_levels['widths'] if test_levels is not None else None  # Same for all pixels
+
+    def _new_line_storage():
+        return {
+            'component_line': np.zeros_like(line_data),
+            'component_residual': np.zeros_like(line_data),
+            'levels': np.zeros((n_levels, n_slit, n_scan)) if n_levels else None,
+            'widths': widths,
+            'metadata': {
+                'continuum_levels': np.zeros((n_slit, n_scan)),
+                'intensity_cores': np.zeros((n_slit, n_scan)),
+                'width_continuums': np.zeros((n_slit, n_scan)),
+                'blue_dists': np.full((n_levels, n_slit, n_scan), np.nan) if n_levels else None,
+                'red_dists': np.full((n_levels, n_slit, n_scan), np.nan) if n_levels else None,
+            },
+        }
+
+    fits = {'best_fit': best_fit}
+    fits.update({line: _new_line_storage() for line in SR_FE_COMPONENT_PREFIX})
+
+    def _store(slit_idx, scan_idx, result):
+        if result is None:
+            # Failed fit: use original data as fallback
+            profile = line_data[:, slit_idx, scan_idx]
+            best_fit[:, slit_idx, scan_idx] = profile
+            for line in SR_FE_COMPONENT_PREFIX:
+                fits[line]['component_line'][:, slit_idx, scan_idx] = profile
+                fits[line]['component_residual'][:, slit_idx, scan_idx] = 0
+            return
+        best_fit[:, slit_idx, scan_idx] = result['best_fit']
+        for line in SR_FE_COMPONENT_PREFIX:
+            res, store = result[line], fits[line]
+            store['component_line'][:, slit_idx, scan_idx] = res['component_line']
+            store['component_residual'][:, slit_idx, scan_idx] = res['component_residual']
+            lv = res['levels']
+            if lv is not None and store['levels'] is not None:
+                md = store['metadata']
+                store['levels'][:, slit_idx, scan_idx] = lv['intensities']
+                md['continuum_levels'][slit_idx, scan_idx] = lv['continuum_level']
+                md['intensity_cores'][slit_idx, scan_idx] = lv['intensity_core']
+                md['width_continuums'][slit_idx, scan_idx] = lv['width_continuum']
+                md['blue_dists'][:, slit_idx, scan_idx] = lv['blue_dists']
+                md['red_dists'][:, slit_idx, scan_idx] = lv['red_dists']
 
     total_pixels = n_slit * n_scan
 
@@ -1091,29 +1137,14 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_data):
         try:
             # Process with multiprocessing using shared memory
             with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                futures = {executor.submit(_fit_sr_single_pixel_shared, args): args for args in args_list}
+                futures = {executor.submit(_fit_sr_fe_single_pixel_shared, args): args for args in args_list}
 
-                with tqdm(total=total_pixels, desc="Fitting SR pixels") as pbar:
+                with tqdm(total=total_pixels, desc="Fitting SR+FE pixels") as pbar:
                     for future in as_completed(futures):
                         slit_idx, scan_idx, result, error = future.result()
                         if error is not None:
                             print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {error}")
-                            profile = line_data[:, slit_idx, scan_idx]
-                            best_fit[:, slit_idx, scan_idx] = profile
-                            component_sr[:, slit_idx, scan_idx] = profile
-                            component_residual[:, slit_idx, scan_idx] = 0
-                        else:
-                            best_fit[:, slit_idx, scan_idx] = result['best_fit']
-                            component_sr[:, slit_idx, scan_idx] = result['component_sr']
-                            component_residual[:, slit_idx, scan_idx] = result['component_residual']
-                            # Store levels if available
-                            if result['levels'] is not None and levels_array is not None:
-                                levels_array[:, slit_idx, scan_idx] = result['levels']['intensities']
-                                continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
-                                intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
-                                width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
-                                blue_dists_arr[:, slit_idx, scan_idx] = result['levels']['blue_dists']
-                                red_dists_arr[:, slit_idx, scan_idx] = result['levels']['red_dists']
+                        _store(slit_idx, scan_idx, result)
                         pbar.update(1)
         finally:
             # Clean up shared memory
@@ -1125,48 +1156,20 @@ def fit_sr_spectrum(line_data, line_wvl, continuum_data):
             continuum_data_shm.unlink()
     else:
         # Sequential processing (for small datasets or interactive environments)
-        with tqdm(total=total_pixels, desc="Fitting SR pixels") as pbar:
+        with tqdm(total=total_pixels, desc="Fitting SR+FE pixels") as pbar:
             for slit_idx in range(n_slit):
                 for scan_idx in range(n_scan):
                     profile = line_data[:, slit_idx, scan_idx]
                     continuum_pixel = robust_continuum_mean(continuum_data[:, slit_idx, scan_idx])
-
                     try:
-                        result = fit_sr_pixel(line_wvl, profile, continuum_pixel)
-                        best_fit[:, slit_idx, scan_idx] = result['best_fit']
-                        component_sr[:, slit_idx, scan_idx] = result['component_sr']
-                        component_residual[:, slit_idx, scan_idx] = result['component_residual']
-                        # Store levels if available
-                        if result['levels'] is not None and levels_array is not None:
-                            levels_array[:, slit_idx, scan_idx] = result['levels']['intensities']
-                            continuum_levels[slit_idx, scan_idx] = result['levels']['continuum_level']
-                            intensity_cores[slit_idx, scan_idx] = result['levels']['intensity_core']
-                            width_continuums[slit_idx, scan_idx] = result['levels']['width_continuum']
-                            blue_dists_arr[:, slit_idx, scan_idx] = result['levels']['blue_dists']
-                            red_dists_arr[:, slit_idx, scan_idx] = result['levels']['red_dists']
+                        result = fit_sr_fe_pixel(line_wvl, profile, continuum_pixel)
                     except Exception as e:
                         print(f"Failed to fit pixel (slit={slit_idx}, scan={scan_idx}): {e}")
-                        # Use original data as fallback
-                        best_fit[:, slit_idx, scan_idx] = profile
-                        component_sr[:, slit_idx, scan_idx] = profile
-                        component_residual[:, slit_idx, scan_idx] = 0
-
+                        result = None
+                    _store(slit_idx, scan_idx, result)
                     pbar.update(1)
 
-    return {
-        'best_fit': best_fit,
-        'component_sr': component_sr,
-        'component_residual': component_residual,
-        'levels': levels_array,
-        'widths': widths,
-        'metadata': {
-            'continuum_levels': continuum_levels,
-            'intensity_cores': intensity_cores,
-            'width_continuums': width_continuums,
-            'blue_dists': blue_dists_arr,
-            'red_dists': red_dists_arr
-        }
-    }
+    return fits
 
 # Predefined split configurations for each line (wavelength ranges in nm)
 SPLIT_CONFIGS = {
@@ -1179,6 +1182,13 @@ SPLIT_CONFIGS = {
         'continuum': (453.654, 453.66),
         'line': (453.631, 453.654),
         'residual': (453.58, 453.632),
+    },
+    # Fe I 4607.65 A next to Sr (Sr camera): same continuum and fit window as
+    # 'sr', with line/residual swapped (line = Fe, residual = Sr)
+    'fe': {
+        'continuum': (460.716, 460.719),
+        'line': (460.746, 460.783),
+        'residual': (460.719, 460.746),
     },
 }
 
@@ -1525,13 +1535,13 @@ class Spectrum:
         line: SpectrumPart for line region
         residual: SpectrumPart for residual region
         fit_sum: SpectrumPart for full fit result (fitted data array)
-        fit_line: SpectrumPart for line component only (Ti for TI line, Sr for SR line)
+        fit_line: SpectrumPart for line component only (Ti for TI line, Sr for SR line, B=Fe for FE line)
     """
     def __init__(self, continuum, line, residual, line_name=None):
         self.continuum = continuum
         self.line = line
         self.residual = residual
-        self.line_name = line_name  # 'ti' or 'sr'
+        self.line_name = line_name  # 'ti', 'sr' or 'fe'
         self.fit_sum = None  # Will store full fit result after fitting
         self.fit_line = None  # Will store line component after fitting
         self.levels = None  # Will store line levels dict (3D intensities array + widths + metadata)
@@ -1565,6 +1575,12 @@ class Spectrum:
         """
         if pixel_levels is None:
             return
+
+        expected_shape = (len(pixel_levels['intensities']), n_slit, n_scan)
+        if self._has_3d_levels() and self.levels['intensities'].shape != expected_shape:
+            print(f"  Existing levels {self.levels['intensities'].shape} do not match "
+                  f"{expected_shape} (old file?) - starting a new levels array")
+            self.levels = None
 
         if self._has_3d_levels():
             # Reuse existing 3D levels array, update only this pixel
@@ -1602,6 +1618,21 @@ class Spectrum:
             'widths': widths,
             'metadata': metadata
         }
+
+    def replace_pixel(self, slit, scan, replacement_scan):
+        """
+        Replace a bad pixel in the continuum, line and residual parts by the
+        same slit pixel of another scan position (axes: wavelength, slit, scan).
+
+        Args:
+            slit: slit index of the bad pixel
+            scan: scan index of the bad pixel
+            replacement_scan: scan index whose data replaces the bad pixel
+        """
+        for part in (self.continuum, self.line, self.residual):
+            part.data[:, slit, scan] = part.data[:, slit, replacement_scan]
+        print(f"  Replaced {self.line_name} pixel (slit={slit}, scan={scan}) "
+              f"by scan {replacement_scan}")
 
     def reconstruct(self, parts=('residual', 'line', 'continuum')):
         """
@@ -1812,25 +1843,30 @@ class Spectrum:
         #plt.tight_layout()
         return fig
 
-    def fit(self, slit=None, scan=None):
+    def fit(self, slit=None, scan=None, partner=None):
         """
         Fit the spectrum using line-specific models.
 
         For TI line: Uses 4 Voigt profiles (A, B, C, D) + constant model.
         Fits each spatial pixel individually, or a single pixel if indices are provided.
 
-        For SR line: Uses 2 Voigt profiles (SR, B) + constant model.
-        Fits each spatial pixel individually, or a single pixel if indices are provided.
+        For SR and FE lines (Sr camera): both lines are fitted together with
+        the Sr + Fe model (component 'sr' = Sr I, component 'B' = Fe I
+        4607.65 A, + constant). This spectrum keeps its own line component and
+        line levels; pass the other line's Spectrum of the same position as
+        `partner` to store its component/levels from the same fit as well.
 
         Args:
             slit: Optional slit index to fit only that pixel. If None, fits all pixels.
             scan: Optional scan index to fit only that pixel. If None, fits all pixels.
                       Must be provided together with slit_idx.
+            partner: Optional Spectrum of the other Sr-camera line ('fe' for an
+                     'sr' spectrum and vice versa, same position).
         """
         if self.line_name == 'ti':
             self._fit_ti(slit=slit, scan=scan)
-        elif self.line_name == 'sr':
-            self._fit_sr(slit=slit, scan=scan)
+        elif self.line_name in SR_FE_COMPONENT_PREFIX:  # 'sr' or 'fe'
+            self._fit_sr_fe(slit=slit, scan=scan, partner=partner)
         else:
             print(f"Unknown line: {self.line_name}")
             return
@@ -1871,7 +1907,9 @@ class Spectrum:
             n_wvl = wvl_full.shape[0]
             n_slit, n_scan = data_full.shape[1], data_full.shape[2]
             
-            if self.fit_sum is not None and self.fit_line is not None:
+            if (self.fit_sum is not None and self.fit_line is not None
+                    and self.fit_sum.data.shape == (n_wvl, n_slit, n_scan)
+                    and self.fit_line.data.shape == (n_wvl, n_slit, n_scan)):
                 # Use existing fitted data, update only this pixel
                 best_fit = self.fit_sum.data.copy()
                 component_ti = self.fit_line.data.copy()
@@ -1902,20 +1940,24 @@ class Spectrum:
         self.fit_sum = SpectrumPart(best_fit, wvl_full)
         self.fit_line = SpectrumPart(component_ti, wvl_full)
 
-    def _fit_sr(self, slit=None, scan=None):
+    def _fit_sr_fe(self, slit=None, scan=None, partner=None):
         """
-        Fit SR line using piecewise Voigt model.
+        Fit the Sr + Fe model (both lines in one fit) and store the results.
 
         Procedure:
-        1. Concatenate residual+line for full spectrum
+        1. Concatenate residual+line for full spectrum (Sr + Fe window)
         2. Use per-pixel continuum as fixed continuum level
-        3. Fit all spatial pixels separately using fit_sr_spectrum
-        4. Store full fit and SR component as SpectrumParts
+        3. Fit all spatial pixels separately using fit_sr_fe_spectrum
+           (or a single pixel with fit_sr_fe_pixel)
+        4. Store the full fit and this line's component/levels ('sr': SR
+           component, 'fe': B component); the same for `partner` if given
 
         Args:
             slit: Optional slit index to fit only that pixel. If None, fits all pixels.
             scan: Optional scan index to fit only that pixel. If None, fits all pixels.
                   Must be provided together with slit.
+            partner: Optional Spectrum of the other Sr-camera line (same position).
+                     Its data must be identical (same Sr + Fe window and continuum).
         """
         # Use reconstruct to concatenate line and residual data
         wvl_full, data_full = self.reconstruct(parts=('line', 'residual'))
@@ -1923,51 +1965,69 @@ class Spectrum:
         # Get continuum data for per-pixel fitting
         continuum_data = self.continuum.data  # shape: (n_wvl_cont, n_slit, n_scan)
 
-        # Determine which pixels to fit
+        targets = [self]
+        if partner is not None:
+            if partner.line_name not in SR_FE_COMPONENT_PREFIX or partner.line_name == self.line_name:
+                raise ValueError(f"partner must be the other Sr-camera line, got '{partner.line_name}'")
+            p_wvl, p_data = partner.reconstruct(parts=('line', 'residual'))
+            if not (np.array_equal(p_wvl, wvl_full) and np.array_equal(p_data, data_full)
+                    and np.array_equal(partner.continuum.data, continuum_data)):
+                raise ValueError("partner spectrum data differ from this spectrum "
+                                 "(different position or split window?)")
+            targets.append(partner)
+
+        n_slit, n_scan = data_full.shape[1], data_full.shape[2]
+
         if slit is not None and scan is not None:
             # Fit single pixel
             import time
             profile = data_full[:, slit, scan]
             continuum_pixel = robust_continuum_mean(continuum_data[:, slit, scan])
             start_time = time.time()
-            result = fit_sr_pixel(wvl_full, profile, continuum_pixel)
+            result = fit_sr_fe_pixel(wvl_full, profile, continuum_pixel)
             elapsed = time.time() - start_time
             print(f"Single pixel fit time: {elapsed:.3f}s")
-
-            # Preserve existing fit data if available, only update the single pixel
-            n_wvl = wvl_full.shape[0]
-            n_slit, n_scan = data_full.shape[1], data_full.shape[2]
-            
-            if self.fit_sum is not None and self.fit_line is not None:
-                # Use existing fitted data, update only this pixel
-                best_fit = self.fit_sum.data.copy()
-                component_sr = self.fit_line.data.copy()
-                best_fit[:, slit, scan] = result['best_fit']
-                component_sr[:, slit, scan] = result['component_sr']
-            else:
-                # No existing fit data, create new arrays with only this pixel
-                best_fit = np.zeros((n_wvl, n_slit, n_scan))
-                component_sr = np.zeros((n_wvl, n_slit, n_scan))
-                best_fit[:, slit, scan] = result['best_fit']
-                component_sr[:, slit, scan] = result['component_sr']
-
-            # Store levels data for plotting, preserving previously fitted pixels
-            self._merge_pixel_levels(slit, scan, result['levels'], n_slit, n_scan)
+            for spec in targets:
+                spec._store_single_pixel_fit(wvl_full, slit, scan, result['best_fit'],
+                                             result[spec.line_name]['component_line'],
+                                             result[spec.line_name]['levels'], n_slit, n_scan)
         else:
             # Fit all pixels separately with per-pixel continuum
-            fit_results = fit_sr_spectrum(data_full, wvl_full, continuum_data)
-            best_fit = fit_results['best_fit']
-            component_sr = fit_results['component_sr']
-            # Store levels data for all pixels
-            self.levels = {
-                'intensities': fit_results['levels'],  # 3D array (n_levels, n_slit, n_scan)
-                'widths': fit_results['widths'],  # 1D array
-                'metadata': fit_results['metadata']
-            }
+            fit_results = fit_sr_fe_spectrum(data_full, wvl_full, continuum_data)
+            for spec in targets:
+                res = fit_results[spec.line_name]
+                spec.levels = {
+                    'intensities': res['levels'],  # 3D array (n_levels, n_slit, n_scan)
+                    'widths': res['widths'],  # 1D array
+                    'metadata': res['metadata']
+                }
+                # Store results as SpectrumParts (wavelength is already in Angstrom)
+                spec.fit_sum = SpectrumPart(fit_results['best_fit'], wvl_full)
+                spec.fit_line = SpectrumPart(res['component_line'], wvl_full)
 
-        # Store results as SpectrumParts (wavelength is already in Angstrom)
-        self.fit_sum = SpectrumPart(best_fit, wvl_full)
-        self.fit_line = SpectrumPart(component_sr, wvl_full)
+    def _store_single_pixel_fit(self, wvl, slit, scan, best_fit_pixel, component_pixel,
+                                levels, n_slit, n_scan):
+        """
+        Store a single pixel's fit, preserving previously fitted pixels if the
+        existing fit arrays have the matching shape.
+        """
+        shape = (len(wvl), n_slit, n_scan)
+        if (self.fit_sum is not None and self.fit_line is not None
+                and self.fit_sum.data.shape == shape and self.fit_line.data.shape == shape):
+            # Use existing fitted data, update only this pixel
+            best_fit = self.fit_sum.data.copy()
+            component = self.fit_line.data.copy()
+        else:
+            # No (matching) existing fit data, create new arrays
+            best_fit = np.zeros(shape)
+            component = np.zeros(shape)
+        best_fit[:, slit, scan] = best_fit_pixel
+        component[:, slit, scan] = component_pixel
+
+        # Store levels data for plotting, preserving previously fitted pixels
+        self._merge_pixel_levels(slit, scan, levels, n_slit, n_scan)
+        self.fit_sum = SpectrumPart(best_fit, wvl)
+        self.fit_line = SpectrumPart(component, wvl)
 
     def plot(self, ax=None, show_continuum=True, show_line=True, show_residual=True,
               scan=None, slit=None, fit=False, show_levels=False):
@@ -2384,20 +2444,27 @@ def load_all_l4_for_line(line: str):
         print(f"Loaded {line.upper()} at {position} (sequence {sequence})")
     return results
 
-def load_l4_for_position(line: str, position: str):
+def load_l4_for_position(line: str, position: str, remove_stray_light: bool = None):
     """
     Load L4 data for a specific line and disk position.
 
     Args:
-        line: Spectral line ('ti' or 'sr')
+        line: Spectral line ('ti', 'sr' or 'fe'); the data of the camera the
+              line is observed with is loaded (see LINE_TO_CAMERA)
         position: Disk position ('disk_center', '-40', etc.)
+        remove_stray_light: If True, remove the global stray light from every
+              frame half (upper/lower, levels from the atlas-fit config).
+              Defaults to REMOVE_STRAY_LIGHT.
 
     Returns:
         tuple: (l4_data, header) from tio.read_any_file
     """
+    if remove_stray_light is None:
+        remove_stray_light = REMOVE_STRAY_LIGHT
+    camera = LINE_TO_CAMERA.get(line, line)
     sequence = get_formation_height_config(line, position)
     config = get_config(
-        line=line,
+        line=camera,
         config_path=CONFIG_PATH,
         auto_discover_files=False,  # Don't auto-discover yet
         auto_create_dirs=False
@@ -2417,7 +2484,12 @@ def load_l4_for_position(line: str, position: str):
         yshift_calibration_date=config.yshift_calibration_date,
     )
 
-    return tio.read_any_file(config, data_type='scan', status='l4')
+    data, header = tio.read_any_file(config, data_type='scan', status='l4')
+    if remove_stray_light:
+        levels = sl.get_stray_light_levels(config)
+        print(f"  Removing stray light ({camera}): upper {levels['upper']} %, lower {levels['lower']} %")
+        data = sl.remove_stray_light_from_set(data, levels, inplace=True)
+    return data, header
 
 
 def calculate_intensity(line: str, position: str, crop=None):
@@ -2425,7 +2497,7 @@ def calculate_intensity(line: str, position: str, crop=None):
     Calculate intensity for a specific line and position.
 
     Args:
-        line: Spectral line ('ti' or 'sr')
+        line: Spectral line ('ti', 'sr' or 'fe')
         position: Disk position ('disk_center', '-40', etc.)
         crop: Optional crop specification. Can be:
               - None: no cropping
@@ -2444,12 +2516,13 @@ def calculate_intensity(line: str, position: str, crop=None):
                          f"Expected exactly one map.")
     map_idx = map_indices[0]
 
-    if line == 'sr':
+    camera = LINE_TO_CAMERA[line]
+    if camera == 'sr':  # Sr and Fe: uml.I = mean over frames of (upper + lower)/2
         result = tt.compute_polarimetry(data)
         # Collapse the map dimension (axis 1) to match TI shape
         sr_intensity = result.uml.I[:, map_idx, :, :]
         intensity = sr_intensity.squeeze(axis=1) if sr_intensity.shape[1] == 1 else sr_intensity
-    elif line == 'ti': # use only lower state, as argued in the data reduction documentation
+    elif camera == 'ti': # use only lower state, as argued in the data reduction documentation
         # Since we verified only one map exists, stacking all is fine
         intensity = data.get_state('pQ').stack_all('lower')
 
@@ -2466,13 +2539,15 @@ def calculate_intensity(line: str, position: str, crop=None):
     
     
 
-def calculate_intensity_for_all(crop=False):
+def calculate_intensity_for_all(crop=False, show_plot=True):
     """
     Calculate intensity for all lines and positions and plot scan-averaged spectra.
 
     Args:
         crop: Boolean to control cropping. If True, uses predefined crop configurations
               from CROP_CONFIGS (line-dependent). If False, no cropping is applied.
+        show_plot: If False, the overview plot is not shown (plt.show() would
+              block an unattended terminal run).
 
     Returns:
         tuple: (intensity, wavelength) where intensity is a dictionary mapping
@@ -2488,10 +2563,11 @@ def calculate_intensity_for_all(crop=False):
         intensity[line] = {}
         wavelength[line] = {}
         scan_avg_intensity[line] = {}
+        camera = LINE_TO_CAMERA[line]
 
-        # Load wavelength once per line
+        # Load wavelength once per line (from the camera the line is observed with)
         config = get_config(
-            line=line,
+            line=camera,
             config_path=CONFIG_PATH,
             auto_discover_files=True,
             auto_create_dirs=False
@@ -2506,9 +2582,18 @@ def calculate_intensity_for_all(crop=False):
             wl_crop = line_crop['wavelength']
             wavelength[line] = wavelength[line][wl_crop[0]:wl_crop[1]]
 
+        # Reuse the intensity of an already processed line from the same camera
+        # with the same crop (e.g. 'fe' reuses 'sr') instead of loading it again
+        source_line = next((l for l in intensity if l != line
+                            and LINE_TO_CAMERA[l] == camera
+                            and (CROP_CONFIGS[l] if crop else None) == line_crop), None)
+
         for position in get_all_positions(line):
             print(f"    Position: {position}")
-            intensity_data = calculate_intensity(line, position, line_crop)
+            if source_line is not None:
+                intensity_data = intensity[source_line][position]
+            else:
+                intensity_data = calculate_intensity(line, position, line_crop)
 
             # Store full intensity data
             intensity[line][position] = intensity_data
@@ -2524,8 +2609,9 @@ def calculate_intensity_for_all(crop=False):
 
             scan_avg_intensity[line][position] = scan_avg
 
-    # Create figure with 2 subplots (one for each line)
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8))
+    # Create figure with one subplot per line
+    n_lines = len(get_all_lines())
+    fig, axes = plt.subplots(n_lines, 1, figsize=(10, 4 * n_lines))
 
     for idx, line in enumerate(get_all_lines()):
         ax = axes[idx]
@@ -2562,7 +2648,10 @@ def calculate_intensity_for_all(crop=False):
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.show()
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
 
     return intensity, wavelength
 
@@ -2586,9 +2675,14 @@ def display_one_position(position: str, crop=False):
                           state_names=['Sr', 'Ti']
                           )
 
-def run_all_preparation_steps(crop=True):
-
-    intensity, wavelength = calculate_intensity_for_all(crop=crop)  # Use line-dependent crop configs
+def run_all_preparation_steps(crop=True, show_plot=True):
+    """
+    Load L4 data (incl. stray-light removal), split and normalize all
+    lines/positions. Not saved here: apply manual fixes (Spectrum.replace_pixel)
+    first, then call spectra.save_all(), which overwrites the saved
+    continuum/line/residual files (existing fit files are kept but are stale).
+    """
+    intensity, wavelength = calculate_intensity_for_all(crop=crop, show_plot=show_plot)  # Use line-dependent crop configs
     split_data = split_spectrum(intensity, wavelength, SPLIT_CONFIGS) # also normalized to continuum per position
     
     spectra = convert_to_spectrum(split_data) # also converted to IDL expected wavelength, slit, scan
@@ -2596,61 +2690,120 @@ def run_all_preparation_steps(crop=True):
     # Access: spectra['ti']['disk_center'].continuum.wvl
     # spectra['ti']['disk_center'].plot()
     # spectra['ti']['disk_center'].plot(scan_idx=10,slit_idx=300)
-    spectra.save_all()
     return spectra
 
-def run_all_fitting(spectra):
+def run_all_fitting(spectra, lines=None, positions=None):
     """
-    Fit and save all spectra in the container, except disk_center positions.
+    Fit and save all spectra of the given lines/positions.
+
+    Sr and Fe are fitted together (one Sr + Fe fit per pixel): if both 'sr'
+    and 'fe' are in `lines`, each position is fitted once and both spectra are
+    saved.
 
     Args:
         spectra: SpectrumContainer with spectra to fit
+        lines: lines to fit (default: FIT_LINES)
+        positions: positions to fit (default: FIT_POSITIONS, i.e. all but disk_center)
     """
-    for line_name, positions in spectra.items():
-        for position_name, spectrum in positions.items():
-            if position_name == 'disk_center':
-                print(f"Skipping {line_name} disk_center")
+    lines = FIT_LINES if lines is None else lines
+    positions = FIT_POSITIONS if positions is None else positions
+
+    def _get(line, position):
+        if line in spectra.keys() and position in spectra[line].keys():
+            return spectra[line][position]
+        return None
+
+    done = set()
+    for line_name in lines:
+        for position_name in positions:
+            if (line_name, position_name) in done:
+                continue
+            spectrum = _get(line_name, position_name)
+            if spectrum is None:
+                print(f"Skipping {line_name} {position_name}: no prepared spectrum found")
                 continue
 
-            print(f"Fitting {line_name} {position_name}...")
+            # Sr and Fe share one fit: also store the other line if requested
+            partner = None
+            if line_name in SR_FE_COMPONENT_PREFIX:
+                other = next(l for l in SR_FE_COMPONENT_PREFIX if l != line_name)
+                if other in lines:
+                    partner = _get(other, position_name)
+
+            fitted = [spectrum] + ([partner] if partner is not None else [])
+            label = '+'.join(s.line_name for s in fitted)
+            print(f"Fitting {label} {position_name}...")
             try:
-                spectrum.fit()
-                spectrum.save()
-                print(f"  Saved {line_name} {position_name}")
+                spectrum.fit(partner=partner)
+                for s in fitted:
+                    s.save()
+                    done.add((s.line_name, position_name))
+                print(f"  Saved {label} {position_name}")
             except Exception as e:
-                print(f"  Error fitting {line_name} {position_name}: {e}")
+                print(f"  Error fitting {label} {position_name}: {e}")
 
 
 #%%
 if __name__ == '__main__':
+    # =========================================================================
+    # HOW TO RUN
+    #
+    # A) Re-run everything in a terminal (the fits use multiprocessing workers,
+    #    which only works outside interactive sessions such as Spyder/IPython):
+    #       uv run python scripts/process_formation_height_line_levels.py all
+    #    'prepare' -> load L4 + stray-light removal + split/normalize
+    #                 + manual pixel fixes + save (overwrites the saved
+    #                 spectra of all lines/positions)
+    #    'fit'     -> load the prepared spectra, fit + save FIT_LINES x
+    #                 FIT_POSITIONS (all positions except disk_center)
+    #    'all'     -> 'prepare' followed by 'fit'
+    #
+    # B) Single test (interactive, cell by cell, no workers): run without an
+    #    argument (MODE = 'single') and edit the "single test" cell below.
+    #
+    # Settings at the top of the file:
+    #   POSITION_TO_SEQUENCE       positions -> scan sequences
+    #   FIT_LINES / FIT_POSITIONS  lines/positions fitted by run_all_fitting
+    #   REMOVE_STRAY_LIGHT         stray-light removal on/off
+    #   CROP_CONFIGS / SPLIT_CONFIGS  crop and continuum/line/residual windows
+    # =========================================================================
+    import sys
 
-    # Use predefined crop configurations (easier to read and modify)
+    MODE = sys.argv[1] if len(sys.argv) > 1 else 'single'  # 'single', 'prepare', 'fit', 'all'
+    if MODE not in ('single', 'prepare', 'fit', 'all'):
+        raise ValueError(f"Unknown mode '{MODE}', use 'single', 'prepare', 'fit' or 'all'")
 
-    # check out one position
-    #display_one_position('m40', crop=True)
-    
-    # Prepare data into a SpectrumContainer class holding all information
-    # spectra = run_all_preparation_steps(crop=True) # if you ever run this again - see pixel below!
-    # check out mean intensity
-    # spectra['ti']['disk_center'].plot()
+    #%% A1) Preparation
+    if MODE in ('prepare', 'all'):
+        spectra = run_all_preparation_steps(crop=True, show_plot=(MODE == 'prepare'))
 
-    # once the preparation is finished, you can just load the prepared data
-    spectra = SpectrumContainer.load_all()
+        # Manual pixel fixes (axes: wavelength, slit, scan of the cropped data)
+        # Ti m30: scan position 119 has a weird shape at slit 135
+        spectra['ti']['m30'].replace_pixel(slit=135, scan=119, replacement_scan=120)
 
-    # Fit Ti line for a specific spectrum
-    spectrum = spectra['sr']['30']
-    #spectrum.line.data[:,135,:] --> scan position 119 has a weird shape for Ti m30
-   # spectrum.line.data[:,135,119] = 1.*spectrum.line.data[:,135,120]
-  #  spectrum.continuum.data[:,135,119] = 1.*spectrum.continuum.data[:,135,120]
-   # spectrum.residual.data[:,135,119] = 1.*spectrum.residual.data[:,135,120]
-    #spectrum.fit(slit=0, scan=0)
-    # Plot with fit results
-    #spectrum.plot(fit=True, show_levels=True, slit=0, scan=0)
-    spectrum.fit() # ONLY USING WORKERS IF RUN IN TERMINAL!
-    spectrum.save()
+        spectra.save_all()
 
-    #Fit all other positions and lines in external terminal
-    # uv run python /home/franziskaz/code/themis/scripts/process_formation_height_line_levels.py
-    #run_all_fitting(spectra) # uncomment for running
-# -----------------------------------------------------
+    #%% A2) Fit all FIT_LINES x FIT_POSITIONS (terminal only, uses workers)
+    if MODE in ('fit', 'all'):
+        spectra = SpectrumContainer.load_all()
+        run_all_fitting(spectra)
 
+    #%% B) Single test (interactive)
+    if MODE == 'single':
+        # Optional: look at the raw (cropped) data cube of one position
+        # display_one_position('m40', crop=True)
+
+        spectra = SpectrumContainer.load_all()
+        # spectra['ti']['disk_center'].plot()  # mean spectrum
+
+        line, position = 'sr', '30'
+        slit, scan = 0, 0
+        spectrum = spectra[line][position]
+        spectrum.fit(slit=slit, scan=scan)
+        spectrum.plot(fit=True, show_levels=True, slit=slit, scan=scan)
+        plt.show()
+
+        # Fit the full spectrum of this line/position (sequential here, slow;
+        # use the terminal mode 'fit' for workers) and save:
+        # spectrum.fit()
+        # spectrum.save()

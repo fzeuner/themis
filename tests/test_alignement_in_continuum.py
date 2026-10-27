@@ -64,7 +64,7 @@ SLIT_MARGIN = 25
 # Optional Fourier bandpass filter applied to the slit-direction profiles,
 # defined as a spatial period range (period_low, period_high) in arcsec.
 # Set to None to disable. Converted to pixels via config.cam.pixel_scale.
-BANDPASS_ARCSEC = (0.1, 5.5) #None
+BANDPASS_ARCSEC = (0.3, 8.5) #None
 
 
 # ----------------------------------------------------------------------------
