@@ -19,6 +19,7 @@ input:
   # 2025-07-05: 9.64
   stray_light: 9.64
   # Stray-light in percent [%] for lower frame (used by themis pipeline, ignored by atlas-fit)
+  # value added heuristically
   stray_light_lower: 7.24
   # The window [px] for the gauss-fit to operate in around detected line cores
   line_window: 30

@@ -16,9 +16,25 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets
 
 from process_formation_height_line_levels import (
-    SpectrumContainer, POSITION_TO_SEQUENCE, AVAILABLE_LINES,
+    SpectrumContainer
 )
 
+POSITION_TO_SEQUENCE = {
+   'disk_center': 27,
+    'm40': 24,
+    'm30': 18,
+    '30': 50,
+    '40': 36,
+    '45': 38,
+    'm45': 48,
+   'm55': 92,
+   '55': 86,
+}
+
+LINE_TO_CAMERA = {'ti': 'ti', 'sr': 'sr', 'fe': 'sr'}
+
+# Available spectral lines
+AVAILABLE_LINES = list(LINE_TO_CAMERA)
 
 class LineLevelsInspector(QtWidgets.QMainWindow):
     def __init__(self, spectra):

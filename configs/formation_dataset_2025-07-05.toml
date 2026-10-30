@@ -6,9 +6,9 @@ date = "2025-07-05"
 # Sequences for scan/flat/dark
 
 #### disk center
-sequence = 27
+#sequence = 27
 #### -40
-#sequence = 24
+sequence = 24
 flat_sequence = 26
 ##### -30
 #sequence = 18

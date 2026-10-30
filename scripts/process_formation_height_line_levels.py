@@ -100,13 +100,13 @@ CONFIG_PATH = 'configs/formation_dataset_2025-07-05.toml'
 # m := minus (e.g., m40 = -40)
 # Both TI and SR lines share the same positions and sequences
 POSITION_TO_SEQUENCE = {
-    'disk_center': 27,
-    'm40': 24,
-    'm30': 18,
-    '30': 50,
-    '40': 36,
- #   '45': 38,
-  #  'm45': 48,
+   # 'disk_center': 27,
+    # 'm40': 24,
+    # 'm30': 18,
+    # '30': 50,
+    # '40': 36,
+    '45': 38,
+    'm45': 48,
   #  'm55': 92,
  #   '55': 86,
 }
@@ -124,7 +124,7 @@ REMOVE_STRAY_LIGHT = True
 
 # Lines and positions fitted by run_all_fitting (all positions except
 # disk_center; positions -> sequences: POSITION_TO_SEQUENCE above)
-FIT_LINES =['sr','fe']#AVAILABLE_LINES
+FIT_LINES =['sr','fe']#['ti'] #['sr','fe']#AVAILABLE_LINES
 FIT_POSITIONS = [p for p in POSITION_TO_SEQUENCE if p != 'disk_center']
 
 # Helper: convert position name to numeric value (for plotting labels, etc.)
@@ -2779,7 +2779,7 @@ if __name__ == '__main__':
 
         # Manual pixel fixes (axes: wavelength, slit, scan of the cropped data)
         # Ti m30: scan position 119 has a weird shape at slit 135
-        spectra['ti']['m30'].replace_pixel(slit=135, scan=119, replacement_scan=120)
+    #    spectra['ti']['m30'].replace_pixel(slit=135, scan=119, replacement_scan=120)
 
         spectra.save_all()
 

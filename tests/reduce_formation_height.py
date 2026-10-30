@@ -37,7 +37,7 @@ if __name__ == '__main__':
     # auto_discover_files=True,           # pre-fill matching files per level
     # auto_create_dirs=False              # create directories if missing
     # )
-    config = get_config(line='ti',
+    config = get_config(line='fe',
     config_path='configs/formation_dataset_2025-07-05.toml', # omit to use defaults
     auto_discover_files=True,           # pre-fill matching files per level
     auto_create_dirs=False              # create directories if missing
@@ -77,13 +77,13 @@ if __name__ == '__main__':
     result = tt.compute_polarimetry(scan)
  
 #%%
-I_single = (scan.get_state('pQ').stack_all('upper'))[:,100:-100,100:-100]
-   
-data_plot = np.array([result.uml.I[:,0,100:-100,100:-100],np.array(I_single)])
+I_single_u = (scan.get_state('pQ').stack_all('upper'))[:,10:-10,10:-10]
+I_single_l = (scan.get_state('pQ').stack_all('lower'))[:,10:-10,10:-10]
+data_plot = np.array([np.array(I_single_u),np.array(I_single_l)])
 
    
 viewer = display_data( data_plot, ['states', 'spatial_y', 'spatial_x', 'spectral'],
-                      title='scan seq 18' 
+                      title='scan' 
                       )
 
 
