@@ -8,14 +8,17 @@ date = "2025-07-05"
 #### disk center
 #sequence = 27
 #### -40
-sequence = 24
-flat_sequence = 26
+#sequence = 24
+#flat_sequence = 26
 ##### -30
 #sequence = 18
 #flat_sequence = 16
 #####30
 #sequence = 50
 #flat_sequence = 49
+#####30 for position tests
+sequence = 52
+flat_sequence = 49
 #### 40
 #sequence = 36
 #flat_sequence = 37

@@ -47,10 +47,7 @@ from themis.datasets.themis_datasets_2025 import get_config, _build_file_set
 from themis.core import themis_io as tio
 from themis.core import stray_light as sl
 
-import yaml
-from atlas_fit.atlantes import atlas_factory
 from atlas_fit.base.constants import NM2ANGSTROM
-from atlas_fit.models.differential_convolution import FWHM, DifferentialSpectralPSF
 
 from lmfit.models import GaussianModel, ConstantModel
 from lmfit import Model
@@ -118,9 +115,20 @@ BOX_WIDTH_ARCSEC = 141 * 0.33     # scan width E-W (141 steps x 0.33" slit width
 # from the continuum-gradient analysis in test_telescope_position.py
 IMPLIED_LATITUDE = {
     'm55': (-56.5, 1.5), 'm45': (-47.8, 0.5), 'm40': (-40.8, 1.0),
-    'm30': (-26.3, 5.5), '30': (38.3, 6.0), '40': (2.7, 8.5),
+    'm30': (-26.3, 5.5), '30': (41.1, 3.5), '40': (2.7, 8.5),
     '45': (43.0, 3.5), '55': (53.7, 2.5),
 }
+
+
+def nominal_latitude(position: str) -> float:
+    """
+    Nominal heliographic latitude [deg] implied by a position name: for
+    'disk_center' this is the sub-observer latitude B0 (the disk-center
+    pointing observes heliographic latitude B0, not 0, since the solar
+    rotation axis is tilted by B0 toward/away from the observer); for every
+    other position it's the latitude encoded in the name (e.g. 'm40' -> -40).
+    """
+    return B0_DEG if position == 'disk_center' else int(position.replace('m', '-'))
 
 
 def differential_rotation(lat_deg) -> u.Quantity:
@@ -188,8 +196,7 @@ def implied_position(position: str, result, ref_result,
     ref_centers = ref_centers or line_centers(ref_result)
     pairs = tuple(line_separations(ref_centers))
     fei_of_pair = {'fei_1-telluric_1': 'fei_1', 'fei_2-telluric_2': 'fei_2'}
-    nominal_lat = (0 if position == 'disk_center'
-                   else int(position.replace('m', '-')))
+    nominal_lat = nominal_latitude(position)
     seps = line_separations(centers or line_centers(result))
     seps_ref = line_separations(ref_centers)
     sep_err = separation_stderr(result)
@@ -267,19 +274,19 @@ def load_disk_center(remove_stray_light: bool = REMOVE_STRAY_LIGHT):
             'kind': kind, 'config': config}
 
 
-def fts_atlas(config, wl_min: float, wl_max: float):
+def load_flat_center_reference(remove_stray_light: bool = REMOVE_STRAY_LIGHT):
     """
-    Hamburg FTS disk-center atlas in [wl_min, wl_max] nm (atlas_factory 'fts',
-    as in test_remove_straylight.convolved_atlas).
-
-    Returns (wl [nm], full-res intensity, convolved intensity, mean continuum).
+    Load the L4 flat_center data to use as the Doppler-shift-free reference
+    spectrum (replaces the former Hamburg FTS atlas reference). Returns a
+    dict like the entries of load_all_positions.
     """
-    with open(config.cam.atlas_fit_config, 'r') as f:
-        atlas_cfg = yaml.safe_load(f)
-    atlas = atlas_factory('fts', wl_min, wl_max, conversion=NM2ANGSTROM)
-    fwhm = FWHM(atlas=atlas.fwhm, data=atlas_cfg['input']['fwhm'])
-    convolved = DifferentialSpectralPSF(fwhm).convolve(atlas.intensity, atlas.wl)
-    return atlas.wl, atlas.intensity, convolved, np.mean(atlas.continuum)
+    config, data, wl = load_flat_center()
+    levels = sl.get_stray_light_levels(config)
+    if remove_stray_light:
+        sl.remove_stray_light_from_set(data, levels, inplace=True)
+    print('  flat_center reference: loaded L4')
+    return {'data': data, 'wl': wl, 'roi': levels['spectral_roi'],
+            'kind': 'flat_center', 'config': config}
 
 
 def mean_spectrum(frame: np.ndarray, spec_roi: slice) -> np.ndarray:
@@ -543,7 +550,7 @@ def draw_sun_panel(ax, implied: dict, positions, pos_colors: dict):
     an error cross at the center) are drawn as the flat rectangles the
     observer always sees (as in measurement_procedure.py), each position in
     its own color. `implied` maps position -> dict from implied_position
-    (plus 'disk_center', which is referenced to the FTS atlas).
+    (plus 'disk_center', which is referenced to the flat_center reference).
     """
     # limb
     ax.add_patch(plt.Circle((0, 0), 1, fill=False, color='k', linewidth=1))
@@ -568,7 +575,7 @@ def draw_sun_panel(ax, implied: dict, positions, pos_colors: dict):
 
     # intended positions: slit boxes centered on the central meridian
     for position in positions:
-        lat_d = 0 if position == 'disk_center' else int(position.replace('m', '-'))
+        lat_d = nominal_latitude(position)
         e, n, _ = _view2d(0, lat_d)
         ax.add_patch(plt.Rectangle((e - w / 2, n - h / 2), w, h, fill=False,
                                    edgecolor=pos_colors[position],
@@ -602,13 +609,13 @@ def draw_sun_panel(ax, implied: dict, positions, pos_colors: dict):
                  '(lon offset, lat offset)')
 
 
-def plot_separation_summary(centers: dict, fts_centers: dict,
+def plot_separation_summary(centers: dict, flat_center_centers: dict,
                             results: dict = None,
                             reference: str = 'disk_center'):
     """
     Summary plot: for every position, the change of the line separations
     fei_1 - telluric_1 and fei_2 - telluric_2 relative to the same separation
-    at disk_center and relative to the FTS disk-center atlas, converted first
+    at disk_center and relative to the flat_center reference, converted first
     to a Doppler shift in km/s (v = dlambda/lambda * c, with lambda the fei_n
     center of the respective reference) and then to the implied longitude
     offset from the central meridian in degrees (implied_longitude_offset,
@@ -619,22 +626,22 @@ def plot_separation_summary(centers: dict, fts_centers: dict,
     positions.
 
     `reference` chooses the reference for the plotted curves and the implied
-    positions: 'disk_center', 'FTS', or 'both' (curves only; the Sun panel
-    then uses disk_center). For the Sun panel, `results` must map position ->
-    lmfit result and contain 'disk_center' and 'FTS'. The disk_center implied
-    position is always referenced to FTS (the only available reference).
+    positions: 'disk_center', 'flat_center', or 'both' (curves only; the Sun
+    panel then uses disk_center). For the Sun panel, `results` must map
+    position -> lmfit result and contain 'disk_center' and 'flat_center'. The
+    disk_center implied position is always referenced to flat_center (the
+    only available reference).
     """
     pairs = tuple(line_separations(centers['disk_center']))
     pair_colors = {'fei_1-telluric_1': 'tab:blue', 'fei_2-telluric_2': 'tab:green'}
     fei_of_pair = {'fei_1-telluric_1': 'fei_1', 'fei_2-telluric_2': 'fei_2'}
     ref_styles = {'disk_center': ('o-', 'disk_center'),
-                  'FTS': ('s--', 'FTS')}
-    refs = {'disk_center': centers['disk_center'], 'FTS': fts_centers}
+                  'flat_center': ('s--', 'flat_center')}
+    refs = {'disk_center': centers['disk_center'], 'flat_center': flat_center_centers}
     if reference != 'both':
         ref_styles = {reference: ref_styles[reference]}
 
-    def lat(position):
-        return 0 if position == 'disk_center' else int(position.replace('m', '-'))
+    lat = nominal_latitude
 
     positions = sorted((p for p in centers if p != 'disk_center'), key=lat)
     x = np.array([lat(p) for p in positions])
@@ -667,7 +674,7 @@ def plot_separation_summary(centers: dict, fts_centers: dict,
     ax.legend(fontsize='small', loc='center left')
 
     ax_sun = fig.add_subplot(gs[1])
-    if results is not None and {'disk_center', 'FTS'} <= set(results):
+    if results is not None and {'disk_center', 'flat_center'} <= set(results):
         # one color per |latitude| (m45 and 45 share a color), disk_center
         # first; intended boxes are drawn for all defined positions
         all_pos = (['disk_center'] +
@@ -677,15 +684,16 @@ def plot_separation_summary(centers: dict, fts_centers: dict,
         pos_colors = {p: lat_colors[abs(lat(p))] for p in all_pos}
         ref_name = 'disk_center' if reference == 'both' else reference
         ref_ctr = (centers['disk_center'] if ref_name == 'disk_center'
-                   else fts_centers)
+                   else flat_center_centers)
         implied = {p: implied_position(p, results[p], results[ref_name],
                                        centers=centers[p],
                                        ref_centers=ref_ctr)
                    for p in positions}
-        # disk_center can only be referenced to the FTS atlas
-        implied['disk_center'] = implied_position(
-            'disk_center', results['disk_center'], results['FTS'],
-            centers=centers['disk_center'], ref_centers=fts_centers)
+        # disk_center is assumed to have been pointed correctly, so its
+        # implied position is just the intended one (central meridian,
+        # latitude B0) rather than a Doppler-derived estimate
+        implied['disk_center'] = {'lon': 0.0, 'lon_err': np.nan,
+                                  'lat': B0_DEG, 'lat_err': np.nan}
         draw_sun_panel(ax_sun, implied, all_pos, pos_colors)
     else:
         ax_sun.set_title('Sun (no fit results provided)')
@@ -737,18 +745,22 @@ if __name__ == '__main__':
         plot_fit(p, fits[p][1], spectra[p], fits[p][0], dc,
                  refined=centers[p])
     #%%
-    # Fit the same 4-line model to the FTS atlas (convolved with the data
-    # FWHM, measured like the data) for the reference separations
-    atlas_wl_nm, _, atlas_conv, atlas_cont = fts_atlas(
-        disk_center['config'], dc_wl.min(), dc_wl.max())
-    fts_result, fts_x = fit_spectrum(atlas_wl_nm, atlas_conv / atlas_cont)
-    fts_centers = refine_centers(fts_x, atlas_conv / atlas_cont, fts_result)
-    print('FTS atlas centers [A] (parabola-refined):',
-          {n: round(fts_centers[n], 4) for n in LINE_NAMES})
+    # Fit the same 4-line model to the flat_center L4 data (replaces the
+    # former FTS-atlas reference) for the reference separations
+    flat_center_ref = load_flat_center_reference()
+    fc_spec = position_spectrum(flat_center_ref)
+    fc_wl = flat_center_ref['wl'][flat_center_ref['roi']]
+    fc_result, fc_x = fit_spectrum(fc_wl, fc_spec)
+    flat_center_centers = refine_centers(fc_x, fc_spec, fc_result)
+    print('flat_center reference centers [A] (parabola-refined):',
+          {n: round(flat_center_centers[n], 4) for n in LINE_NAMES})
+    plot_fit('flat_center', fc_x, fc_spec, fc_result,
+             refined=flat_center_centers)
     #%%
-    # Summary: fei - telluric separation per position vs disk_center and FTS,
-    # with the Sun panel. reference = 'disk_center' | 'FTS' | 'both'
-    results = {'disk_center': dc_result, 'FTS': fts_result}
+    # Summary: fei - telluric separation per position vs disk_center and
+    # flat_center, with the Sun panel.
+    # reference = 'disk_center' | 'flat_center' | 'both'
+    results = {'disk_center': dc_result, 'flat_center': fc_result}
     results.update({p: res for p, (res, _) in fits.items()})
-    plot_separation_summary(centers, fts_centers, results,
+    plot_separation_summary(centers, flat_center_centers, results,
                             reference='disk_center')

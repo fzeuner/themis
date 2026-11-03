@@ -51,8 +51,10 @@ from sunpy.coordinates import sun
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from themis.datasets.themis_datasets_2025 import get_config
+from themis.datasets.themis_datasets_2025 import get_config, _build_file_set
 from themis.core.cam_config import cam
+from themis.core import themis_io as tio
+from themis.core import themis_tools as tt
 
 # ----------------------------------------------------------------------------
 # Configuration
@@ -84,6 +86,25 @@ LINES = ('sr',)  # tuple: note the comma for a single line
 N_SCAN_SEGMENTS = 4  # scan positions are split into this many groups
 FIT_MARGIN = 10      # slit pixels excluded at both ends for the linear fit
 MODEL_LAT_TOLERANCE = 2.0  # deg, model also shown for latitude +- this value
+
+# The '30' position is noisy (few scans); these additional L4 scan sequences
+# were reduced at the same disk position and are pooled into the scan axis
+# (i.e. averaged over more scans) before the N_SCAN_SEGMENTS split.
+EXTRA_SEQUENCES = {'30': [51, 52]}
+
+# Continuum wavelength window [nm], matching SPLIT_CONFIGS[line]['continuum']
+# in scripts/process_formation_height_line_levels.py (used to build the
+# saved <position>_continuum.fits files), so the extra sequences are
+# extracted the same way.
+CONTINUUM_WL_RANGE_NM = {'sr': (460.716, 460.719)}
+
+# Scan/slit pixel crop applied before saving the <position>_continuum.fits
+# files, matching CROP_CONFIGS[line]['scan']/['slit'] in
+# scripts/process_formation_height_line_levels.py, so the extra sequences
+# end up with the same slit size (811 px, see SLIT_N_PIXELS) and can be
+# concatenated with the saved continuum along the scan axis.
+SCAN_CROP_PX = (0, -1)
+SLIT_CROP_PX = {'sr': (2, -55)}
 
 # Limb-darkening polynomial coefficients a_k of I(mu)/I_center = sum a_k mu^k
 # Formula from Neckel (2005), Solar Physics 229, 13:
@@ -184,6 +205,65 @@ def load_continuum(line: str, position: str):
         return np.asarray(hdul[0].data, dtype='float64'), hdul[0].header.get('DATE', 'unknown')
 
 
+def load_extra_continuum(line: str, sequence: int):
+    """
+    Build a continuum array (axes: wavelength, slit, scan) directly from the
+    L4 scan of an extra `sequence` number, the same way the saved
+    <position>_continuum.fits files are built in
+    scripts/process_formation_height_line_levels.py (SPLIT_CONFIGS[line]
+    ['continuum'] window, uml.I = mean of upper/lower, normalized by its own
+    continuum mean). Used to pool additional scans into a noisy position
+    (see EXTRA_SEQUENCES).
+    """
+    config = get_config(line=line, config_path=CONFIG_PATH,
+                        auto_discover_files=True, auto_create_dirs=False)
+    config.dataset['scan']['sequence'] = sequence
+    config.dataset['scan']['files'] = _build_file_set(
+        config.directories, config.dataset['scan'], config.data_types,
+        config.reduction_levels, config.cam, config.line,
+        yshift_calibration_date=config.yshift_calibration_date,
+    )
+    data, _ = tio.read_any_file(config, 'scan', status='l4')
+    wl, _ = tio.read_any_file(config, 'scan', status='wl')
+    wl = np.asarray(wl, dtype='float64')
+
+    map_indices = sorted(set(k[2] for k in data.keys()))
+    if len(map_indices) > 1:
+        raise ValueError(f"Multiple maps found for {line} sequence {sequence}: {map_indices}")
+    map_idx = map_indices[0]
+
+    intensity = tt.compute_polarimetry(data).uml.I[:, map_idx, :, :]  # (scan, slit, wavelength)
+
+    scan_lo, scan_hi = SCAN_CROP_PX
+    slit_lo, slit_hi = SLIT_CROP_PX[line]
+    intensity = intensity[scan_lo:scan_hi, slit_lo:slit_hi, :]
+
+    wl_min, wl_max = CONTINUUM_WL_RANGE_NM[line]
+    wl_idx = np.where((wl >= wl_min) & (wl <= wl_max))[0]
+    continuum = intensity[:, :, wl_idx]        # (scan, slit, wavelength_window)
+    continuum = continuum / continuum.mean()   # normalize to its own continuum mean
+    return np.transpose(continuum, (2, 1, 0))  # -> (wavelength, slit, scan)
+
+
+def load_combined_continuum(line: str, position: str):
+    """
+    Load the saved continuum of `position`, pooling in any EXTRA_SEQUENCES
+    along the scan axis (more scans averaged into each of the
+    N_SCAN_SEGMENTS groups, instead of replacing/averaging the position
+    data itself).
+    """
+    continuum, date = load_continuum(line, position)
+    extra_sequences = EXTRA_SEQUENCES.get(position, [])
+    for sequence in extra_sequences:
+        extra = load_extra_continuum(line, sequence)
+        continuum = np.concatenate([continuum, extra], axis=2)
+        print(f"  {line} {position}: pooled in sequence {sequence} "
+              f"({extra.shape[2]} extra scan positions)")
+    if extra_sequences:
+        print(f"  {line} {position}: {continuum.shape[2]} scan positions total")
+    return continuum, date
+
+
 def segment_profiles(continuum: np.ndarray, n_segments: int = N_SCAN_SEGMENTS):
     """
     Average the continuum over wavelength and over `n_segments` groups of scan
@@ -216,7 +296,7 @@ def analyze_line(line: str, b0: float, radius: float):
     results = {}
     for position, lat in sorted(POSITION_TO_LATITUDE.items(), key=lambda kv: kv[1]):
         try:
-            continuum, date = load_continuum(line, position)
+            continuum, date = load_combined_continuum(line, position)
         except FileNotFoundError:
             print(f"  {line} {position}: no continuum file, skipped")
             continue
