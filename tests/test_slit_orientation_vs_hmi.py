@@ -51,8 +51,8 @@ SUNSPOT_TY = 319 * u.arcsec
 # Rough sunspot center in the THEMIS continuum image (arcsec), measured in the
 # unrotated display frame: x = scan direction (slit width steps),
 # y = along the slit (camera pixels).
-THEMIS_SPOT_X = 14.65
-THEMIS_SPOT_Y = 43.35
+THEMIS_SPOT_X = 15
+THEMIS_SPOT_Y = 41
 
 # Number of 90 deg counter-clockwise rotations applied to the THEMIS image,
 # plus flips of the rotated display axes -- the raster/slit directions ran
@@ -204,7 +204,7 @@ def build_themis_display(continuum_img, config, rot_k=ROT_K, flip_x=FLIP_X, flip
     labels/steps, and the transformed spot position (all in arcsec).
     """
     step_scan = config.slit_width       # arcsec per scan step
-    step_slit = config.cam.pixel_scale  # arcsec per pixel along the slit
+    step_slit = 0.09#config.cam.pixel_scale  # arcsec per pixel along the slit
 
     # Display frame: rows = along slit, cols = scan direction
     display_img = continuum_img.T
